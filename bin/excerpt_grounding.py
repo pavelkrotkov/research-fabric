@@ -23,16 +23,37 @@ The accompanying self-test includes negative controls (deleted negation,
 changed number, reordered clause, invented sentence) which MUST be rejected;
 the gate refuses to run if any control passes.
 """
+
 from __future__ import annotations
-import html, json, pathlib, re, sys, unicodedata
+
+import html
+import json
+import pathlib
+import re
+import sys
+import unicodedata
 
 # Punctuation folding table: typographic variants -> ASCII equivalents.
 _PUNCT = {
-    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
-    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
-    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
-    "\u2014": "-", "\u2015": "-", "\u2212": "-",
-    "\u00a0": " ", "\u2007": " ", "\u202f": " ", "\u2009": " ",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2015": "-",
+    "\u2212": "-",
+    "\u00a0": " ",
+    "\u2007": " ",
+    "\u202f": " ",
+    "\u2009": " ",
     "\u2026": "...",
 }
 
@@ -107,9 +128,8 @@ def _grounded_across_marker(needle: str, hay: str) -> bool:
     while start != -1:
         gap_from = start + len(head)
         found = hay.find(tail, gap_from)
-        if found != -1 and found - gap_from <= _MAX_ELISION:
-            if _ELIDABLE.match(hay[gap_from:found]):
-                return True
+        if found != -1 and found - gap_from <= _MAX_ELISION and _ELIDABLE.match(hay[gap_from:found]):
+            return True
         start = hay.find(head, start + 1)
     return False
 
@@ -149,7 +169,7 @@ _SRC = (
 # marker separating two adjacent passages of the same speech.
 _SRC_MARKER = (
     "<p>[294] \"but be content to eat the food which immortal Circe gave.' </p> "
-    "<p>[302] \"So I spoke; and they straightway swore that they would not "
+    '<p>[302] "So I spoke; and they straightway swore that they would not '
     "slay the cattle. But when they had sworn, I moored the ship in the harbour. "
     "Then a long while afterward the wind blew from the south, and my men "
     "began to plot mischief among themselves in secret.</p>"
@@ -221,13 +241,12 @@ def _self_test() -> None:
 def main() -> int:
     _self_test()
     if len(sys.argv) < 2:
-        print(json.dumps({"self_test": "PASS", "accepted": len(_MUST_ACCEPT),
-                          "rejected": len(_MUST_REJECT)}))
+        print(json.dumps({"self_test": "PASS", "accepted": len(_MUST_ACCEPT), "rejected": len(_MUST_REJECT)}))
         return 0
     field_root = pathlib.Path(sys.argv[1]).resolve()
     evidence = field_root / "evidence"
-    sources = [json.loads(l) for l in (evidence / "sources.jsonl").read_text().splitlines() if l.strip()]
-    claims = [json.loads(l) for l in (evidence / "claims.jsonl").read_text().splitlines() if l.strip()]
+    sources = [json.loads(line) for line in (evidence / "sources.jsonl").read_text().splitlines() if line.strip()]
+    claims = [json.loads(line) for line in (evidence / "claims.jsonl").read_text().splitlines() if line.strip()]
     texts = {}
     for row in sources:
         snap = field_root / row["snapshot"]
@@ -236,8 +255,7 @@ def main() -> int:
     if failures:
         for cid, why in failures:
             print(f"{cid}: {why}", file=sys.stderr)
-        print(json.dumps({"claims": len(claims), "ungrounded": len(failures), "valid": False}),
-              file=sys.stderr)
+        print(json.dumps({"claims": len(claims), "ungrounded": len(failures), "valid": False}), file=sys.stderr)
         return 1
     print(json.dumps({"self_test": "PASS", "claims": len(claims), "ungrounded": 0, "valid": True}))
     return 0

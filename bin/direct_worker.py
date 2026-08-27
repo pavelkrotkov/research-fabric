@@ -5,11 +5,20 @@ chat completion with robust 429/5xx backoff + parse retry, and writes a
 validated claim packet. No tmux, no screen scraping, no Codex quota.
 
 Run with the hermes venv python (has the openai SDK):
-  /home/pavel/.hermes/hermes-agent/venv/bin/python direct_worker.py <run_root> <source_dir> <book> <source_filename> [theme]
+  <hermes-venv>/bin/python direct_worker.py <run_root> <source_dir> \
+     <book> <source_filename> [theme]
 Writes <run_root>/evidence/worker-book-<N>.json
 """
-import sys, os, json, re, time, html, pathlib
+
+import html
+import json
+import os
+import pathlib
+import re
+import sys
+import time
 from html.parser import HTMLParser
+
 from openai import OpenAI
 
 BOOK = int(sys.argv[3])
@@ -33,30 +42,42 @@ CLIENT = OpenAI(base_url=BASE, api_key=KEY)
 
 class Text(HTMLParser):
     def __init__(self):
-        super().__init__(); self.parts = []; self.skip = 0
+        super().__init__()
+        self.parts = []
+        self.skip = 0
+
     def handle_starttag(self, t, a):
-        if t in ("script", "style"): self.skip += 1
-        if t in ("br", "p", "div", "li"): self.parts.append("\n")
+        if t in ("script", "style"):
+            self.skip += 1
+        if t in ("br", "p", "div", "li"):
+            self.parts.append("\n")
+
     def handle_endtag(self, t):
-        if t in ("script", "style"): self.skip = max(0, self.skip - 1)
+        if t in ("script", "style"):
+            self.skip = max(0, self.skip - 1)
+
     def handle_data(self, d):
-        if not self.skip: self.parts.append(d)
+        if not self.skip:
+            self.parts.append(d)
 
 
 def html_to_text(raw):
-    tp = Text(); tp.feed(raw)
+    tp = Text()
+    tp.feed(raw)
     text = html.unescape("".join(tp.parts))
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text)
     idx = text.find("Homer")
-    if idx > 0: text = text[idx:]
+    if idx > 0:
+        text = text[idx:]
     return text
 
 
 def extract_json(text):
     t = (text or "").strip()
     if t.startswith("```"):
-        t = re.sub(r"^```(?:json)?\s*", "", t); t = t.rsplit("```", 1)[0]
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = t.rsplit("```", 1)[0]
     t = t.strip()
     # ox-alpha may add prose around the object; locate the claims opener.
     i = t.find('{"claims"')
@@ -72,7 +93,9 @@ def defects(parsed):
     if not parsed["claims"]:
         return ["claims list empty"]
     for i, c in enumerate(parsed["claims"], 1):
-        if not isinstance(c, dict): out.append(f"claim {i} not object"); continue
+        if not isinstance(c, dict):
+            out.append(f"claim {i} not object")
+            continue
         for f in ("claim", "source_file", "locator", "excerpt"):
             v = c.get(f)
             if not isinstance(v, str) or not v.strip() or v.strip() in ("...", "\u2026", "TBD"):
@@ -83,13 +106,15 @@ def defects(parsed):
 def call_model(prompt):
     for a in range(1, 16):
         try:
-            r = CLIENT.chat.completions.create(model=MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0, max_tokens=20000)
+            r = CLIENT.chat.completions.create(
+                model=MODEL, messages=[{"role": "user", "content": prompt}], temperature=0, max_tokens=20000
+            )
             return r.choices[0].message.content
         except Exception as e:
             s = str(e)
-            transient = "429" in s or "500" in s or "502" in s or "503" in s or "504" in s or "Provider returned error" in s
+            transient = (
+                "429" in s or "500" in s or "502" in s or "503" in s or "504" in s or "Provider returned error" in s
+            )
             if not transient:
                 raise
             time.sleep(min(60, 6 * a))
@@ -115,7 +140,14 @@ def main():
     parsed = None
     last_err = None
     for attempt in range(1, 4):
-        text = call_model(prompt + (f"\n\nNOTE: previous reply was invalid ({last_err}). Return only the JSON object." if attempt > 1 else ""))
+        text = call_model(
+            prompt
+            + (
+                f"\n\nNOTE: previous reply was invalid ({last_err}). Return only the JSON object."
+                if attempt > 1
+                else ""
+            )
+        )
         try:
             parsed = extract_json(text)
             d = defects(parsed)
@@ -126,10 +158,13 @@ def main():
             last_err = f"unparseable: {str(e)[:80]}"
     if parsed is None or defects(parsed):
         raise RuntimeError(f"no valid packet after 3 model attempts: {last_err}")
-    pkt_dir = RUN / "evidence"; pkt_dir.mkdir(parents=True, exist_ok=True)
-    (pkt_dir / f"worker-book-{BOOK}.json").write_text(json.dumps(
-        {"worker": f"book-{BOOK}", "attempts": [{"attempt": 1, "ok": True}], "parsed": parsed},
-        indent=2) + "\n", encoding="utf-8")
+    pkt_dir = RUN / "evidence"
+    pkt_dir.mkdir(parents=True, exist_ok=True)
+    (pkt_dir / f"worker-book-{BOOK}.json").write_text(
+        json.dumps({"worker": f"book-{BOOK}", "attempts": [{"attempt": 1, "ok": True}], "parsed": parsed}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
     print(f"OK book-{BOOK}: {len(parsed['claims'])} claims")
 
 

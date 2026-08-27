@@ -16,6 +16,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.2",
+    "pip-audit>=2.10.1",
     "pytest>=8.0",
     "ruff>=0.9",
 ]
@@ -31,10 +33,12 @@ addopts = "-q"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-# Lint/format scope: the portable, CI-testable units. bin/ and workflows/ are
-# host-bound deployment scripts (hardcoded controller paths, cao_workflow
-# import, model-API worker) and are not part of the public test surface.
-extend-include = ["src/**/*.py", "tests/**/*.py", "tools/wiki/*.py"]
+# Lint/format scope: the portable, CI-testable units. workflows/ is the
+# host-bound CAO orchestrator (imports cao_workflow, only present on install)
+# and is intentionally excluded from lint scope but validated by py_compile
+# in tests. Everything a contributor can run is linted.
+extend-include = ["src/**/*.py", "tests/**/*.py", "tools/wiki/*.py", "bin/*.py"]
+extend-exclude = ["workflows/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM", "C4"]

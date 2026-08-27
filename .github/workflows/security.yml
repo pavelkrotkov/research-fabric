@@ -61,5 +61,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run zizmor
-        run: uvx zizmor .
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install and Run zizmor
+        run: |
+          pipx install zizmor==0.10.0
+          zizmor .github/workflows

@@ -9,8 +9,20 @@ Reads the project spec (projects/<name>.yaml) for the source mapping, manifest
 path and commit template, mirroring the engine. Usage:
   dryrun_publication.py <run_root> <field_repo> [--branch B] [--project P]
 """
+
 from __future__ import annotations
-import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tempfile, yaml
+
+import argparse
+import hashlib
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import yaml
 
 FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
@@ -62,20 +74,21 @@ def main() -> int:
     field_root = workdir / "kb"
     print(f"[dryrun] disposable clone: {field_root}")
     subprocess.run(
-        ["git", "clone", "--quiet", "--no-hardlinks",
-         "--branch", args.branch,
-         args.field_repo, str(field_root)],
-        check=True)
+        ["git", "clone", "--quiet", "--no-hardlinks", "--branch", args.branch, args.field_repo, str(field_root)],
+        check=True,
+    )
     subprocess.run(["git", "-C", str(field_root), "config", "user.email", "dryrun@local"], check=True)
     subprocess.run(["git", "-C", str(field_root), "config", "user.name", "dryrun"], check=True)
 
     # --- manifest resolution + digest re-verification -----------------------
     run_manifest = run_root / "source-manifest.jsonl"
-    canonical = pathlib.Path(__file__).resolve().parents[1] / "corpora" / project["corpus_dir"] / project["manifest_path"]
+    canonical = (
+        pathlib.Path(__file__).resolve().parents[1] / "corpora" / project["corpus_dir"] / project["manifest_path"]
+    )
     manifest_path = run_manifest if run_manifest.exists() else canonical
     assert manifest_path.exists(), f"no manifest at {manifest_path}"
     print(f"[dryrun] manifest: {manifest_path}")
-    manifest_rows = [json.loads(l) for l in manifest_path.read_text().splitlines() if l.strip()]
+    manifest_rows = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
     by_name = {pathlib.Path(r["snapshot"]).name: r for r in manifest_rows}
     for src in source_files:
         row = by_name.get(src.name)
@@ -109,20 +122,27 @@ def main() -> int:
                 continue
             note = NOTE_BY_SOURCE[source_id]
             assert (field_root / note).is_file(), f"note target missing: {note}"
-            claims.append({
-                "claim_id": f"c-{sid}-{idx}", "claim": claim.get("claim", ""), "note": note,
-                "source_ids": [source_id], "locator": claim.get("locator", ""),
-                "excerpt": claim.get("excerpt", ""), "stance": claim.get("stance", "supports"),
-                "confidence": claim.get("confidence", 0.0),
-                "independence_group": claim.get("independence_group", sid),
-                "verified_at": "pilot-verifier-pass",
-            })
+            claims.append(
+                {
+                    "claim_id": f"c-{sid}-{idx}",
+                    "claim": claim.get("claim", ""),
+                    "note": note,
+                    "source_ids": [source_id],
+                    "locator": claim.get("locator", ""),
+                    "excerpt": claim.get("excerpt", ""),
+                    "stance": claim.get("stance", "supports"),
+                    "confidence": claim.get("confidence", 0.0),
+                    "independence_group": claim.get("independence_group", sid),
+                    "verified_at": "pilot-verifier-pass",
+                }
+            )
     if dropped:
         print(f"[dryrun] DROPPED {len(dropped)} claim(s): {json.dumps(dropped, indent=2)}")
         return 1
     assert claims, "no claims materialized"
     (field_root / "evidence" / "claims.jsonl").write_text(
-        "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n")
+        "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n"
+    )
     notes_used = sorted({c["note"] for c in claims})
     print(f"[dryrun] claims materialized: {len(claims)}")
     print(f"[dryrun] distinct note targets: {notes_used}")
@@ -139,23 +159,31 @@ def main() -> int:
     (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n")
 
     # --- deterministic provenance gate --------------------------------------
-    prov = subprocess.run([sys.executable, str(FABRIC / "bin" / "provenance_validate.py"), str(field_root)],
-                          text=True, capture_output=True)
+    prov = subprocess.run(
+        [sys.executable, str(FABRIC / "bin" / "provenance_validate.py"), str(field_root)],
+        text=True,
+        capture_output=True,
+    )
     print(f"[dryrun] provenance rc={prov.returncode} out={prov.stdout.strip()} err={prov.stderr.strip()}")
     if prov.returncode != 0:
         return 1
 
     # --- deterministic excerpt-grounding gate -------------------------------
-    ground = subprocess.run([sys.executable, str(FABRIC / "bin" / "excerpt_grounding.py"), str(field_root)],
-                            text=True, capture_output=True)
+    ground = subprocess.run(
+        [sys.executable, str(FABRIC / "bin" / "excerpt_grounding.py"), str(field_root)], text=True, capture_output=True
+    )
     print(f"[dryrun] grounding rc={ground.returncode} out={ground.stdout.strip()} err={ground.stderr.strip()}")
     if ground.returncode != 0:
         return 1
 
     # --- diff generation ----------------------------------------------------
     subprocess.run(["git", "-C", str(field_root), "add", "-N", "--", "evidence"], check=True)
-    diff = subprocess.run(["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
-                          check=True, text=True, capture_output=True).stdout
+    diff = subprocess.run(
+        ["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
     if not diff.strip():
         print("[dryrun] FAIL: empty diff")
         return 1
@@ -167,6 +195,7 @@ def main() -> int:
     # --- excerpt grounding (mirrors the deterministic gate) -----------------
     sys.path.insert(0, str(FABRIC / "bin"))
     import excerpt_grounding
+
     snaps = {p.name: p.read_text(encoding="utf-8", errors="replace") for p in snap_dest.iterdir()}
     file_by_source = {v: k for k, v in SOURCE_BY_FILE.items()}
     misses = []
@@ -181,12 +210,24 @@ def main() -> int:
     # --- commit -------------------------------------------------------------
     subprocess.run(["git", "-C", str(field_root), "add", "--", "evidence"], check=True)
     subprocess.run(["git", "-C", str(field_root), "diff", "--cached", "--check"], check=True)
-    subprocess.run(["git", "-C", str(field_root), "commit", "-q", "-m",
-                    f"Research: {args.project} evidence run ({len(claims)} claims)"], check=True)
-    head = subprocess.run(["git", "-C", str(field_root), "rev-parse", "HEAD"],
-                          capture_output=True, text=True, check=True).stdout.strip()
-    status = subprocess.run(["git", "-C", str(field_root), "status", "--porcelain"],
-                            capture_output=True, text=True, check=True).stdout
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(field_root),
+            "commit",
+            "-q",
+            "-m",
+            f"Research: {args.project} evidence run ({len(claims)} claims)",
+        ],
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(field_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    status = subprocess.run(
+        ["git", "-C", str(field_root), "status", "--porcelain"], capture_output=True, text=True, check=True
+    ).stdout
     print(f"[dryrun] commit={head[:12]} clean={not status.strip()}")
     if status.strip():
         print(f"[dryrun] residual dirty state:\n{status}")

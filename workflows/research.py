@@ -1,17 +1,28 @@
 """Project-driven evidence pipeline: plan -> workers -> verify -> OpenKB -> gates -> ledger -> commit."""
+
 from __future__ import annotations
-import concurrent.futures, hashlib, json, os, pathlib, re, shutil, subprocess, sys
-import yaml
+
+import concurrent.futures
+import hashlib
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
 from cao_workflow import ShimError, emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.core import (  # noqa: E402
     book_task_from_project,
     extract_json,
-    load_project as load_project_spec,
     normalize_packet,
     packet_defects,
     source_mappings,
+)
+from research_fabric.core import (
+    load_project as load_project_spec,
 )
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
@@ -59,12 +70,14 @@ def sha256_of(path: pathlib.Path) -> str | None:
 def collect_provenance() -> dict:
     """Record the exact toolchain + inputs that produced this run, so a KB
     commit is reproducible (and auditable) without the original session."""
+
     def _toolver(cmd):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip()
             return out.splitlines()[0] if out else None
         except Exception:
             return None
+
     proj_path = PROJECTS_DIR / f"{project_name}.yaml"
     corpus_manifest = RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]
     return {
@@ -83,16 +96,18 @@ def collect_provenance() -> dict:
 
 def _git_sha(root: pathlib.Path) -> str | None:
     try:
-        return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
     except Exception:
         return None
 
 
 def _git_tag(root: pathlib.Path) -> str | None:
     try:
-        out = subprocess.run(["git", "-C", str(root), "describe", "--tags", "--exact-match"],
-                             capture_output=True, text=True, check=True).stdout.strip()
+        out = subprocess.run(
+            ["git", "-C", str(root), "describe", "--tags", "--exact-match"], capture_output=True, text=True, check=True
+        ).stdout.strip()
         return out or None
     except Exception:
         return None
@@ -128,9 +143,7 @@ ACCEPTANCE = project.get("acceptance") or {}
 # source-manifest.jsonl fall back to the canonical copy derived from the
 # project spec; digests are re-verified against the run's actual source bytes
 # before anything is published.
-CANONICAL_SOURCE_MANIFEST = (
-    RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]
-).resolve()
+CANONICAL_SOURCE_MANIFEST = (RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]).resolve()
 BOOK_RE = re.compile(project["snapshot_pattern"])
 
 source_files = sorted(source_dir.glob("*.html"))
@@ -148,12 +161,16 @@ if reuse_evidence_dir:
     write_json(run_root / "plan.json", {"reused": True, "source": str(reuse_evidence_dir)})
 else:
     plan = run_step(
-        provider="claude_code", agent="research-supervisor",
-        prompt=(f"Question: {question}\nSource snapshots: {', '.join(map(str, source_files))}\n"
-                "Return JSON only with keys research_questions, worker_assignments, allowed_source_types, "
-                "source_budget, acceptance_criteria, ambiguities, stop_conditions. Keep assignments bounded and non-overlapping. "
-                "Do not modify files."),
-        step_id="plan", timeout=300,
+        provider="claude_code",
+        agent="research-supervisor",
+        prompt=(
+            f"Question: {question}\nSource snapshots: {', '.join(map(str, source_files))}\n"
+            "Return JSON only with keys research_questions, worker_assignments, allowed_source_types, "
+            "source_budget, acceptance_criteria, ambiguities, stop_conditions. Keep assignments bounded and non-overlapping. "
+            "Do not modify files."
+        ),
+        step_id="plan",
+        timeout=300,
     )
     plan_text = output_text(plan)
     write_json(run_root / "plan.json", {"raw": plan_text, "parsed": extract_json(plan_text)})
@@ -180,15 +197,17 @@ def collect(spec):
     # template so SOURCE_BY_FILE can map the worker's emitted source_file back.
     book_label = project.get("book_label_template", "{n}.html").format(n=b)
     if not (source_dir / book_label).is_file():
-        book_label = next((p.name for p in source_files if (m := BOOK_RE.search(p.name))
-                           and int(m.group(1)) == b), book_label)
+        book_label = next(
+            (p.name for p in source_files if (m := BOOK_RE.search(p.name)) and int(m.group(1)) == b), book_label
+        )
     attempts = []
     for attempt in range(1, 3):
         try:
             proc = subprocess.run(
-                [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir),
-                 str(b), book_label, theme or ""],
-                capture_output=True, text=True, timeout=1500,
+                [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
+                capture_output=True,
+                text=True,
+                timeout=1500,
             )
             packet = packet_dir / f"worker-{sid}.json"
             if proc.returncode != 0 or not packet.exists():
@@ -197,8 +216,7 @@ def collect(spec):
                 )
             parsed = json.loads(packet.read_text(encoding="utf-8")).get("parsed")
             defects = packet_defects(parsed, ACCEPTANCE)
-            attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:],
-                             "defects": defects})
+            attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
             if not defects:
                 return sid, proc.stdout.strip(), None
         except ShimError as exc:
@@ -207,11 +225,11 @@ def collect(spec):
             attempts.append({"attempt": attempt, "error": str(exc)[:400]})
         except Exception as exc:
             attempts.append({"attempt": attempt, "error": f"unexpected: {exc}"})
-    write_json(packet_dir / f"worker-{sid}.json",
-               {"worker": sid, "attempts": attempts, "parsed": None})
+    write_json(packet_dir / f"worker-{sid}.json", {"worker": sid, "attempts": attempts, "parsed": None})
     last = attempts[-1] if attempts else {}
     reason = last.get("error") or "; ".join(last.get("defects", [])) or "unknown"
     return sid, "", f"direct worker returned no valid evidence packet after attempts ({reason})"
+
 
 # The host has two very old cores; concurrent Codex tmux shell creation
 # reliably exceeds CAO's 60s shell-init gate. Keep both independent tasks,
@@ -277,8 +295,7 @@ def read_verdict(text):
     resolve" with an empty defect list, which is an unusable verdict in either
     direction and must be retried, not believed.
     """
-    matches = list(re.finditer(r"^\s*VERDICT:\s*(PASS|FAIL)\b[ \t]*(.*)$",
-                               text or "", flags=re.I | re.M))
+    matches = list(re.finditer(r"^\s*VERDICT:\s*(PASS|FAIL)\b[ \t]*(.*)$", text or "", flags=re.I | re.M))
     if matches:
         verdict = matches[-1].group(1).upper()
         detail = matches[-1].group(2).strip().lstrip("-–—:").strip()
@@ -292,7 +309,7 @@ def read_verdict(text):
     # does not accept "Verified clean" when a FAIL token is also present (the
     # publication6 contradiction that motivated the strict contract).
     lowered = (text or "").lower()
-    positive = ("verified sound" in lowered or "verified clean" in lowered)
+    positive = "verified sound" in lowered or "verified clean" in lowered
     negative = re.search(r"\bfail(?:ed|ure)?\b|blocking defect|\bdefect(?:s)?\b|not verified|unable to verify", lowered)
     if positive and not negative:
         return "PASS", "implicit positive attestation"
@@ -304,8 +321,11 @@ def run_verifier(step_id, prompt, run_root, artifact):
     last_text = ""
     for attempt in (1, 2):
         handle = run_step(
-            provider="claude_code", agent="research-verifier",
-            prompt=prompt, step_id=f"{step_id}-attempt-{attempt}", timeout=900,
+            provider="claude_code",
+            agent="research-verifier",
+            prompt=prompt,
+            step_id=f"{step_id}-attempt-{attempt}",
+            timeout=900,
         )
         last_text = output_text(handle)
         (run_root / "verification" / artifact).write_text(last_text, encoding="utf-8")
@@ -313,7 +333,8 @@ def run_verifier(step_id, prompt, run_root, artifact):
         if verdict is not None:
             return verdict, detail, last_text
         (run_root / "verification" / f"{artifact}.malformed-attempt-{attempt}.txt").write_text(
-            last_text, encoding="utf-8")
+            last_text, encoding="utf-8"
+        )
     return None, "verifier gave no usable verdict after two attempts", last_text
 
 
@@ -324,11 +345,14 @@ verification_manifests = []
 for packet_path in sorted(packet_dir.glob("worker-*.json")):
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
     manifest_path = verification_dir / f"verification-input-{packet_path.stem}.json"
-    write_json(manifest_path, {
-        "question": question,
-        "source_files": [str(p) for p in source_files],
-        "packet": normalize_packet(packet.get("parsed") or {}),
-    })
+    write_json(
+        manifest_path,
+        {
+            "question": question,
+            "source_files": [str(p) for p in source_files],
+            "packet": normalize_packet(packet.get("parsed") or {}),
+        },
+    )
     verification_manifests.append(manifest_path)
 # The LLM verifier is ADVISORY from here on. Its verdict is recorded but does
 # not gate: across repeated runs it emitted a bare FAIL followed by "Verified
@@ -341,19 +365,31 @@ for packet_path in sorted(packet_dir.glob("worker-*.json")):
 try:
     advisory_verdict, advisory_detail, pre_text = run_verifier(
         "verify-sources",
-        (f"Read these exact verification manifests: {', '.join(map(str, verification_manifests))}. "
-         "Each contains one complete evidence packet and the source-file paths. Read the named source files "
-         "from the manifests to verify exact excerpts. Acceptance criteria: every substantive claim must have "
-         "an exact excerpt and locator; check contradictions, independence, wording strength, and coverage. "
-         "Do not use directory listings or require a generated diff.\n\n" + VERDICT_CONTRACT),
-        run_root, "pre-ingest.txt")
-    write_json(run_root / "verification" / "advisory-verifier.json", {
-        "verdict": advisory_verdict, "detail": advisory_detail,
-    })
+        (
+            f"Read these exact verification manifests: {', '.join(map(str, verification_manifests))}. "
+            "Each contains one complete evidence packet and the source-file paths. Read the named source files "
+            "from the manifests to verify exact excerpts. Acceptance criteria: every substantive claim must have "
+            "an exact excerpt and locator; check contradictions, independence, wording strength, and coverage. "
+            "Do not use directory listings or require a generated diff.\n\n" + VERDICT_CONTRACT
+        ),
+        run_root,
+        "pre-ingest.txt",
+    )
+    write_json(
+        run_root / "verification" / "advisory-verifier.json",
+        {
+            "verdict": advisory_verdict,
+            "detail": advisory_detail,
+        },
+    )
 except Exception as exc:  # advisory only: record and continue to deterministic gates
-    write_json(run_root / "verification" / "advisory-verifier.json", {
-        "verdict": None, "detail": f"verifier errored: {exc}",
-    })
+    write_json(
+        run_root / "verification" / "advisory-verifier.json",
+        {
+            "verdict": None,
+            "detail": f"verifier errored: {exc}",
+        },
+    )
     pre_text = ""
 
 # Resolve the immutable source manifest and re-verify it against the actual
@@ -365,11 +401,7 @@ manifest_path = run_manifest if run_manifest.exists() else CANONICAL_SOURCE_MANI
 if not manifest_path.exists():
     set_state(run_root, "FAILED", failure="missing source manifest")
     raise RuntimeError(f"no source manifest available (looked at {run_manifest} and {CANONICAL_SOURCE_MANIFEST})")
-manifest_rows = [
-    json.loads(line)
-    for line in manifest_path.read_text(encoding="utf-8").splitlines()
-    if line.strip()
-]
+manifest_rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 by_name = {pathlib.Path(row["snapshot"]).name: row for row in manifest_rows}
 for src in source_files:
     row = by_name.get(src.name)
@@ -421,18 +453,20 @@ for sid, _, _ in results:
         if not (field_root / note).is_file():
             set_state(run_root, "FAILED", failure="claim note target missing")
             raise RuntimeError(f"claim note target does not exist: {note}")
-        claims.append({
-            "claim_id": f"c-{sid}-{idx}",
-            "claim": claim.get("claim", ""),
-            "note": note,
-            "source_ids": [source_id],
-            "locator": claim.get("locator", ""),
-            "excerpt": claim.get("excerpt", ""),
-            "stance": claim.get("stance", "supports"),
-            "confidence": claim.get("confidence", 0.0),
-            "independence_group": claim.get("independence_group", sid),
-            "verified_at": "pilot-verifier-pass",
-        })
+        claims.append(
+            {
+                "claim_id": f"c-{sid}-{idx}",
+                "claim": claim.get("claim", ""),
+                "note": note,
+                "source_ids": [source_id],
+                "locator": claim.get("locator", ""),
+                "excerpt": claim.get("excerpt", ""),
+                "stance": claim.get("stance", "supports"),
+                "confidence": claim.get("confidence", 0.0),
+                "independence_group": claim.get("independence_group", sid),
+                "verified_at": "pilot-verifier-pass",
+            }
+        )
 if dropped:
     write_json(run_root / "verification" / "dropped-claims.json", dropped)
     set_state(run_root, "FAILED", failure="claim with unmappable source file")
@@ -441,7 +475,8 @@ if not claims:
     set_state(run_root, "FAILED", failure="no claims materialized")
     raise RuntimeError("no claims survived materialization")
 (field_root / "evidence" / "claims.jsonl").write_text(
-    "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n", encoding="utf-8")
+    "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n", encoding="utf-8"
+)
 manifest_out = []
 present_names = {p.name for p in source_files}
 for row in manifest_rows:
@@ -460,9 +495,12 @@ for row in manifest_rows:
 # defect fails closed without spending a verifier step.
 provenance = subprocess.run(
     [sys.executable, "/home/pavel/research-fabric/bin/provenance_validate.py", str(field_root)],
-    text=True, capture_output=True)
+    text=True,
+    capture_output=True,
+)
 (run_root / "verification" / "provenance.txt").write_text(
-    (provenance.stdout or "") + (provenance.stderr or ""), encoding="utf-8")
+    (provenance.stdout or "") + (provenance.stderr or ""), encoding="utf-8"
+)
 if provenance.returncode != 0:
     set_state(run_root, "FAILED", failure="provenance validation failed")
     raise RuntimeError(f"provenance validation failed: {provenance.stderr.strip()}")
@@ -474,9 +512,12 @@ if provenance.returncode != 0:
 # fabricated or drifted quotation fails closed regardless of agent judgement.
 grounding = subprocess.run(
     [sys.executable, "/home/pavel/research-fabric/bin/excerpt_grounding.py", str(field_root)],
-    text=True, capture_output=True)
+    text=True,
+    capture_output=True,
+)
 (run_root / "verification" / "excerpt-grounding.txt").write_text(
-    (grounding.stdout or "") + (grounding.stderr or ""), encoding="utf-8")
+    (grounding.stdout or "") + (grounding.stderr or ""), encoding="utf-8"
+)
 if grounding.returncode != 0:
     set_state(run_root, "FAILED", failure="excerpt grounding failed")
     raise RuntimeError(f"excerpt grounding failed: {grounding.stderr.strip()}")
@@ -487,8 +528,12 @@ set_state(run_root, "VERIFYING_DIFF")
 # silently omits every newly created evidence file and the verifier would
 # attest an empty change set.
 subprocess.run(["git", "-C", str(field_root), "add", "-N", "--", "evidence"], check=True)
-diff = subprocess.run(["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
-                      check=True, text=True, capture_output=True).stdout
+diff = subprocess.run(
+    ["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
+    check=True,
+    text=True,
+    capture_output=True,
+).stdout
 diff_path = run_root / "verification" / "generated-diff.patch"
 diff_path.write_text(diff, encoding="utf-8")
 if not diff.strip():
@@ -502,20 +547,32 @@ if not diff.strip():
 try:
     post_verdict, post_detail, post_text = run_verifier(
         "verify-diff",
-        (f"Question: {question}\n"
-         f"Read the claims ledger {field_root / 'evidence' / 'claims.jsonl'}, the source ledger "
-         f"{field_root / 'evidence' / 'sources.jsonl'}, and the approved snapshots in {snap_dest}. "
-         "For every claim verify that its excerpt appears in the snapshot named by its source_ids, that the "
-         "locator is consistent, and that the stance matches the excerpt. Confirm each source_id in the claims "
-         "ledger exists in the source ledger.\n\n" + VERDICT_CONTRACT),
-        run_root, "post-compile.txt")
-    write_json(run_root / "verification" / "advisory-post-verifier.json", {
-        "verdict": post_verdict, "detail": post_detail,
-    })
+        (
+            f"Question: {question}\n"
+            f"Read the claims ledger {field_root / 'evidence' / 'claims.jsonl'}, the source ledger "
+            f"{field_root / 'evidence' / 'sources.jsonl'}, and the approved snapshots in {snap_dest}. "
+            "For every claim verify that its excerpt appears in the snapshot named by its source_ids, that the "
+            "locator is consistent, and that the stance matches the excerpt. Confirm each source_id in the claims "
+            "ledger exists in the source ledger.\n\n" + VERDICT_CONTRACT
+        ),
+        run_root,
+        "post-compile.txt",
+    )
+    write_json(
+        run_root / "verification" / "advisory-post-verifier.json",
+        {
+            "verdict": post_verdict,
+            "detail": post_detail,
+        },
+    )
 except Exception as exc:
-    write_json(run_root / "verification" / "advisory-post-verifier.json", {
-        "verdict": None, "detail": f"verifier errored: {exc}",
-    })
+    write_json(
+        run_root / "verification" / "advisory-post-verifier.json",
+        {
+            "verdict": None,
+            "detail": f"verifier errored: {exc}",
+        },
+    )
     post_text = ""
 
 set_state(run_root, "READY_FOR_REVIEW")
@@ -526,19 +583,34 @@ set_state(run_root, "READY_FOR_REVIEW")
 subprocess.run(["git", "-C", str(field_root), "add", "-A"], check=True)
 subprocess.run(["git", "-C", str(field_root), "diff", "--cached", "--check"], check=True)
 _cmt = project.get("commit_message") or "{project} evidence run ({claims} claims, Books {books}; run {run})"
-commit_msg = _cmt.format(project=project_name.capitalize(), claims=len(claims),
-                         books="-".join(map(str, (BOOKS[0], BOOKS[-1]))), run=run_root.name)
+commit_msg = _cmt.format(
+    project=project_name.capitalize(),
+    claims=len(claims),
+    books="-".join(map(str, (BOOKS[0], BOOKS[-1]))),
+    run=run_root.name,
+)
 subprocess.run(["git", "-C", str(field_root), "commit", "-m", commit_msg], check=True, text=True)
-head = subprocess.run(["git", "-C", str(field_root), "rev-parse", "HEAD"],
-                      capture_output=True, text=True, check=True).stdout.strip()
-branch = subprocess.run(["git", "-C", str(field_root), "branch", "--show-current"],
-                        capture_output=True, text=True, check=True).stdout.strip()
-residual = subprocess.run(["git", "-C", str(field_root), "status", "--porcelain"],
-                          capture_output=True, text=True, check=True).stdout.strip()
+head = subprocess.run(
+    ["git", "-C", str(field_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+).stdout.strip()
+branch = subprocess.run(
+    ["git", "-C", str(field_root), "branch", "--show-current"], capture_output=True, text=True, check=True
+).stdout.strip()
+residual = subprocess.run(
+    ["git", "-C", str(field_root), "status", "--porcelain"], capture_output=True, text=True, check=True
+).stdout.strip()
 if residual:
     set_state(run_root, "FAILED", failure="worktree dirty after commit")
     raise RuntimeError(f"worktree not clean after commit:\n{residual}")
-write_json(run_root / "run.json", {"run_id": run_root.name, "state": "READY_FOR_REVIEW",
-                                   "branch": branch, "commit": head, "claims": len(claims),
-                                   "provenance": collect_provenance()})
+write_json(
+    run_root / "run.json",
+    {
+        "run_id": run_root.name,
+        "state": "READY_FOR_REVIEW",
+        "branch": branch,
+        "commit": head,
+        "claims": len(claims),
+        "provenance": collect_provenance(),
+    },
+)
 emit_output({"state": "READY_FOR_REVIEW", "claims": len(claims), "branch": branch, "commit": head})
