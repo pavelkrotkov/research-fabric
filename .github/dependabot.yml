@@ -8,6 +8,11 @@ updates:
       github-actions:
         patterns:
           - "*"
+        # Only minor/patch action bumps are grouped (and auto-mergeable).
+        # Major action upgrades arrive as separate review-only PRs.
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "pip"
     directory: "/"
@@ -17,3 +22,8 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+        # Only minor/patch dependency bumps are grouped (and auto-mergeable).
+        # Major upgrades arrive as separate review-only PRs.
+        update-types:
+          - "minor"
+          - "patch"

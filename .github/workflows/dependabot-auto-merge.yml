@@ -52,16 +52,17 @@ jobs:
             title="$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" \
               --json title --jq '.title')"
 
-            # Bump title format: "Bump <pkg> from A.B.C to D.E.F ..."
-            if ! from_to="$(echo "$title" | grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+ to [0-9]+\.[0-9]+\.[0-9]+')"; then
-              echo "PR #$pr_number has no parseable version bump ('$title'); skipping for review."
-              continue
-            fi
-            old_major="$(echo "$from_to" | awk '{print $2}' | cut -d. -f1)"
-            new_major="$(echo "$from_to" | awk '{print $4}' | cut -d. -f1)"
-            if [ "$new_major" -gt "$old_major" ]; then
-              echo "PR #$pr_number is a major version bump ($from_to); requires review. Skipping."
-              continue
+            # Safety net: dependabot.yml groups only minor/patch updates, so
+            # grouped PRs ("Bump the X group with N updates") are auto-mergable
+            # by construction. Skip only an explicit single-package MAJOR bump,
+            # which deserves review even though Dependabot would not group it.
+            if from_to="$(echo "$title" | grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+ to [0-9]+\.[0-9]+\.[0-9]+')"; then
+              old_major="$(echo "$from_to" | awk '{print $2}' | cut -d. -f1)"
+              new_major="$(echo "$from_to" | awk '{print $4}' | cut -d. -f1)"
+              if [ "$new_major" -gt "$old_major" ]; then
+                echo "PR #$pr_number is a major bump ($from_to); requires review. Skipping."
+                continue
+              fi
             fi
 
             head_sha="$(jq -r '.headRefOid' <<<"$info")"

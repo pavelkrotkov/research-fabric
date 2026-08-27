@@ -19,11 +19,19 @@ SRC = pathlib.Path(sys.argv[2])
 REPORT = pathlib.Path(sys.argv[3])
 
 _key = os.environ.get("OPENROUTER_API_KEY")
+if not _key and (
+    envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
+):
+    fallback = pathlib.Path(envfile)
+    if fallback.is_file():
+        for line in fallback.read_text(errors="replace").splitlines():
+            if line.startswith("OPENROUTER_API_KEY="):
+                _key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
 if not _key:
-    for line in pathlib.Path.home().joinpath(".hermes", ".env").read_text().splitlines():
-        if line.startswith("OPENROUTER_API_KEY="):
-            _key = line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
+    raise RuntimeError(
+        "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
+    )
 CLIENT = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_key)
 
 

@@ -27,14 +27,20 @@ SRC = pathlib.Path(sys.argv[2])
 SOURCE_FILE = sys.argv[4] if len(sys.argv) > 4 else f"odyssey-book-{BOOK}.html"
 THEME = sys.argv[5] if len(sys.argv) > 5 else None
 KEY = os.environ.get("OPENROUTER_API_KEY")
+if not KEY and (envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")):
+    # Authoritative: OPENROUTER_API_KEY env var. Fallback file is the Hermes
+    # home .env, or a user-configured RESEARCH_FABRIC_ENV_FILE. Never printed
+    # or persisted. Missing file -> clean key-unavailable error, no traceback.
+    fallback = pathlib.Path(envfile)
+    if fallback.is_file():
+        for line in fallback.read_text(errors="replace").splitlines():
+            if line.startswith("OPENROUTER_API_KEY="):
+                KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
 if not KEY:
-    # Load from the main Hermes home's .env (never printed or persisted).
-    for line in pathlib.Path.home().joinpath(".hermes", ".env").read_text().splitlines():
-        if line.startswith("OPENROUTER_API_KEY="):
-            KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
-if not KEY:
-    raise RuntimeError("OPENROUTER_API_KEY not available")
+    raise RuntimeError(
+        "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
+    )
 MODEL = "stealth/ox-alpha"
 BASE = "https://openrouter.ai/api/v1"
 CLIENT = OpenAI(base_url=BASE, api_key=KEY)
