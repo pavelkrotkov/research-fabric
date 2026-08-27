@@ -1,0 +1,13 @@
+fields:
+  classics:
+    root: /home/pavel/zettelkasten/classics
+    description: Greek and Roman literature, mythology, history, and reception
+  energy-storage:
+    root: /home/pavel/zettelkasten/energy-storage
+    description: Battery chemistry, manufacturing, economics, and vehicle applications
+  quantitative-finance:
+    root: /home/pavel/zettelkasten/quantitative-finance
+    description: Pricing, risk, numerical methods, market data, and research infrastructure
+  home-systems:
+    root: /home/pavel/zettelkasten/home-systems
+    description: Residential mechanical, electrical, security, automation, and maintenance systems

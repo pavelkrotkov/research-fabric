@@ -1,0 +1,15 @@
+# per-run state and generated evidence (regenerable from corpora/)
+runs/
+worktrees/
+*.pyc
+__pycache__/
+.DS_Store
+
+# superseded iterations kept on disk, never in git
+archive/
+
+# transient runtime state
+.active-final-run
+
+# deployed wiki instance lives in ~/services, not in the pipeline repo
+services/

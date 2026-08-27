@@ -1,0 +1,72 @@
+# Project spec: Odyssey
+#
+# A "project" describes how one corpus/research job is interpreted by the
+# engine. This is distinct from fields.yaml, which answers "which broad
+# knowledge base does a question belong to?" (classics, quant-finance, ...).
+# A project spec answers "how should this corpus be read into claims + notes?"
+# Two classics projects (e.g. Odyssey and Aeneid) share a field but have
+# different project specs.
+
+project: odyssey
+field: classics
+
+# --- Corpus ---
+# Directory within `corpora/` holding the immutable source snapshots.
+corpus_dir: odyssey
+# Glob matched against snapshot filenames; the group(1) capture is the
+# per-book number used for book IDs, notes, and source IDs.
+snapshot_pattern: ^odyssey-book-(\d+)\.html$
+# Path (relative to the corpus dir) of the sha256 manifest. Falls back to the
+# canonical in-repo copy at this same relative path.
+manifest_path: source-manifest.jsonl
+
+# --- Source-ID mapping ---
+# How each snapshot's stable source id is derived from its book number.
+# {n} is the captured book number.
+source_id_template: s-odyssey-{n}-theoi
+# How the note that collects a book's claims is derived.
+# {n} is the book number. Relative to the KB (field) root.
+note_template: wiki/summaries/odyssey-book-{n}.md
+# Human label used in worker prompts / ledger.
+book_label_template: odyssey-book-{n}.html
+
+# --- Worker brief ---
+# One book, themed to its narrative arc. This is the claim-extraction brief
+# sent to the direct-API worker.
+themes:
+  1: "the council of the gods, Telemachus coming of age, the suitors' arrogance, and hospitality abused"
+  2: "Telemachus' assembly, public order vs. lawless suitors, and his departure"
+  3: "Nestor's hospitality, piety and sacrifice, and the legacy of the returns from Troy"
+  4: "Menelaus and Helen's hospitality, the Proteus episode, and news of Odysseus"
+  5: "Calypso's island, divine commands, Odysseus' raft, shipwreck, and endurance vs. despair"
+  6: "Nausicaa, Phaeacian hospitality, and the naked stranger's entrance as a test of xenia"
+  7: "Arete and Alcinous, the Phaeacian city, and supplication"
+  8: "the Phaeacian games, Demodocus' songs, and Odysseus weeping as concealed identity"
+  9: "the Cyclops episode: cunning (metis) vs. brute force, the guest-host code violated, and hubris"
+  10: "Aeolus' winds, the Laestrygonians, and Circe's magic and transformation"
+  11: "the nekyia: the underworld, prophecy of Tiresias, encounters with the dead, and knowledge bought through descent"
+  # Note: MVP had no explicit themes for books 12-14 (they used the default
+  # theme). Kept absent here to remain behavior-preserving; add them later
+  # if analysis of books 12-14 warrants it.
+  15: "Telemachus' return, omens, and the swineherd's backstory"
+  16: "father and son reunion, recognition delayed and granted, and plotting against the suitors"
+  17: "Odysseus enters Ithaca as a beggar, the disloyalty of the household, and Argos the dog"
+  18: "the beggar Irus, abuse of the disguised king, and Penelope's appearance before the suitors"
+  19: "Penelope and the stranger conversing by night, the scar of recognition, and deferred revelation"
+  20: "ominous dreams and portents, Odysseus' self-restraint, and the eve of reckoning"
+  21: "the bow contest: the test of identity, strength, and legitimacy of rule"
+  22: "the slaughter of the suitors: justice, vengeance, and the restoration of order"
+  23: "Penelope's test of the bed, recognition completed, and the reunion of husband and wife"
+  24: "the underworld suitors, Laertes' recognition, the families' vendetta, and divine imposition of peace"
+# Fallback theme for any book without an explicit entry.
+default_theme: "its central events and their moral and theological significance"
+
+# --- Acceptance rules (project-specific) ---
+acceptance:
+  min_claims_per_book: 5
+  max_claims_per_book: 30
+  require_verbatim_excerpts: true   # enforced by bin/excerpt_grounding.py
+  require_provenance_manifest: true # enforced by bin/provenance_validate.py
+
+# --- Commit message ---
+commit_message: "Research: full {project} evidence run ({claims} claims, Books {books}; run {run})"

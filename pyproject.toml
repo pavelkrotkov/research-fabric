@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-fabric"
+version = "0.2.0"
+description = "Deterministic, fail-closed research-evidence pipeline (project-driven engine + gates)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "PyYAML>=6.0",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_fabric"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# Lint/format scope: the portable, CI-testable units. bin/ and workflows/ are
+# host-bound deployment scripts (hardcoded controller paths, cao_workflow
+# import, model-API worker) and are not part of the public test surface.
+extend-include = ["src/**/*.py", "tests/**/*.py", "tools/wiki/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "C4"]
+# The engine intentionally logs statements; the gates are CLI scripts.
+ignore = [
+    "B023",  # closure-in-loop false positives in generator comprehensions
+    "B905",  # zip without strict is fine
+]
+
+[tool.ruff.format]
+quote-style = "double"
