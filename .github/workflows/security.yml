@@ -54,7 +54,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write # required to upload SARIF if needed, but we can also just run it and print findings
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

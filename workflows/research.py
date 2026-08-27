@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -177,8 +178,9 @@ else:
 
 set_state(run_root, "RESEARCHING")
 
-DIRECT_WORKER = "/home/pavel/research-fabric/bin/direct_worker.py"
-DIRECT_WORKER_PY = "/home/pavel/.hermes/hermes-agent/venv/bin/python"
+DIRECT_WORKER = str(RESEARCH_ROOT / "bin" / "direct_worker.py")
+DIRECT_WORKER_PY = os.environ.get(
+    "RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
 
 
 def collect(spec):
@@ -494,7 +496,7 @@ for row in manifest_rows:
 # Deterministic provenance gate: run before any agent judgement so a structural
 # defect fails closed without spending a verifier step.
 provenance = subprocess.run(
-    [sys.executable, "/home/pavel/research-fabric/bin/provenance_validate.py", str(field_root)],
+    [sys.executable, str(RESEARCH_ROOT / "bin" / "provenance_validate.py"), str(field_root)],
     text=True,
     capture_output=True,
 )
@@ -511,7 +513,7 @@ if provenance.returncode != 0:
 # sources through a terminal UI. This runs before the agent verifier so a
 # fabricated or drifted quotation fails closed regardless of agent judgement.
 grounding = subprocess.run(
-    [sys.executable, "/home/pavel/research-fabric/bin/excerpt_grounding.py", str(field_root)],
+    [sys.executable, str(RESEARCH_ROOT / "bin" / "excerpt_grounding.py"), str(field_root)],
     text=True,
     capture_output=True,
 )

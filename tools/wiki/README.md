@@ -11,9 +11,9 @@ into an MkDocs static site:
 
 ```bash
 python3 tools/wiki/build_wiki.py \
-  --vault /home/pavel/zettelkasten/classics/wiki \
-  --site  "Odyssey Research KB" \
-  --desc  "Evidence-backed knowledge base covering all 24 books of the Odyssey" \
+  --vault /path/to/<field>/wiki \
+  --site  "Research KB" \
+  --desc  "Evidence-backed knowledge base" \
   --docs  /path/to/instance/site-src/docs
 # then: (cd /path/to/instance/site-src && mkdocs build)
 ```

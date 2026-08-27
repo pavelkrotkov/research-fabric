@@ -3,7 +3,7 @@
 > **Public engine.** This repo contains the deterministic, fail-closed research-evidence
 > pipeline and its gates. The **immutable corpora** (source snapshots + sha256 manifests) are
 > not published here — they live in the private `research-fabric-corpora` repo, because some
-> corpora (e.g. the Odyssey `litandhist` podcast transcripts) are under copyright. Point the
+> corpora (e.g. the Lit & Hist podcast **transcripts**) are under copyright. Point the
 > engine at a corpus with `RESEARCH_FABRIC_ROOT` / `RESEARCH_FABRIC_PROJECTS` /
 > `RESEARCH_FABRIC_CORPUS`, or run it with a corpus you supply.
 
@@ -115,12 +115,19 @@ The KB commit message ends with `run <run-id>` (e.g. "…Books 1-24; run
 20260825T154543Z-odyssey-full-publication7"), closing the loop from a claim in
 the KB back to the exact code, spec, corpus bytes, and model that produced it.
 
-## Host assumptions (controller box)
+## Host requirements (abstracted)
 
-- Python venv with `openai` SDK: `~/.hermes/hermes-agent/venv`
-- `openkb` (pinned 0.4.5) and `cao` (CAO fork, pinned 2.4.1 + lifecycle patches)
-- `OPENROUTER_API_KEY` in `~/.hermes/.env`
-- 2-core host: collection is deliberately serialized (`max_workers=1`)
+The full pipeline needs an installed environment. Exact controller paths and
+config are documented in `research-fabric-corpora` (private); here are the
+portable requirements:
+
+- A Python venv with the `openai` SDK (the direct-API worker — see ADR-0003).
+- `openkb` (pinned 0.4.5) and `cao` (CAO 2.4.1 + lifecycle patches), plus a
+  local CAO server, for the orchestration layer.
+- An OpenRouter-capable API key for the worker model (set via the
+  `OPENROUTER_API_KEY` environment variable; the worker falls back to
+  reading it from the host's Hermes env file if unset).
+- 2-core host: collection is deliberately serialized (`max_workers=1`).
 
 ## Architecture decisions
 
@@ -148,7 +155,7 @@ gates.
 | **Quality gate** | None — lint is advisory, surfaces `contested:` / `confidence: low` for humans | Fail-closed — grounding + provenance gates block publication outright |
 | **Contradictions** | Note both positions, mark `contested: true`, human resolves | Structured `conflicts` array in the packet, surfaced in the ledger |
 | **Synthesis** | Agent writes interlinked `[[wikilink]]` pages (2+ outbound links, 200-line split) | OpenKB compiles pages from the verified claim ledger; synthesis downstream of verification |
-| **Reproducibility** | Re-ingesting the same source may yield different pages | Same manifest → re-run → same gates, same result |
+| **Reproducibility** | Re-ingesting the same source may yield different pages | Same inputs → same deterministic gates; generated claims may differ, but accepted claims must satisfy identical grounding/provenance rules |
 | **Failure semantics** | None — agent judgment + human review | One deterministic terminal status per run |
 | **Scale model** | One agent session, personal KB (index nav rules for ~100–200 pages) | Batch runs, per-book workers, valid-packet carry-forward, per-claim repair loop |
 | **Trust statement** | *"The agent compiles; the human curates."* | *"The agent proposes; the byte-level verifier disposes."* |
