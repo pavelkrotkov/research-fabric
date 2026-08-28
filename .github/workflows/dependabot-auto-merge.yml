@@ -52,18 +52,21 @@ jobs:
             title="$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" \
               --json title --jq '.title')"
 
-            # Safety net: dependabot.yml groups only minor/patch updates, so
-            # grouped PRs ("Bump the X group with N updates") are auto-mergable
-            # by construction. Skip only an explicit single-package MAJOR bump,
-            # which deserves review even though Dependabot would not group it.
-            if from_to="$(echo "$title" | grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+ to [0-9]+\.[0-9]+\.[0-9]+')"; then
-              old_major="$(echo "$from_to" | awk '{print $2}' | cut -d. -f1)"
-              new_major="$(echo "$from_to" | awk '{print $4}' | cut -d. -f1)"
-              if [ "$new_major" -gt "$old_major" ]; then
-                echo "PR #$pr_number is a major bump ($from_to); requires review. Skipping."
+            # Fail closed: only auto-merge PRs we can positively identify as
+            # belonging to a known minor/patch group. dependabot.yml declares
+            # those groups as minor/patch-only (update-types), so membership is
+            # a sufficient safety guarantee. Every other PR — a single-package
+            # major bump, a CalVer or major-only version, an ungrouped bump —
+            # is skipped for human review rather than reverse-engineered.
+            case "$title" in
+              *"Bump the github-actions group"*|*"Bump the python-dependencies group"*)
+                : # known minor/patch group: eligible after CI
+                ;;
+              *)
+                echo "PR #$pr_number is not a known minor/patch group ('$title'); requires review. Skipping."
                 continue
-              fi
-            fi
+                ;;
+            esac
 
             head_sha="$(jq -r '.headRefOid' <<<"$info")"
             if [ "$(jq -r '.isDraft' <<<"$info")" = "true" ] \
