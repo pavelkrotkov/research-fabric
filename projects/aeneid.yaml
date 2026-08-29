@@ -55,10 +55,23 @@ claim_types:
   - reception
 
 # --- Worker brief ---
-# Book I: Juno's wrath and the storm, Venus' intervention, and the landing in
-# Carthage.
+# Each book's theme reflects what a Classics scholar would foreground as that
+# book's governing episodes, characters, and ideas. The worker anchors claims
+# to verbatim Latin and selects a best-English witness for each; the theme only
+# guides WHERE attention goes (coverage), never what counts as evidence.
 themes:
-  1: "Juno's wrath and the storm, Aeneas as the man of fate (pietas), Venus and the intervention of the gods, and the landing at Carthage"
+  1: "Juno's wrath and the storm, Aeneas as the man of fate (pietas), Venus and the intervention of the gods, the prophecy of Rome, and the landing at Carthage"
+  2: "The fall of Troy through Aeneas's eyes: the wooden horse, Laocoon, the night of fire, the deaths of Priam and Creusa, and Aeneas' flight carrying Anchises and the Penates"
+  3: "The wanderings of Aeneas: the land of the Cicones, Polydorus and the bleeding bush, Andromache and Helenus at Buthrotum, the Harpies, the Scylla/Charybdis passage, and the death of Anchises"
+  4: "The tragedy of Dido: the consuming passion kindled by Venus and Cupid, the cave-marriage, Fama (Rumor), Mercury's rebuke, Aeneas' departure, and Dido's curse and funeral pyre"
+  5: "The funeral games of Anchises in Sicily: the ship-race, foot-race, boxing, and archery contests, the burning of the ships by the Trojan women, the founding of Acesta, and the farewell to Palinurus"
+  6: "The descent to the underworld: the Sibyl of Cumae and the Golden Bough, Charon and Cerberus, the judgment of the dead, the Elysian Fields, Anchises' prophecy of Rome's future, and the gate of ivory"
+  7: "The arrival in Latium and the outbreak of war: Latium and king Latinus, the oracle and the marriage-portent of Lavinia, Juno's fury, Allecto's goading of Amata and Turnus, the embassy to Evander's allies, and the catalogue of Italian forces"
+  8: "The alliance with Evander and the future of Rome: the site of Pallanteum and the Ara Maxima (Hercules), the shield of Aeneas with its vision of Roman history, and the Etruscan alliance against Turnus"
+  9: "The siege of the Trojan camp: Turnus' assault and the firing of the ships, the wall-breaching, and the tragic night-raid of Nisus and Euryalus"
+  10: "The great battle on the plain: the council of the gods, Aeneas' return with the Etruscans, the slaying of Pallas by Turnus and Aeneas' vengeance, and the fates of Lausus and Mezentius"
+  11: "The cost of war: the truce and funeral of Pallas, the burial of the fallen, the council at Latium, and the death of the warrior-maiden Camilla with her place in the Italian resistance"
+  12: "The final duel of Aeneas and Turnus: the breaking of the truce, the wounding and healing of Aeneas, Juno's reconciliation with Jupiter, and the death of Turnus that closes the epic"
 # Fallback theme for any book without an explicit entry.
 default_theme: "the central events and their moral and theological significance"
 
