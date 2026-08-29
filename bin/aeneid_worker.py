@@ -54,20 +54,45 @@ while i < len(sys.argv):
     else:
         i += 1
 
-KEY = os.environ.get("OPENROUTER_API_KEY")
-if not KEY and (envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")):
+# --- Provider/model selection (user-binding constraint) ---
+# Allowed worker models, in order of preference:
+#   1. NVIDIA hosted deepseek-v4-flash (provider: nvidia)
+#   2. deepseek/deepseek-v4-flash-0731 via OpenRouter
+#   3. z-ai/glm-5.3-flash via OpenRouter
+# Never any other model (explicitly banned: glm-4.5-air, stealth/ox-alpha).
+NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY")
+if not NVIDIA_KEY and (
+    envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
+):
     fallback = pathlib.Path(envfile)
     if fallback.is_file():
         for line in fallback.read_text(errors="replace").splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+            if line.startswith("NVIDIA_API_KEY="):
+                NVIDIA_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
                 break
-if not KEY:
-    raise RuntimeError(
-        "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
-    )
-MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "z-ai/glm-4.5-air")
-CLIENT = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=KEY, timeout=300)
+
+MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "deepseek-ai/deepseek-v4-flash-0731")
+PROVIDER = os.environ.get("RESEARCH_FABRIC_WORKER_PROVIDER", "")  # nvidia | openrouter | ""
+if not PROVIDER:
+    PROVIDER = "nvidia" if NVIDIA_KEY else "openrouter"
+if PROVIDER == "nvidia":
+    BASE_URL = "https://integrate.api.nvidia.com/v1"
+    API_KEY = NVIDIA_KEY
+else:
+    BASE_URL = "https://openrouter.ai/api/v1"
+    API_KEY = os.environ.get("OPENROUTER_API_KEY")
+    if not API_KEY and (
+        envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
+    ):
+        fallback = pathlib.Path(envfile)
+        if fallback.is_file():
+            for line in fallback.read_text(errors="replace").splitlines():
+                if line.startswith("OPENROUTER_API_KEY="):
+                    API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+if not API_KEY:
+    raise RuntimeError(f"no API key for provider {PROVIDER}: set NVIDIA_API_KEY or OPENROUTER_API_KEY")
+CLIENT = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=300)
 CLAIM_TYPES = [
     "textual",
     "linguistic",
