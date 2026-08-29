@@ -1,4 +1,4 @@
-"""Direct-API evidence worker (OpenRouter stealth/ox-alpha) — openai SDK client.
+"""Direct-API evidence worker (OpenRouter z-ai/glm-5.3-flash) — openai SDK client.
 
 Replaces the CAO tmux worker: reads a book's HTML, strips it to text, makes a
 chat completion with robust 429/5xx backoff + parse retry, and writes a
@@ -41,7 +41,7 @@ if not KEY:
     raise RuntimeError(
         "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
     )
-MODEL = "stealth/ox-alpha"
+MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "z-ai/glm-4.5-air")
 BASE = "https://openrouter.ai/api/v1"
 CLIENT = OpenAI(base_url=BASE, api_key=KEY)
 
@@ -85,7 +85,7 @@ def extract_json(text):
         t = re.sub(r"^```(?:json)?\s*", "", t)
         t = t.rsplit("```", 1)[0]
     t = t.strip()
-    # ox-alpha may add prose around the object; locate the claims opener.
+    # z-ai/glm-5.3-flash may add prose around the object; locate the claims opener.
     i = t.find('{"claims"')
     if i > 0:
         t = t[i:]

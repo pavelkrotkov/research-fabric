@@ -62,6 +62,18 @@ def fold(text: str) -> str:
     """Normalize a string for transcription-tolerant comparison."""
     text = html.unescape(text)
     text = unicodedata.normalize("NFKC", text)
+    # Case is not semantically significant to a quotation's fidelity: a worker
+    # may render a line-initial capital as lowercase (or vice versa), so fold
+    # to lowercase before comparing. (Semantic corruption -- deleted negation,
+    # altered number, invented words -- survives lowercasing and is still
+    # rejected; lowercasing cannot mask those.)
+    text = text.lower()
+    # Drop HTML tags entirely, replacing each with whitespace. Markup such as
+    # <BR> (verse/paragraph line breaks) is a rendered whitespace break, not
+    # prose, so a faithful multi-line quotation spanning several <BR>s is a
+    # contiguous quote, not an elision. (Odyssey/Theoi text had no per-line
+    # tags; Aeneid Latin snapshots are <BR>-separated per verse.)
+    text = re.sub(r"<[^>]*>", " ", text)
     text = "".join(_PUNCT.get(ch, ch) for ch in text)
     # Collapse all whitespace, then remove whitespace adjacent to dashes so
     # "hands -fishing", "hands- fishing" and "hands-fishing" compare equal.

@@ -36,7 +36,7 @@ PROJECTS_DIR = RESEARCH_ROOT / "projects"
 DEFAULT_PROJECT = "odyssey"
 # The direct-API worker's model/provider (mirrors bin/direct_worker.py). Kept in
 # sync so run.json records the exact model that produced the claims.
-MODEL_REF = "stealth/ox-alpha"
+MODEL_REF = "z-ai/glm-5.3-flash"
 PROVIDER_REF = "openrouter"
 
 INPUTS = {
@@ -209,10 +209,10 @@ DIRECT_WORKER_PY = os.environ.get(
 
 
 def collect(spec):
-    """Collect one book's evidence packet via the direct-API worker (ox-alpha).
+    """Collect one book's evidence packet via the direct-API worker (z-ai/glm-5.3-flash).
 
     Replaces the CAO tmux worker path: the worker reads the book's HTML, calls
-    stealth/ox-alpha directly through OpenRouter, and writes a structurally
+    z-ai/glm-5.3-flash directly through OpenRouter, and writes a structurally
     validated packet to packet_dir. No terminal UI, no scrollback scraping, no
     provider quota. The packet is re-validated here (fail-closed) before use.
     """

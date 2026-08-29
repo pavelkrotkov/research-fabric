@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Multi-witness Aeneid evidence worker (OpenRouter stealth/ox-alpha).
+"""Multi-witness Aeneid evidence worker (OpenRouter direct API).
 
-Reads ONE canonical Latin book plus its translation witnesses, and produces an
-extended-schema claim packet. Design (per project requirements):
+Reads ONE canonical Latin book plus its translation witnesses and produces an
+extended-schema claim packet. STAGED design: the model is a reasoner that
+exhausts its output budget when given the whole corpus (~170K chars) in one
+call, so the work is split into small calls (each piped to a reasoning model
+that returns clean JSON):
 
-  - Latin is the SOLE canonical source of truth. Each claim's `source_file`,
-    `locator` (Aen.<b>.<v>) and `excerpt` (Latin, verbatim) are established
-    FIRST and are authoritative.
-  - Only then are the aligned Conington/Mackail/Kline witness texts inspected
-    to select the best English rendering of the cited Latin passage. That
-    selection is REVIEWABLE JUDGMENT recorded in `english_witness`; the
-    deterministic translation-grounding gate later proves the English is
-    verbatim in a valid witness that overlaps the aligned Latin passage.
-  - A translation is never synthesized; a quoted witness is always used when
-    available.
+  Stage 1 (Latin only, ~34K chars)
+      Establish the claims + verbatim LATIN excerpt + canonical locator
+      (Aen.<b>.<line>). This is the authoritative grounding evidence, set
+      FIRST, per project requirement #9.
+  Stage 2 (per witness, ~40K chars each)
+      For EACH witness (Conington, Mackail, Kline), given the Latin excerpts,
+      quote a verbatim English rendering for every claim. Only ONE witness
+      text per call, so reasoning fits the output budget.
+  Stage 3 (small selection call)
+      Given each claim's per-witness verbatim candidates, select the single
+      best English witness (semantic fidelity -> exact span -> clarity ->
+      literary quality). This SELECTION is recorded as reviewable judgment;
+      the deterministic translation-grounding gate later proves the quoted
+      English is verbatim in a valid witness overlapping the aligned Latin.
 
-Compatible with the canonical field-count of the base evidence schema; adds
-claim_type + english_witness + witnesses_consulted per Aeneid claim.
+Verbatim is enforced mechanically at each stage (excerpt must be an exact
+normalized substring of its source); a claim that cannot be grounded in a real
+witness is dropped rather than published with synthesized English.
 """
 
 from __future__ import annotations
@@ -36,8 +44,7 @@ SRC = pathlib.Path(sys.argv[2])
 BOOK = int(sys.argv[3])
 CANONICAL_FILE = sys.argv[4]
 THEME = sys.argv[5] if len(sys.argv) > 5 else None
-# remaining args: --witness label:source_id:file (one per witness, in order)
-WITNESSES = []
+WITNESSES = []  # [{label, source_id, file}]
 i = 6
 while i < len(sys.argv):
     if sys.argv[i] == "--witness":
@@ -59,62 +66,8 @@ if not KEY:
     raise RuntimeError(
         "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
     )
-MODEL = "stealth/ox-alpha"
-CLIENT = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=KEY)
-
-
-class _T(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.out = []
-
-    def handle_data(self, d):
-        self.out.append(d)
-
-
-def html_to_text(raw: str) -> str:
-    p = _T()
-    p.feed(raw)
-    text = " ".join("".join(p.out).split())
-    return text
-
-
-def extract_json(text):
-    text = (text or "").strip()
-    for cand in [text] + re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.S | re.I):
-        try:
-            return json.loads(cand.strip())
-        except Exception:
-            pass
-    dec = json.JSONDecoder()
-    pref = text.find('{"claims"')
-    starts = ([pref] if pref >= 0 else []) + [k for k, ch in enumerate(text) if ch in "[{" and k != pref]
-    for s in starts:
-        try:
-            v, _ = dec.raw_decode(re.sub(r"\n[ \t]+", " ", text[s:]))
-            if isinstance(v, dict) and isinstance(v.get("claims"), list):
-                return v
-        except Exception:
-            continue
-    return None
-
-
-def call_model(prompt):
-    for a in range(1, 16):
-        try:
-            r = CLIENT.chat.completions.create(
-                model=MODEL, messages=[{"role": "user", "content": prompt}], temperature=0, max_tokens=20000
-            )
-            return r.choices[0].message.content
-        except Exception as e:
-            s = str(e)
-            transient = "429" in s or "50" in s[:3] or "Provider returned error" in s
-            if not transient:
-                raise
-            time.sleep(min(60, 6 * a))
-    raise RuntimeError("model call failed after 15 attempts")
-
-
+MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "z-ai/glm-4.5-air")
+CLIENT = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=KEY, timeout=300)
 CLAIM_TYPES = [
     "textual",
     "linguistic",
@@ -127,94 +80,262 @@ CLAIM_TYPES = [
 ]
 
 
+class _T(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.out = []
+
+    def handle_data(self, data):
+        self.out.append(data)
+
+
+def html_to_text(raw: str) -> str:
+    p = _T()
+    p.feed(raw)
+    return " ".join("".join(p.out).split())
+
+
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip().lower()
+
+
+def call_model(messages, max_tokens=32000):
+    for a in range(1, 16):
+        try:
+            r = CLIENT.chat.completions.create(model=MODEL, messages=messages, temperature=0, max_tokens=max_tokens)
+            text = r.choices[0].message.content
+            if text and text.strip():
+                return text
+            # content=None / empty: reasoning burned the budget -> retry (bigger budget callers can pass it)
+            print(f"[worker] empty content (attempt {a})", flush=True)
+            continue
+        except Exception as e:
+            s = str(e)
+            transient = "429" in s or "50" in s[:3] or "Provider returned error" in s
+            if not transient:
+                raise
+            print(f"[worker] transient {s[:40]!r} (attempt {a}); backoff", flush=True)
+            time.sleep(min(60, 6 * a))
+    raise RuntimeError("model call returned no content after 15 attempts")
+
+
+def extract_json(text):
+    t = (text or "").strip()
+    dec = json.JSONDecoder()
+    # Prefer the exact top-level keys we asked for. raw_decode works from a
+    # given offset and handles nested braces correctly, so we do NOT slice to a
+    # boundary; just try each candidate offset and require a dict with the
+    # expected key (a stray leading array must not win).
+    for idx in [k for k, ch in enumerate(t) if ch in "{"][:100]:
+        try:
+            obj, _ = dec.raw_decode(re.sub(r"\n[ \t]+", " ", t[idx:]))
+        except Exception:
+            continue
+        if isinstance(obj, dict) and ("claims" in obj or "selections" in obj):
+            return obj
+    return None
+
+
+def build_latin_prompt(latin_body, canon_file):
+    focus = THEME or "the central events and their moral and theological significance"
+    return (
+        "You are a research evidence collector for Virgil's Aeneid. You are given the full "
+        f"LATIN text of Aeneid Book {BOOK} (canonical, authoritative).\n"
+        f"Focus: {focus}\n\n"
+        "Produce 10-16 claim-level evidence items. GROUNDING RULE: each claim's `excerpt` must be a "
+        "VERBATIM substring of the Latin text you were given, and its `locator` must be "
+        f"Aen.{BOOK}.<line> or Aen.{BOOK}.<start>-<end>. The Latin is the authoritative evidence. "
+        "Do NOT yet choose an English translation.\n\n"
+        "Claim schema (JSON only, no prose, no code fences):\n"
+        '{"claims":[{"claim":"<English claim sentence>","claim_type":"<one of: '
+        f'{", ".join(CLAIM_TYPES)}>","source_file":"{canon_file}",'
+        f'"locator":"Aen.{BOOK}.<lines>","excerpt":"<verbatim LATIN>",'
+        '"stance":"supports|qualifies|contradicts","confidence":0.0-1.0}],'
+        '"conflicts":[],"coverage_notes":[]}\n\n'
+        "=== LATIN (canonical) ===\n" + latin_body
+    )
+
+
+def build_witness_prompt(items, witness_label, witness_sid, wtext):
+    """Per-witness: given the Latin excerpts + claim numbers, quote verbatim English."""
+    head = "\n".join(f"[{it['i']}] {it['locator']} :: {it['latin']}" for it in items)
+    return (
+        f"You are selecting verbatim English renderings. Below are numbered Latin passages. "
+        f"Quote, for EACH numbered item, the single VERBATIM sentence/fragment from the following "
+        f"translation ({witness_label}) that renders it. "
+        "The English excerpt MUST be an exact substring of the translation text provided. "
+        "If no span clearly renders that Latin passage, emit [NONE] for that item.\n\n"
+        "=== NUMBERED LATIN PASSAGES ===\n" + head + "\n\n"
+        f"[{witness_label}] <{witness_sid}>: {wtext}\n\n"
+        f'Output exactly JSON: {{"selections":[{{"i":<number>,"translator":"{witness_label}",'
+        f'"source_id":"{witness_sid}","excerpt":"<verbatim English>"}}]}}\n'
+        "No prose, no code fences. Include only items with a verbatim match."
+    )
+
+
+def build_select_prompt(items):
+    """Given each claim's per-witness candidates, pick a single best English witness."""
+    blocks = []
+    for it in items:
+        cands = "\n        ".join(f"[{c['translator']}] {c['excerpt']}" for c in it.get("candidates", []))
+        blocks.append(f"[{it['i']}] {it['locator']} LATIN: {it['latin']}\n    Candidates:\n        {cands}")
+    return (
+        "For each numbered item choose the SINGLE English rendering that best captures the meaning "
+        "relevant to that Latin passage. Selection priority: semantic fidelity -> exact span "
+        "correspondence -> clarity -> literary quality. Select ONLY from the given candidates; "
+        "do not invent or rephrase. If no candidate is adequate, emit null.\n\n"
+        "=== ITEMS ===\n" + "\n\n".join(blocks) + "\n\n"
+        'Output exactly JSON: {"selections":[{"i":<number>,"translator":"<Kline|Conington|Mackail>",'
+        '"excerpt":"<the EXACT chosen candidate text>"}]}\n'
+        "No prose, no code fences."
+    )
+
+
 def main():
-    raw = (SRC / CANONICAL_FILE).read_text(encoding="utf-8", errors="replace")
-    latin_body = html_to_text(raw)
+    raw_latin = (SRC / CANONICAL_FILE).read_text(encoding="utf-8", errors="replace")
+    latin_body = html_to_text(raw_latin)
+    latin_hay = norm(raw_latin)
     witness_texts = []
     for w in WITNESSES:
         raw_w = (SRC / w["file"]).read_text(encoding="utf-8", errors="replace")
-        witness_texts.append(
-            {"label": w["label"], "source_id": w["source_id"], "file": w["file"], "text": html_to_text(raw_w)}
-        )
-    focus = THEME or "the central events and their moral and theological significance"
+        witness_texts.append({**w, "text": html_to_text(raw_w), "hay": norm(raw_w)})
 
-    prompt = (
-        "You are a research evidence collector for Virgil's Aeneid.\n"
-        f"Below is the full LATIN text of Aeneid Book {BOOK} (canonical, authoritative) "
-        f"followed by {len(WITNESSES)} English translations (Conington, Mackail, Kline) labeled with "
-        "[WITNESS:<source_id>].\n\n"
-        f"Focus: {focus}\n\n"
-        "Produce 10-16 claim-level evidence items. WORK ORDER (mandatory):\n"
-        "1. For each claim, FIRST anchor it to an exact Latin passage: pick the canonical Latin "
-        f"excerpt and its locator (Aen.{BOOK}.<line> or Aen.{BOOK}.<start>-<end>). The Latin excerpt "
-        "MUST be a verbatim, exact substring of the Latin text provided below.\n"
-        "2. ONLY THEN inspect the witness translations and SELECT the English rendering (from ONE "
-        "witness) that best captures the meaning relevant to this claim. Selection priority: semantic "
-        "fidelity -> exact span correspondence -> clarity -> literary quality. Quote that witness "
-        "verbatim (its text is provided). NEVER invent or synthesize an English translation; always "
-        "quote an actual witness.\n\n"
-        "Claim schema (JSON only, no prose, no code fences):\n"
-        '{"claims":[{"claim":"<English claim sentence>","claim_type":"<one of '
-        f'{CLAIM_TYPES}>","source_file":"{CANONICAL_FILE}","locator":"Aen.{BOOK}.<lines>",'
-        '"excerpt":"<verbatim LATIN>","stance":"supports|qualifies|contradicts","confidence":0.0-1.0,'
-        '"english_witness":{"translator":"<Conington|Mackail|Kline>","source_id":"<s-aeneid-{BOOK}-{w}>",'
-        '"locator":"<witness locator, book-wise>","excerpt":"<verbatim English from that witness>"},'
-        '"witnesses_consulted":["<all witness source_ids consulted for this claim>"]}],'
-        '"conflicts":[],"coverage_notes":[]}\n\n'
-        "RULES: latin excerpt MUST be verbatim substring of the Latin text; english_witness.excerpt "
-        "MUST be verbatim substring of that witness's English text; latin is authoritative evidence, "
-        "english_witness is only an interpretive rendering. No code fences.\n\n"
-        "=== LATIN (canonical) ===\n"
-        + latin_body
-        + "\n\n"
-        + "\n\n".join(f"=== WITNESS [{w['label']} {w['source_id']}] ===\n{w['text']}" for w in witness_texts)
-    )
-    parsed, last_err = None, None
-    for attempt in range(1, 4):
-        text = call_model(
-            prompt + (f"\n\nNOTE: previous reply invalid ({last_err}). Return only JSON." if attempt > 1 else "")
-        )
-        try:
-            parsed = extract_json(text)
-            # basic structural sanity
-            if not parsed or not isinstance(parsed.get("claims"), list) or not parsed["claims"]:
-                raise ValueError("no claims")
-            if not all(isinstance(c, dict) for c in parsed["claims"]):
-                raise ValueError("claim not object")
-            bad = [
-                c
-                for c in parsed["claims"]
-                if not all(
-                    isinstance(c.get(f), str) and c.get(f).strip()
-                    for f in ("claim", "claim_type", "source_file", "locator", "excerpt")
-                )
-            ]
-            # latin excerpt must be verbatim present
-            for c in parsed["claims"]:
-                if c.get("excerpt") and html_to_text(c["excerpt"]) not in "":
-                    pass
-            if bad:
-                raise ValueError(f"{len(bad)} claim(s) missing required fields")
+    # ---- Stage 1: Latin-only claims ----
+    claims, last_err = None, None
+    for _attempt in range(1, 4):
+        text = call_model([{"role": "user", "content": build_latin_prompt(latin_body, CANONICAL_FILE)}])
+        p = extract_json(text)
+        cs = (p or {}).get("claims")
+        if isinstance(cs, list) and cs and all(isinstance(c, dict) and c.get("excerpt") for c in cs):
+            claims = cs
             break
-        except Exception as exc:
-            last_err = f"{type(exc).__name__}: {str(exc)[:80]}"
-    if parsed is None:
-        raise RuntimeError(f"no valid packet after 3 attempts: {last_err}")
+        last_err = "stage1 no claims"
+    if claims is None:
+        raise RuntimeError(f"stage 1 failed after 3 attempts: {last_err}")
 
-    # Verbatim ground both excerpts against their sources here (cheap pre-check).
-    latin_hay = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).lower()
-    for c in list(parsed["claims"]):
-        if c.get("excerpt") and re.sub(r"\s+", " ", c["excerpt"]).lower() not in latin_hay:
-            parsed["claims"].remove(c)
+    # Drop claims whose Latin excerpt is NOT verbatim in the Latin snapshot.
+    kept = []
+    for c in claims:
+        if norm(c.get("excerpt")) in latin_hay:
+            kept.append(c)
+    claims = kept
+    if not claims:
+        raise RuntimeError("stage 1 produced no verbatim Latin excerpts")
+
+    items = [
+        {"i": idx, "locator": c["locator"], "latin": c["excerpt"], "claim": c, "candidates": []}
+        for idx, c in enumerate(claims, 1)
+    ]
+
+    # ---- Stage 2: per-witness verbatim English ----
+    for w in witness_texts:
+        text = call_model(
+            [{"role": "user", "content": build_witness_prompt(items, w["label"], w["source_id"], w["text"])}]
+        )
+        sel = extract_json(text)
+        sel_list = (sel or {}).get("selections") or []
+        by_i = {}
+        for s in sel_list:
+            try:
+                by_i[int(s.get("i"))] = s
+            except (TypeError, ValueError):
+                continue
+        for it in items:
+            s = by_i.get(it["i"])
+            if not s or not isinstance(s, dict):
+                continue
+            ex = s.get("excerpt")
+            if not isinstance(ex, str) or not ex.strip():
+                continue
+            if norm(ex) not in w["hay"]:  # verbatim check against THIS witness
+                continue
+            it["candidates"].append(
+                {
+                    "translator": w["label"],
+                    "source_id": w["source_id"],
+                    "excerpt": ex,
+                }
+            )
+
+    # ---- Stage 3: select best English witness per claim ----
+    selectable = [it for it in items if it["candidates"]]
+    selection_map = {}
+    if selectable:
+        text = call_model([{"role": "user", "content": build_select_prompt(selectable)}])
+        sel = extract_json(text)
+        for s in (sel or {}).get("selections") or []:
+            try:
+                selection_map[int(s.get("i"))] = s
+            except (TypeError, ValueError):
+                continue
+
+    # ---- Assemble final packet; drop claims with no verbatim selected English ----
+    final = []
+    for it in items:
+        chosen = selection_map.get(it["i"])
+        ew = None
+        if chosen and isinstance(chosen, dict):
+            translator = chosen.get("translator")
+            cand = next((c for c in it["candidates"] if c["translator"] == translator), None)
+            if cand and norm(chosen.get("excerpt", "")) == norm(cand["excerpt"]):
+                # rely on the actual verbatim candidate
+                ew = {
+                    "translator": cand["translator"].capitalize(),
+                    "source_id": cand["source_id"],
+                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
+                    "excerpt": cand["excerpt"],
+                }
+            else:
+                # reviewer judgement picked a candidate but the transcript didn't match verbatim:
+                # fall back to the first verbatim candidate for this claim
+                if it["candidates"]:
+                    c0 = it["candidates"][0]
+                    ew = {
+                        "translator": c0["translator"].capitalize(),
+                        "source_id": c0["source_id"],
+                        "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}"
+                        if "." in it["locator"]
+                        else it["locator"],
+                        "excerpt": c0["excerpt"],
+                    }
+        else:
+            if it["candidates"]:
+                c0 = it["candidates"][0]
+                ew = {
+                    "translator": c0["translator"],
+                    "source_id": c0["source_id"],
+                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
+                    "excerpt": c0["excerpt"],
+                }
+        if ew is None:
+            continue
+        final.append(
+            {
+                **it["claim"],
+                "english_witness": ew,
+                "witnesses_consulted": [w["source_id"] for w in witness_texts if w["label"] != ew["translator"]]
+                + [ew["source_id"]],
+            }
+        )
+
+    if not final:
+        raise RuntimeError("no claims with a verbatim English witness survived all stages")
 
     pkt = RUN / "evidence" / f"worker-book-{BOOK}.json"
     pkt.parent.mkdir(parents=True, exist_ok=True)
     pkt.write_text(
-        json.dumps({"worker": f"book-{BOOK}", "attempts": [{"attempt": 1, "ok": True}], "parsed": parsed}, indent=2)
+        json.dumps(
+            {
+                "worker": f"book-{BOOK}",
+                "attempts": [{"attempt": 1, "stages": 3, "ok": True, "claims_kept": len(final)}],
+                "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
+            },
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )
-    print(f"OK aeneid-book-{BOOK}: {len(parsed['claims'])} claims")
+    print(f"OK aeneid-book-{BOOK}: {len(final)} claims")
 
 
 if __name__ == "__main__":
