@@ -170,10 +170,17 @@ def source_mappings(project: dict, books):
     """
     sid = project["source_id_template"]
     nt = project["note_template"]
-    note_by_source = {sid.format(n=b): nt.format(n=b) for b in books}
+    witnesses = list((project.get("witnesses") or {}).keys())
+    if witnesses:
+        # Note map is keyed by the CANONICAL source id only — claims'
+        # source_ids are always the canonical (Latin) id for multi-witness
+        # projects, so witness ids never need a note mapping.
+        cid = project.get("canonical_source_id_template") or sid
+        note_by_source = {cid.format(n=b): nt.format(n=b) for b in books}
+    else:
+        note_by_source = {sid.format(n=b): nt.format(n=b) for b in books}
     source_by_file = {}
     bt = project.get("book_label_template", "{n}.html")
-    witnesses = list((project.get("witnesses") or {}).keys())
     if witnesses:
         # multi-witness: label + source id are keyed by variant {w} and book {n}
         for b in books:
@@ -240,8 +247,34 @@ def claim_type_defects(claim: dict, project: dict) -> list[str]:
     return []
 
 
+def canonical_source_defects(claim: dict, project: dict) -> list[str]:
+    """Requirement #8: the authoritative source_file must be the CANONICAL variant.
+
+    A translation witness must never masquerade as authoritative evidence. In a
+    multi-witness project the claim's ``source_file`` must be the
+    canonical-variant snapshot (e.g. the Latin book file); if it names a
+    witness-variant snapshot, that is a schema defect. (Which book a claim
+    cites is a separate property, pinned by the excerpt-grounding gate: the
+    excerpt must occur in the exact snapshot it cites.)
+    """
+    witnesses = project.get("witnesses") or {}
+    if not witnesses:
+        return []
+    bt = project.get("book_label_template", "{n}.html")
+    sf = str(claim.get("source_file", ""))
+    m = re.search(r"book-(\d+)", sf)
+    book = int(m.group(1)) if m else None
+    if book is None:
+        return []
+    witness_labels = {bt.format(n=book, w=w) for w in witnesses}
+    if sf in witness_labels:
+        canon_label = bt.format(n=book, w=project.get("canonical_variant", "latin"))
+        return [f"source_file {sf!r} is a translation witness, not the canonical {canon_label!r}"]
+    return []
+
+
 def multisource_packet_defects(parsed, project: dict, acceptance: dict | None = None):
-    """Aeneid packet validation: base + claim_type + English witness.
+    """Aeneid packet validation: base + claim_type + canonical-source + English witness.
 
     Runs the standard base checks first (so nothing is weakened), then the
     multi-witness field checks. Returns [] only when all pass.
@@ -249,8 +282,9 @@ def multisource_packet_defects(parsed, project: dict, acceptance: dict | None = 
     defects = packet_defects(parsed, acceptance)
     if defects:
         return defects
-    for idx, claim in enumerate(parsed.get("claims", []), 1):
+    for idx, claim in enumerate(parsed.get("claims"), 1):
         defects.extend(f"claim {idx}: {d}" for d in claim_type_defects(claim, project))
-        if project.get("acceptance", {}).get("latin_canonical_required"):
+        defects.extend(f"claim {idx}: {d}" for d in canonical_source_defects(claim, project))
+        if (project.get("acceptance") or {}).get("latin_canonical_required"):
             defects.extend(f"claim {idx}: {d}" for d in english_witness_defects(claim, project))
     return defects

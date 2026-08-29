@@ -232,3 +232,12 @@ def test_aeneid_unknown_translator_rejected():
     cs[0]["english_witness"]["translator"] = "NotAPerson"
     p = {"claims": cs, "conflicts": [], "coverage_notes": []}
     assert any("translator" in d for d in multisource_packet_defects(p, proj, VALID_ACCEPTANCE))
+
+
+def test_aeneid_witness_cited_as_authoritative_rejected():
+    """A translation witness cited in source_file must never masquerade as evidence."""
+    proj = load_project(PROJECTS_DIR, "aeneid")
+    cs = [_aeneid_claim() for _ in range(6)]
+    cs[0]["source_file"] = "aeneid-book-1-kline.html"
+    p = {"claims": cs, "conflicts": [], "coverage_notes": []}
+    assert any("translation witness" in d for d in multisource_packet_defects(p, proj, VALID_ACCEPTANCE))
