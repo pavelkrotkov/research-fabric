@@ -15,9 +15,10 @@ import sys
 from cao_workflow import ShimError, emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.core import (  # noqa: E402
+from research_fabric.core import (
     book_task_from_project,
     extract_json,
+    multisource_packet_defects,
     normalize_packet,
     packet_defects,
     source_mappings,
@@ -146,13 +147,36 @@ ACCEPTANCE = project.get("acceptance") or {}
 # before anything is published.
 CANONICAL_SOURCE_MANIFEST = (RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]).resolve()
 BOOK_RE = re.compile(project["snapshot_pattern"])
+WITNESSES = list((project.get("witnesses") or {}).keys())
+CANONICAL = project.get("canonical_variant", "latin")
+IS_MULTI = bool(WITNESSES)
+def _validator(parsed, acceptance=None):
+    if IS_MULTI:
+        return multisource_packet_defects(parsed, project, acceptance)
+    return packet_defects(parsed, acceptance)
+VALIDATOR = _validator
 
 source_files = sorted(source_dir.glob("*.html"))
 if not source_files:
     raise RuntimeError("no source snapshots found in source_dir")
-BOOKS = sorted(int(m.group(1)) for p in source_files if (m := BOOK_RE.search(p.name)))
-if len(BOOKS) != len(source_files):
+# Every snapshot must match the pattern. Books are enumerated from the
+# canonical variant only (so 12 books, not 4×12); witness files ride along as
+# non-authoritative interpretive sources.
+def _book_of(p):
+    m = BOOK_RE.search(p.name)
+    return int(m.group(1)) if m else None
+matched = [(p, _book_of(p)) for p in source_files]
+if any(b is None for _, b in matched):
     raise RuntimeError(f"all snapshots must match {BOOK_RE.pattern}")
+if IS_MULTI:
+    def _variant_of(p):
+        m = BOOK_RE.search(p.name)
+        return m.group(2) if m and m.lastindex and m.lastindex >= 2 else None
+    BOOKS = sorted(b for p, b in matched if _variant_of(p) == CANONICAL)
+else:
+    BOOKS = sorted({b for _, b in matched})
+    if len(BOOKS) != len(source_files):
+        raise RuntimeError(f"all snapshots must match {BOOK_RE.pattern}")
 
 worker_specs = [(f"book-{b}", book_task_from_project(b, project, project_name)) for b in BOOKS]
 
@@ -179,6 +203,7 @@ else:
 set_state(run_root, "RESEARCHING")
 
 DIRECT_WORKER = str(RESEARCH_ROOT / "bin" / "direct_worker.py")
+AENEID_WORKER = str(RESEARCH_ROOT / "bin" / "aeneid_worker.py")
 DIRECT_WORKER_PY = os.environ.get(
     "RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
 
@@ -197,27 +222,41 @@ def collect(spec):
     theme = theme_match.group(1) if theme_match else None
     # Resolve the snapshot filename for this book from the project's label
     # template so SOURCE_BY_FILE can map the worker's emitted source_file back.
-    book_label = project.get("book_label_template", "{n}.html").format(n=b)
+    if IS_MULTI:
+        book_label = project["book_label_template"].format(n=b, w=CANONICAL)
+    else:
+        book_label = project.get("book_label_template", "{n}.html").format(n=b)
     if not (source_dir / book_label).is_file():
         book_label = next(
             (p.name for p in source_files if (m := BOOK_RE.search(p.name)) and int(m.group(1)) == b), book_label
         )
+    validator = VALIDATOR
     attempts = []
     for attempt in range(1, 3):
         try:
-            proc = subprocess.run(
-                [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
-                capture_output=True,
-                text=True,
-                timeout=1500,
-            )
+            if IS_MULTI:
+                # Canonical Latin label + witness labels/source-ids → aeneid worker.
+                canon_label = book_label
+                witness_args = []
+                for w in WITNESSES:
+                    wfile = project["book_label_template"].format(n=b, w=w)
+                    wid = project["source_id_template"].format(n=b, w=w)
+                    witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
+                cmd = [DIRECT_WORKER_PY, AENEID_WORKER, str(run_root), str(source_dir),
+                       str(b), canon_label, theme or ""] + witness_args
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
+            else:
+                proc = subprocess.run(
+                    [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
+                    capture_output=True, text=True, timeout=1500,
+                )
             packet = packet_dir / f"worker-{sid}.json"
             if proc.returncode != 0 or not packet.exists():
                 raise RuntimeError(
-                    f"direct worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
+                    f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
                 )
             parsed = json.loads(packet.read_text(encoding="utf-8")).get("parsed")
-            defects = packet_defects(parsed, ACCEPTANCE)
+            defects = VALIDATOR(parsed, ACCEPTANCE)
             attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
             if not defects:
                 return sid, proc.stdout.strip(), None
@@ -250,7 +289,7 @@ if reuse_evidence_dir:
             src_data = json.loads(src_packet.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        if packet_defects(src_data.get("parsed"), ACCEPTANCE):
+        if VALIDATOR(src_data.get("parsed"), ACCEPTANCE):
             continue  # invalid packet — re-collect instead of propagating it
         dst = packet_dir / src_packet.name
         shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
@@ -270,7 +309,7 @@ if any(err for _, _, err in results):
 if reuse_evidence_dir:
     for sid, _ in worker_specs:
         packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-        defects = packet_defects(packet.get("parsed"), ACCEPTANCE)
+        defects = VALIDATOR(packet.get("parsed"), ACCEPTANCE)
         if defects:
             set_state(run_root, "FAILED", failure=f"reused packet invalid: {sid}")
             raise RuntimeError(f"reused packet {sid} failed structural validation: {'; '.join(defects)}")
@@ -469,6 +508,17 @@ for sid, _, _ in results:
                 "verified_at": "pilot-verifier-pass",
             }
         )
+        if IS_MULTI:
+            # Extend backwards-compatible with the multi-witness fields. The
+            # Latin excerpt/locator above stay authoritative (source_ids is
+            # exactly the canonical source). Witness fields are supplementary.
+            claims[-1].update(
+                {
+                    "claim_type": claim.get("claim_type", ""),
+                    "english_witness": claim.get("english_witness"),
+                    "witnesses_consulted": claim.get("witnesses_consulted", []),
+                }
+            )
 if dropped:
     write_json(run_root / "verification" / "dropped-claims.json", dropped)
     set_state(run_root, "FAILED", failure="claim with unmappable source file")
@@ -523,6 +573,29 @@ grounding = subprocess.run(
 if grounding.returncode != 0:
     set_state(run_root, "FAILED", failure="excerpt grounding failed")
     raise RuntimeError(f"excerpt grounding failed: {grounding.stderr.strip()}")
+
+# Deterministic translation-grounding gate (multi-witness projects): prove each
+# claim's selected English witness is a real translation source whose quoted
+# English occurs verbatim and overlaps the aligned Latin passage. Runs only for
+# witness projects; a single-witness (Odyssey) run has no english_witness.
+if IS_MULTI and any(c.get("english_witness") for c in claims):
+    alignment_copy = run_root / "alignment.jsonl"
+    if not alignment_copy.exists():
+        proj_al = RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project.get("alignment_path", "alignment.jsonl")
+        if proj_al.exists():
+            shutil.copy2(proj_al, alignment_copy)
+    tgate = subprocess.run(
+        [sys.executable, str(RESEARCH_ROOT / "bin" / "translation_grounding.py"),
+         str(field_root), str(alignment_copy)],
+        text=True,
+        capture_output=True,
+    )
+    (run_root / "verification" / "translation-grounding.txt").write_text(
+        (tgate.stdout or "") + (tgate.stderr or ""), encoding="utf-8"
+    )
+    if tgate.returncode != 0:
+        set_state(run_root, "FAILED", failure="translation grounding failed")
+        raise RuntimeError(f"translation grounding failed: {tgate.stderr.strip()}")
 
 set_state(run_root, "VERIFYING_DIFF")
 # ``git add -N`` registers new files with the index without staging content, so

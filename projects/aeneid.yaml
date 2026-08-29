@@ -1,0 +1,81 @@
+# Project spec: Aeneid
+#
+# Multi-witness corpus: Virgil's Latin is the SOLE canonical source of truth;
+# Conington, Mackail, and Kline are interpretive translation *witnesses* used
+# only to select the best English rendering of each cited Latin passage. They
+# are never authoritative evidence.
+#
+# This project keys off the engine's `witnesses` extension (see workflow):
+#   project -> books -> one canonical source/book + zero or more witnesses/book.
+# The Odyssey project omits `witnesses` and runs the untouched single-witness
+# path.
+
+project: aeneid
+field: classics
+
+# --- Corpus ---
+# Directory within `corpora/` holding the immutable source snapshots.
+corpus_dir: aeneid
+# Glob matched against snapshot filenames. group(1) is the book number. The
+# engine enumerates *canonical* books only (see `canonical_variant`); witness
+# files for the same book are carried alongside for translation grounding.
+snapshot_pattern: ^aeneid-book-(\d+)-(latin|conington|mackail|kline)\.html$
+# Path (relative to the corpus dir) of the sha256 manifestation.
+manifest_path: source-manifest.jsonl
+# The canonical (authoritative) variant. Only these files define BOOKS.
+canonical_variant: latin
+# Witness variants (interpretive translations), each with a human translator
+# label. Order is not significance.
+witnesses:
+  conington: { translator: Conington, url: "https://www.gutenberg.org/ebooks/73488" }
+  mackail:   { translator: Mackail,   url: "https://www.gutenberg.org/ebooks/22456" }
+  kline:     { translator: Kline,     url: "https://topostext.org/work/245" }
+
+# --- Source-ID / note mapping ---
+# {n} = canonical book number, {w} = variant (latin|conington|mackail|kline).
+source_id_template: s-aeneid-{n}-{w}
+# One note per canonical book (collects all its claims). {n} = book number.
+note_template: wiki/summaries/aeneid-book-{n}.md
+# Canonical Latin source id for a book (what claims cite as authoritative).
+canonical_source_id_template: s-aeneid-{n}-latin
+# File label template. {n}=book, {w}=variant. Used for source_by_file mapping.
+book_label_template: aeneid-book-{n}-{w}.html
+# Alignment file (canonical Latin range -> witness ranges), relative to corpus_dir.
+alignment_path: alignment.jsonl
+
+# --- Claim type taxonomy ---
+claim_types:
+  - textual
+  - linguistic
+  - characterization
+  - thematic
+  - intertextual
+  - historical
+  - scholarly
+  - reception
+
+# --- Worker brief ---
+# Book I: Juno's wrath and the storm, Venus' intervention, and the landing in
+# Carthage.
+themes:
+  1: "Juno's wrath and the storm, Aeneas as the man of fate (pietas), Venus and the intervention of the gods, and the landing at Carthage"
+# Fallback theme for any book without an explicit entry.
+default_theme: "the central events and their moral and theological significance"
+
+# --- Acceptance rules (project-specific) ---
+acceptance:
+  min_claims_per_book: 5
+  max_claims_per_book: 30
+  require_verbatim_excerpts: true          # latin + english, both grounded
+  require_provenance_manifest: true
+  # latin-first: every claim must anchor a canonical Latin passage and cite it
+  # authoritatively; the English rendering is selected afterward from a witness.
+  latin_canonical_required: true
+  translation_grounding_required: true     # enforced by bin/translation_grounding.py
+  # The LLM's "best English witness" choice is reviewable judgment, NOT a hard
+  # gate: the worker records the selection; the deterministic gate only proves
+  # the quoted English is verbatim in a valid witness overlapping the Latin.
+  best_translation_is_judgment: true
+
+# --- Commit message ---
+commit_message: "Research: full {project} evidence run ({claims} claims, Books {books}; run {run})"

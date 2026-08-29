@@ -131,3 +131,138 @@ def test_provenance_rejects_tampered_snapshot():
         r = _sub([PY, str(BIN / "provenance_validate.py"), str(root)])
         assert r.returncode != 0
         assert "sha256 mismatch" in r.stderr
+
+
+# ------------------------------------------- translation-grounding gate (Aeneid)
+
+
+def _translation_field_root(tmp):
+    """Build a field root with a translation witness + aligned claim."""
+    root = pathlib.Path(tmp) / "kb"
+    ev = root / "evidence" / "snapshots"
+    ev.mkdir(parents=True)
+    latin = "arma virumque cano troiae qui primus ab oris"
+    english = "I sing of arms and the man who first from the shores of Troy"
+    (ev / "latin.html").write_text(latin, encoding="utf-8")
+    (ev / "kline.html").write_text(english, encoding="utf-8")
+    (root / "evidence" / "sources.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "source_id": "s-aeneid-1-latin",
+                        "role": "canonical",
+                        "translator": None,
+                        "sha256": hashlib.sha256(latin.encode()).hexdigest(),
+                        "snapshot": "evidence/snapshots/latin.html",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "source_id": "s-aeneid-1-kline",
+                        "role": "translation",
+                        "translator": "Kline",
+                        "sha256": hashlib.sha256(english.encode()).hexdigest(),
+                        "snapshot": "evidence/snapshots/kline.html",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, ev
+
+
+def _aligned_claim(
+    *, english="I sing of arms and the man", translator="Kline", wsid="s-aeneid-1-kline", wloc="1.1-7", lloc="Aen.1.1-7"
+):
+    return {
+        "claim_id": "c-1-1",
+        "claim": "some claim",
+        "note": "wiki/summaries/aeneid-book-1.md",
+        "source_ids": ["s-aeneid-1-latin"],
+        "locator": lloc,
+        "excerpt": "arma virumque cano",
+        "stance": "supports",
+        "confidence": 0.9,
+        "independence_group": "g",
+        "english_witness": {"translator": translator, "source_id": wsid, "locator": wloc, "excerpt": english},
+        "witnesses_consulted": ["Conington", "Mackail", "Kline"],
+    }
+
+
+def _write_alignment(tmp, rows):
+    p = pathlib.Path(tmp) / "alignment.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return p
+
+
+def test_translation_grounding_valid():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        root, ev = _translation_field_root(td)
+        al = _write_alignment(
+            td,
+            [
+                {
+                    "book": 1,
+                    "canonical_range": "Aen.1.1-Aen.1.756",
+                    "canonical_source_id": "s-aeneid-1-latin",
+                    "witnesses": {"kline": {"source_id": "s-aeneid-1-kline", "aligned_to": "Aen.1.1-Aen.1.756"}},
+                }
+            ],
+        )
+        (root / "evidence" / "claims.jsonl").write_text(json.dumps(_aligned_claim()) + "\n", encoding="utf-8")
+        r = _sub([PY, str(BIN / "translation_grounding.py"), str(root), str(al)])
+        assert r.returncode == 0, r.stderr
+        assert '"valid": true' in r.stdout
+
+
+def test_translation_grounding_rejects_paraphrased_english():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        root, ev = _translation_field_root(td)
+        al = _write_alignment(
+            td,
+            [
+                {
+                    "book": 1,
+                    "canonical_range": "Aen.1.1-Aen.1.756",
+                    "canonical_source_id": "s-aeneid-1-latin",
+                    "witnesses": {"kline": {"source_id": "s-aeneid-1-kline", "aligned_to": "Aen.1.1-Aen.1.756"}},
+                }
+            ],
+        )
+        (root / "evidence" / "claims.jsonl").write_text(
+            json.dumps(_aligned_claim(english="A made up sentence not in the witness")) + "\n", encoding="utf-8"
+        )
+        r = _sub([PY, str(BIN / "translation_grounding.py"), str(root), str(al)])
+        assert r.returncode != 0
+        assert "excerpt not verbatim" in r.stderr
+
+
+def test_translation_grounding_rejects_bad_translator_source():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        root, ev = _translation_field_root(td)
+        al = _write_alignment(
+            td,
+            [
+                {
+                    "book": 1,
+                    "canonical_range": "Aen.1.1-Aen.1.756",
+                    "canonical_source_id": "s-aeneid-1-latin",
+                    "witnesses": {"kline": {"source_id": "s-aeneid-1-kline", "aligned_to": "Aen.1.1-Aen.1.756"}},
+                }
+            ],
+        )
+        (root / "evidence" / "claims.jsonl").write_text(
+            json.dumps(_aligned_claim(wsid="s-aeneid-1-latin", english="arma virumque cano")) + "\n", encoding="utf-8"
+        )
+        r = _sub([PY, str(BIN / "translation_grounding.py"), str(root), str(al)])
+        assert r.returncode != 0
+        assert "not a translation witness" in r.stderr

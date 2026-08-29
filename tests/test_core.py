@@ -11,6 +11,7 @@ from research_fabric.core import (
     book_task_from_project,
     extract_json,
     load_project,
+    multisource_packet_defects,
     normalize_packet,
     packet_defects,
     source_mappings,
@@ -180,3 +181,54 @@ def test_source_mappings():
     nb, sb = source_mappings(proj, [1, 16])
     assert nb["s-odyssey-16-theoi"] == "wiki/summaries/odyssey-book-16.md"
     assert sb["odyssey-book-16.html"] == "s-odyssey-16-theoi"
+
+
+# ------------------------------------------------ multi-witness (Aeneid) schema
+
+
+def _aeneid_claim():
+    return {
+        "claim": "Juno nurses her wrath against the Trojans.",
+        "source_file": "aeneid-book-1-latin.html",
+        "locator": "Aen.1.1-7",
+        "excerpt": "Arma virumque cano",
+        "stance": "supports",
+        "confidence": 0.9,
+        "claim_type": "thematic",
+        "english_witness": {
+            "translator": "Kline",
+            "source_id": "s-aeneid-1-kline",
+            "locator": "1.1-7",
+            "excerpt": "I sing of arms and the man",
+        },
+        "witnesses_consulted": ["Conington", "Mackail", "Kline"],
+    }
+
+
+def test_aeneid_schema_valid():
+    proj = load_project(PROJECTS_DIR, "aeneid")
+    p = {"claims": [_aeneid_claim() for _ in range(6)], "conflicts": [], "coverage_notes": []}
+    assert multisource_packet_defects(p, proj, VALID_ACCEPTANCE) == []
+
+
+def test_aeneid_bad_claim_type():
+    proj = load_project(PROJECTS_DIR, "aeneid")
+    p = {"claims": [_aeneid_claim() for _ in range(6)], "conflicts": [], "coverage_notes": []}
+    p["claims"][0]["claim_type"] = "nonsense"
+    assert any("claim_type" in d for d in multisource_packet_defects(p, proj, VALID_ACCEPTANCE))
+
+
+def test_aeneid_missing_english_witness():
+    proj = load_project(PROJECTS_DIR, "aeneid")
+    cs = [_aeneid_claim() for _ in range(6)]
+    del cs[0]["english_witness"]
+    p = {"claims": cs, "conflicts": [], "coverage_notes": []}
+    assert any("english_witness" in d for d in multisource_packet_defects(p, proj, VALID_ACCEPTANCE))
+
+
+def test_aeneid_unknown_translator_rejected():
+    proj = load_project(PROJECTS_DIR, "aeneid")
+    cs = [_aeneid_claim() for _ in range(6)]
+    cs[0]["english_witness"]["translator"] = "NotAPerson"
+    p = {"claims": cs, "conflicts": [], "coverage_notes": []}
+    assert any("translator" in d for d in multisource_packet_defects(p, proj, VALID_ACCEPTANCE))

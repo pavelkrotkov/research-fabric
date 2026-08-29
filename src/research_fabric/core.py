@@ -160,15 +160,97 @@ def book_task_from_project(b: int, project: dict, project_name: str) -> str:
 
 
 def source_mappings(project: dict, books):
-    """Return (NOTE_BY_SOURCE, SOURCE_BY_FILE) from project + report book numbers."""
+    """Return (NOTE_BY_SOURCE, SOURCE_BY_FILE) from project + report book numbers.
+
+    Single-witness (Odyssey): one file per book, canonical by construction.
+    Multi-witness (Aeneid): the canonical (Latin) file per book is the
+    authoritative source mapped to its note; witness files map to their own
+    source ids but are NOT authoritative evidence (never in a claim's
+    source_ids).
+    """
     sid = project["source_id_template"]
     nt = project["note_template"]
-    bt = project.get("book_label_template", "{n}.html")
     note_by_source = {sid.format(n=b): nt.format(n=b) for b in books}
-    source_by_file = {bt.format(n=b): sid.format(n=b) for b in books}
+    source_by_file = {}
+    bt = project.get("book_label_template", "{n}.html")
+    witnesses = list((project.get("witnesses") or {}).keys())
+    if witnesses:
+        # multi-witness: label + source id are keyed by variant {w} and book {n}
+        for b in books:
+            for w in witnesses + [project.get("canonical_variant", "latin")]:
+                try:
+                    source_by_file[bt.format(n=b, w=w)] = sid.format(n=b, w=w)
+                except KeyError:
+                    # project's template doesn't carry {w}; fall back to plain {n}
+                    source_by_file[bt.format(n=b)] = sid.format(n=b)
+    else:
+        for b in books:
+            source_by_file[bt.format(n=b)] = sid.format(n=b)
     return note_by_source, source_by_file
 
 
 def template_label(project: dict, b: int) -> str:
     """Resolve a snapshot's filename from the project's label template."""
     return project.get("book_label_template", "{n}.html").format(n=b)
+
+
+# ---------------------------------------------------------------------------
+# Multi-witness (canonical-latin-authoritative) schema validation.
+#
+# Backwards compatible: the base packet keeps `source_file`/`locator`/`excerpt`
+# carrying the CANONICAL (Latin) evidence, so `source_ids` remains the
+# authoritative evidence set exactly as before. The Aeneid worker ADDS an
+# `english_witness` selection on top; it never replaces the Latin evidence.
+# ---------------------------------------------------------------------------
+
+
+def english_witness_defects(claim: dict, project: dict) -> list[str]:
+    """Validate one claim's selected English witness (interpretive, not authority).
+
+    The witness is the best English rendering of the cited Latin passage,
+    chosen by the worker as *reviewable judgment* — the deterministic
+    translation-grounding gate later proves the quoted English is verbatim in
+    a valid witness that overlaps the aligned Latin passage.
+    """
+    out = []
+    ew = claim.get("english_witness")
+    if not isinstance(ew, dict):
+        return ["english_witness is not an object"]
+    wt = ew.get("translator")
+    wsid = ew.get("source_id")
+    wloc = ew.get("locator")
+    wex = ew.get("excerpt")
+    for label, val in (("translator", wt), ("source_id", wsid), ("locator", wloc), ("excerpt", wex)):
+        if not isinstance(val, str) or not val.strip():
+            out.append(f"english_witness missing/invalid {label}")
+    if isinstance(wt, str) and wt:
+        known = [str(v.get("translator")) for v in (project.get("witnesses") or {}).values() if isinstance(v, dict)]
+        if known and wt not in known:
+            out.append(f"english_witness translator {wt!r} not in project witnesses {known}")
+    if isinstance(claim.get("witnesses_consulted"), str):
+        out.append("witnesses_consulted must be a list")
+    return out
+
+
+def claim_type_defects(claim: dict, project: dict) -> list[str]:
+    ct = claim.get("claim_type")
+    allowed = set(project.get("claim_types") or [])
+    if allowed and ct not in allowed:
+        return [f"claim_type {ct!r} not in {sorted(allowed)}"]
+    return []
+
+
+def multisource_packet_defects(parsed, project: dict, acceptance: dict | None = None):
+    """Aeneid packet validation: base + claim_type + English witness.
+
+    Runs the standard base checks first (so nothing is weakened), then the
+    multi-witness field checks. Returns [] only when all pass.
+    """
+    defects = packet_defects(parsed, acceptance)
+    if defects:
+        return defects
+    for idx, claim in enumerate(parsed.get("claims", []), 1):
+        defects.extend(f"claim {idx}: {d}" for d in claim_type_defects(claim, project))
+        if project.get("acceptance", {}).get("latin_canonical_required"):
+            defects.extend(f"claim {idx}: {d}" for d in english_witness_defects(claim, project))
+    return defects
