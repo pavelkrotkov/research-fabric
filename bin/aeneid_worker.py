@@ -327,7 +327,7 @@ def main():
             if it["candidates"]:
                 c0 = it["candidates"][0]
                 ew = {
-                    "translator": c0["translator"],
+                    "translator": c0["translator"].capitalize(),
                     "source_id": c0["source_id"],
                     "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
                     "excerpt": c0["excerpt"],
