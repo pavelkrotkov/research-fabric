@@ -51,7 +51,7 @@ def _representation_errors(row: dict, sid, snap: pathlib.Path) -> list[str]:
         return [f"source representation metadata missing {sorted(missing)}: {sid}"]
     try:
         rep = representation_for(snap)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         return [f"source representation invalid: {sid}: {exc}"]
     expected = {
         "adapter": rep.adapter,
