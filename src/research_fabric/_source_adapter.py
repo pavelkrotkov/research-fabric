@@ -77,6 +77,8 @@ class HTMLAdapter:
 _MD_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 _MD_IMAGE = re.compile(r"(?<!\\)!\[([^\]]*)\]")
 _MD_REF_DEF = re.compile(r"(?m)^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))")
+_MD_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", re.DOTALL)
+_MD_LIST_ITEM = re.compile(r"^ *(?:[-+*]|\d+[.)])[ \t]+")
 
 
 def _closes_fence(match, fence: str) -> bool:
@@ -99,6 +101,73 @@ def _markdown_outside_fences(text: str) -> str:
             continue
         out.append(line)
     return "\n".join(out)
+
+
+def _indent_width(line: str) -> int:
+    expanded = line.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip(" "))
+
+
+def _list_content_indent(line: str) -> int | None:
+    match = _MD_LIST_ITEM.match(line.expandtabs(4))
+    return match.end() if match else None
+
+
+def _code_indent(list_indent: int) -> int:
+    return list_indent + 4 if list_indent else 4
+
+
+def _code_continues(in_code: bool, blank: bool, indent: int, threshold: int) -> bool:
+    return in_code and (blank or indent >= threshold)
+
+
+def _code_starts(blank: bool, previous_blank: bool, indent: int, threshold: int) -> bool:
+    return not blank and previous_blank and indent >= threshold
+
+
+def _next_list_indent(line: str, blank: bool, indent: int, current: int) -> int:
+    if blank:
+        return current
+    item_indent = _list_content_indent(line)
+    if item_indent is not None:
+        return item_indent
+    if current and indent < current:
+        return 0
+    return current
+
+
+def _markdown_outside_indented_code(text: str) -> str:
+    out = []
+    list_indent = 0
+    in_code = False
+    previous_blank = True
+    for line in text.splitlines():
+        blank = not line.strip()
+        indent = _indent_width(line)
+        threshold = _code_indent(list_indent)
+        if _code_continues(in_code, blank, indent, threshold):
+            previous_blank = blank
+            continue
+        if in_code:
+            in_code = False
+        if _code_starts(blank, previous_blank, indent, threshold):
+            in_code = True
+            previous_blank = False
+            continue
+        list_indent = _next_list_indent(line, blank, indent, list_indent)
+        out.append(line)
+        previous_blank = blank
+    return "\n".join(out)
+
+
+def _mask_code_span(match: re.Match) -> str:
+    return re.sub(r"[^\n]", " ", match.group(0))
+
+
+def _markdown_asset_text(text: str) -> str:
+    text = _markdown_outside_fences(text)
+    text = _markdown_outside_indented_code(text)
+    return _MD_CODE_SPAN.sub(_mask_code_span, text)
 
 
 def _destination_step(char: str, depth: int) -> tuple[int, bool]:
@@ -186,7 +255,7 @@ class MarkdownAdapter:
         return locator.strip()
 
     def assets(self, decoded: str) -> tuple[str, ...]:
-        targets = _image_targets(_markdown_outside_fences(decoded))
+        targets = _image_targets(_markdown_asset_text(decoded))
         local = (_local_asset(target) for target in targets)
         return tuple(dict.fromkeys(asset for asset in local if asset))
 
