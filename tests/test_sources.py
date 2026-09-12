@@ -79,6 +79,7 @@ def test_markdown_preserves_structure_math_and_assets(tmp_path):
         tmp_path / "assets" / "chart(1).png",
         tmp_path / "assets" / "ref.png",
         tmp_path / "assets" / "shortcut.png",
+        tmp_path / "assets" / "nested.png",
     ]
     (tmp_path / "assets").mkdir()
     for path in paths:
@@ -88,6 +89,9 @@ def test_markdown_preserves_structure_math_and_assets(tmp_path):
         "Paragraph with **bold**, *emphasis*, [link](https://example.com), and $x^2$.\r\n\r\n"
         "| a | b |\r\n| - | - |\r\n| 1 | 2 |\r\n\r\n$$\r\nE = mc^2\r\n$$\r\n\r\n"
         "````md\r\n```\r\n![not-an-asset](missing.png)\r\n```\r\n````\r\n\r\n"
+        "`![inline-example](missing-inline.png)`\r\n\r\n"
+        "    ![indented-example](missing-indented.png)\r\n\r\n"
+        "- item\r\n\r\n    ![Nested](assets/nested.png)\r\n\r\n"
         "![Same](chart.png)\r\n![Paren](assets/chart(1).png)\r\n![Ref][plot]\r\n![Shortcut]\r\n"
         "[plot]: assets/ref.png\r\n[shortcut]: assets/shortcut.png\r\n"
         "![Remote](https://example.com/chart.png)\r\n"
@@ -96,8 +100,15 @@ def test_markdown_preserves_structure_math_and_assets(tmp_path):
     source.write_bytes(raw.encode())
     adapter = adapter_for(source)
     rep = representation_for(source)
-    expected_assets = ("chart.png", "assets/chart(1).png", "assets/ref.png", "assets/shortcut.png")
-    expected_bundle = ((source, pathlib.Path("book-1.md")), *zip(paths, map(pathlib.Path, expected_assets)))
+    expected_assets = (
+        "assets/nested.png",
+        "chart.png",
+        "assets/chart(1).png",
+        "assets/ref.png",
+        "assets/shortcut.png",
+    )
+    expected_paths = [paths[4], *paths[:4]]
+    expected_bundle = ((source, pathlib.Path("book-1.md")), *zip(expected_paths, map(pathlib.Path, expected_assets)))
     assert adapter.metadata(source) == {"content_type": "text/markdown", "filename": "book-1.md"}
     assert adapter.map_locator("  Heading > table row 1  ") == "Heading > table row 1"
     assert rep.text == raw.replace("\r\n", "\n")
@@ -109,6 +120,9 @@ def test_markdown_missing_or_unsafe_assets_fail_closed(tmp_path):
     missing = _md(tmp_path / "missing.md", "![Chart](assets/missing.png)\n")
     with pytest.raises(FileNotFoundError, match="missing source asset"):
         representation_for(missing)
+    missing_row = {"snapshot": missing.name, "sha256": hashlib.sha256(missing.read_bytes()).hexdigest()}
+    with pytest.raises(RuntimeError, match="source representation invalid"):
+        bind_manifest([missing], [missing_row])
     unsafe = _md(tmp_path / "unsafe.md", "![Chart](../chart.png)\n")
     with pytest.raises(ValueError, match="unsafe source asset path"):
         representation_for(unsafe)
