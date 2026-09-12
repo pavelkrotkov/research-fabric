@@ -1,8 +1,8 @@
 """Direct-API evidence worker (OpenRouter z-ai/glm-5.3-flash) — openai SDK client.
 
-Replaces the CAO tmux worker: reads a book's HTML, strips it to text, makes a
-chat completion with robust 429/5xx backoff + parse retry, and writes a
-validated claim packet. No tmux, no screen scraping, no Codex quota.
+Reads one source through the shared adapter, makes a chat completion with
+robust 429/5xx backoff + parse retry, and writes a validated claim packet. No
+tmux, no screen scraping, no Codex quota.
 
 Run with the hermes venv python (has the openai SDK):
   <hermes-venv>/bin/python direct_worker.py <run_root> <source_dir> \
@@ -10,16 +10,17 @@ Run with the hermes venv python (has the openai SDK):
 Writes <run_root>/evidence/worker-book-<N>.json
 """
 
-import html
 import json
 import os
 import pathlib
 import re
 import sys
 import time
-from html.parser import HTMLParser
 
 from openai import OpenAI
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.sources import representation_for  # noqa: E402
 
 BOOK = int(sys.argv[3])
 RUN = pathlib.Path(sys.argv[1])
@@ -44,39 +45,6 @@ if not KEY:
 MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "z-ai/glm-4.5-air")
 BASE = "https://openrouter.ai/api/v1"
 CLIENT = OpenAI(base_url=BASE, api_key=KEY)
-
-
-class Text(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.parts = []
-        self.skip = 0
-
-    def handle_starttag(self, t, a):
-        if t in ("script", "style"):
-            self.skip += 1
-        if t in ("br", "p", "div", "li"):
-            self.parts.append("\n")
-
-    def handle_endtag(self, t):
-        if t in ("script", "style"):
-            self.skip = max(0, self.skip - 1)
-
-    def handle_data(self, d):
-        if not self.skip:
-            self.parts.append(d)
-
-
-def html_to_text(raw):
-    tp = Text()
-    tp.feed(raw)
-    text = html.unescape("".join(tp.parts))
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    idx = text.find("Homer")
-    if idx > 0:
-        text = text[idx:]
-    return text
 
 
 def extract_json(text):
@@ -104,7 +72,7 @@ def defects(parsed):
             continue
         for f in ("claim", "source_file", "locator", "excerpt"):
             v = c.get(f)
-            if not isinstance(v, str) or not v.strip() or v.strip() in ("...", "\u2026", "TBD"):
+            if not isinstance(v, str) or not v.strip() or v.strip() in ("...", "…", "TBD"):
                 out.append(f"claim {i} field {f} placeholder/missing")
     return out
 
@@ -128,8 +96,7 @@ def call_model(prompt):
 
 
 def main():
-    raw = (SRC / SOURCE_FILE).read_text(encoding="utf-8", errors="replace")
-    body = html_to_text(raw)
+    body = representation_for(SRC / SOURCE_FILE).text
     focus = THEME or "key events, characters, divine actions, and decisions"
     prompt = (
         "You are a research evidence collector. Below is the full text of source '"
