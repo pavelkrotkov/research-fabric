@@ -84,118 +84,192 @@ def _archive(raw: bytes) -> tuple[zipfile.ZipFile, set[str]]:
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile as exc:
-        raise ValueErroŠ›X[›Ü›YYTPˆ\˜Ú]™HŠHœ›ÛH^ÂˆN‚ˆ[™›ÜÈH™‹š[™›Û\İ
+        raise ValueError("malformed EPUB archive") from exc
+    try:
+        infos = zf.infolist()
+        _safe_archive(infos)
+        names = [info.filename for info in infos]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate EPUB archive member")
+        if not _valid_mimetype_entry(infos):
+            raise ValueError("invalid EPUB mimetype entry")
+        if zf.read("mimetype") != b"application/epub+zip":
+            raise ValueError("invalid EPUB mimetype")
+        return zf, set(names)
+    except Exception:
+        zf.close()
+        raise
 
-BˆÜØY™WØ\˜Ú]™J[™›ÜÊBˆ˜[Y\ÈHÚ[™›Ë™š[[˜[YH›Üˆ[™›È[ˆ[™›Ü×BˆYˆ[Š˜[Y\ÊHOH[ŠÙ]
-˜[Y\ÊJN‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠ™\XØ]HTPˆ\˜Ú]™HY[X™\ˆŠBˆYˆ›İİ˜[YÛZ[Y]\WÙ[J[™›ÜÊN‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠš[˜[YTPˆZ[Y]\H[HŠBˆYˆ™‹œ™XY
-›Z[Y]\HŠHOHˆ˜\XØ][Û‹Ù\XŠŞš\‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠš[˜[YTPˆZ[Y]\HŠBˆ™]\›ˆ™‹Ù]
-˜[Y\ÊBˆ^Ù\^Ù\[Û‚ˆ™‹˜ÛÜÙJ
-Bˆ˜Z\ÙB‚‚™YˆÛX[šY™\İ
-XÚØYÙNˆU‘[[Y[XÚØYÙWÜ]ˆİ‹˜[Y\ÎˆÙ]Üİ—JHOˆXİÜİ‹\VÜİ‹İ—WN‚ˆİ]]ÈHßKÙ]
 
-Bˆ›Üˆ][H[ˆXÚØYÙK™š[™[
-‹‹ËŞÊŸ[X[šY™\İŞÊŸZ][HŠN‚ˆ][WÚY™Y‹YYXHH][K™Ù]
-šYŠK][K™Ù]
-š™YˆŠK][K™Ù]
-›YYXK]\HŠBˆYˆ›İ[
+def _manifest(package: ET.Element, package_path: str, names: set[str]) -> dict[str, tuple[str, str]]:
+    out, paths = {}, set()
+    for item in package.findall(".//{*}manifest/{*}item"):
+        item_id, href, media = item.get("id"), item.get("href"), item.get("media-type")
+        if not all((item_id, href, media)):
+            raise ValueError("malformed EPUB manifest item")
+        path = _member(package_path, href)
+        if item_id in out or path in paths:
+            raise ValueError("duplicate EPUB manifest resource")
+        if path not in names:
+            raise FileNotFoundError(f"missing EPUB resource: {path}")
+        out[item_id] = (path, media)
+        paths.add(path)
+    return out
 
-][WÚY™Y‹YYXJJN‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠ›X[›Ü›YYTPˆX[šY™\İ][HŠBˆ]HÛY[X™\ŠXÚØYÙWÜ]™YŠBˆYˆ][WÚY[ˆİ]Üˆ][ˆ]Î‚ˆ˜Z\ÙH˜[YQ\œ›Ü‹™\XØ]HTPˆX[šY™\İ™\Ûİ\˜ÙHŠBˆYˆ]›İ[ˆ˜[Y\Î‚ˆ˜Z\ÙHš[S›İ›İ[™\œ›ÜŠˆ›Z\ÜÚ[™ÈTPˆ™\Ûİ\˜ÙNˆÜ]HŠBˆİ]Ú][WÚYHH
-]YYXJBˆ]Ë˜Y
-]
-Bˆ™]\›ˆİ]‚‚™YˆÜÜ[™JXÚØYÙNˆU‘[[Y[X[šY™\İˆXİÜİ‹\VÜİ‹İ—WK™ˆš\š[K–š\š[JHOˆ\İİ\VÜİ‹]\×WN‚ˆÚ\\œËÙY[ˆH×KÙ]
 
-Bˆ›Üˆ™Yˆ[ˆXÚØYÙK™š[™[
-‹‹ËŞÊŸ\Ü[™KŞÊŸZ][\™YˆŠN‚ˆ][WÚYH™Y‹™Ù]
-šY™YˆŠBˆYˆ›İ][WÚYÜˆ][WÚY[ˆÙY[‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠ™\XØ]HÜˆZ\ÜÚ[™ÈTPˆÜ[™HY™YˆŠBˆÙY[‹˜Y
-][WÚY
-BˆYˆ][WÚY›İ[ˆX[šY™\İ‚ˆ˜Z\ÙHš[S›İ›İ[™\œ›ÜŠˆ›Z\ÜÚ[™ÈTPˆÜ[™H™\Ûİ\˜ÙNˆÚ][WÚYHŠBˆ]YYXHHX[šY™\İÚ][WÚYBˆYˆYYXHOH˜\XØ][Û‹Ş[
-Ş[‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠˆ[œİ\ÜYTPˆÜ[™HYYXH\NˆÛYYX_HŠBˆÚ\\œË˜\[™
+def _spine(package: ET.Element, manifest: dict[str, tuple[str, str]], zf: zipfile.ZipFile) -> list[tuple[str, bytes]]:
+    chapters, seen = [], set()
+    for ref in package.findall(".//{*}spine/{*}itemref"):
+        item_id = ref.get("idref")
+        if not item_id or item_id in seen:
+            raise ValueError("duplicate or missing EPUB spine idref")
+        seen.add(item_id)
+        if item_id not in manifest:
+            raise FileNotFoundError(f"missing EPUB spine resource: {item_id}")
+        path, media = manifest[item_id]
+        if media != "application/xhtml+xml":
+            raise ValueError(f"unsupported EPUB spine media type: {media}")
+        chapters.append((path, zf.read(path)))
+    if not chapters:
+        raise ValueError("EPUB spine is empty")
+    return chapters
 
-]™‹œ™XY
-]
-JJBˆYˆ›İÚ\\œÎ‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠ‘TPˆÜ[™H\È[\HŠBˆ™]\›ˆÚ\\œÂ‚‚™YˆÜXÚØYÙJ˜]Îˆ]\ÊHOˆ\VÛ\İİ\VÜİ‹]\×WKÙ]Üİ—KXİÜİ‹İ—WN‚ˆ™‹˜[Y\ÈHØ\˜Ú]™J˜]ÊBˆN‚ˆYˆ“QUKRS‘‹ØÛÛZ[™\‹[ˆ›İ[ˆ˜[Y\Î‚ˆ˜Z\ÙHš[S›İ›İ[™\œ›ÜŠ›Z\ÜÚ[™ÈTPˆ™\Ûİ\˜ÙNˆQUKRS‘‹ØÛÛZ[™\‹[ŠBˆÛÛZ[™\ˆHŞ[
-™‹œ™XY
-“QUKRS‘‹ØÛÛZ[™\‹[ŠK˜ÛÛZ[™\‹[ŠBˆ›ÛİÈHÛ›ÙK™Ù]
-™[\]ŠH›Üˆ›ÙH[ˆÛÛZ[™\‹™š[™[
-‹‹ËŞÊŸ\›Ûİš[HŠHYˆ›ÙK™Ù]
-™[\]ŠWBˆYˆ[Š›ÛİÊHOHN‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠ‘TPˆ]\İÛÛZ[ˆ^XİHÛ™HXÚØYÙH›Ûİš[HŠBˆXÚØYÙWÜ]HÛY[X™\Šˆ‹›ÛİÖÌJBˆYˆXÚØYÙWÜ]›İ[ˆ˜[Y\Î‚ˆ˜Z\ÙHš[S›İ›İ[™\œ›ÜŠˆ›Z\ÜÚ[™ÈTPˆXÚØYÙNˆÜXÚØYÙWÜ]HŠBˆXÚØYÙHHŞ[
-™‹œ™XY
-XÚØYÙWÜ]
-KXÚØYÙWÜ]
-BˆX[šY™\İHÛX[šY™\İ
-XÚØYÙKXÚØYÙWÜ]˜[Y\ÊBˆÚ\\œÈHÜÜ[™JXÚØYÙKX[šY™\İ™ŠBˆ™]\›ˆÚ\\œËÜ]›Üˆ]È[ˆX[šY™\İ˜[Y\Ê
-_KÛY]Y]JXÚØYÙKXÚØYÙWÜ][ŠÚ\\œÊJBˆš[˜[N‚ˆ™‹˜ÛÜÙJ
-B‚‚™YˆÛY]Y]Wİ˜[YJY]Y]NˆU‘[[Y[Ù^NˆİŠHOˆİ‚ˆ˜[Y\ÈH
-ˆ‹š›Ú[Š›ÙKš]\^
 
-JKœİš\
+def _package(raw: bytes) -> tuple[list[tuple[str, bytes]], set[str], dict[str, str]]:
+    zf, names = _archive(raw)
+    try:
+        if "META-INF/container.xml" not in names:
+            raise FileNotFoundError("missing EPUB resource: META-INF/container.xml")
+        container = _xml(zf.read("META-INF/container.xml"), "container.xml")
+        roots = [node.get("full-path") for node in container.findall(".//{*}rootfile") if node.get("full-path")]
+        if len(roots) != 1:
+            raise ValueError("EPUB must contain exactly one package rootfile")
+        package_path = _member("", roots[0])
+        if package_path not in names:
+            raise FileNotFoundError(f"missing EPUB package: {package_path}")
+        package = _xml(zf.read(package_path), package_path)
+        manifest = _manifest(package, package_path, names)
+        chapters = _spine(package, manifest, zf)
+        return chapters, {path for path, _ in manifest.values()}, _metadata(package, package_path, len(chapters))
+    finally:
+        zf.close()
 
-H›Üˆ›ÙH[ˆY]Y]K™š[™[
-ˆŞÊŸ_^ÚÙ^_HŠJBˆ™]\›ˆˆ‹š›Ú[Šš[\Š›Û™K˜[Y\ÊJB‚‚™YˆÛY]Y]JXÚØYÙNˆU‘[[Y[XÚØYÙWÜ]ˆİ‹Ûİ[ˆ[
-HOˆXİÜİ‹İ—N‚ˆİ]HÈœXÚØYÙWÜ]ˆXÚØYÙWÜ]œÜ[™WÚ][\ÈˆİŠÛİ[
-_BˆYˆ™\œÚ[ÛˆHXÚØYÙK™Ù]
-™\œÚ[ÛˆŠN‚ˆİ]È™\œÚ[Ûˆ—HH™\œÚ[Û‚ˆY]Y]HHXÚØYÙK™š[™
-‹‹ËŞÊŸ[Y]Y]HŠBˆYˆY]Y]H\È›Û™N‚ˆ™]\›ˆİ]ˆ›ÜˆÙ^H[ˆ
-]H‹›[™İXYÙH‹šY[YšY\ˆŠN‚ˆYˆ˜[YHHÛY]Y]Wİ˜[YJY]Y]KÙ^JN‚ˆİ]ÚÙ^WHH˜[YBˆ™]\›ˆİ]‚‚™YˆİYÊ›ÙNˆU‘[[Y[
-HOˆİ‚ˆ™]\›ˆ›ÙKYËœœÜ]
-ŸH‹JVËLWK›İÙ\Š
-B‚‚™YˆØ\ÜÙ]
-›ÙNˆU‘[[Y[Ú\\ˆİ‹™\Ûİ\˜Ù\ÎˆÙ]Üİ—JHOˆİ‚ˆ\™Ù]H
-ˆ›ÙK™Ù]
-œÜ˜ÈŠBˆÜˆ›ÙK™Ù]
-š™YˆŠBˆÜˆ™^
 
-˜[YH›ÜˆÙ^K˜[YH[ˆ›ÙK˜]šX‹š][\Ê
-HYˆÙ^K™[™İÚ]
-ŸZ™YˆŠJK›Û™JBˆ
-BˆYˆ›İ\™Ù]‚ˆ™]\›ˆˆ‚ˆ]HÛY[X™\ŠÚ\\‹\™Ù]
-BˆYˆ]›İ[ˆ™\Ûİ\˜Ù\Î‚ˆ˜Z\ÙHš[S›İ›İ[™\œ›ÜŠˆ›Z\ÜÚ[™ÈTPˆ\ÜÙ]ˆÜ]HŠBˆ™]\›ˆˆ—\ÜÙ]Ü]Wˆ‚‚‚™YˆÚXY[™×ÛØØ]ÜŠ›ÙNˆU‘[[Y[XY[™ÜÎˆ\İÚ[KYÎˆÙ]Üİ—JHOˆİ‚ˆXY[™ÜÖÌH
-ÏHBˆYˆØØ]ÜˆH›ÙK™Ù]
-šYŠN‚ˆ™]\›ˆØØ]Ü‚ˆØØ]ÜˆHˆšÚXY[™ÜÖÌ_H‚ˆÚ[HØØ]Üˆ[ˆYÎ‚ˆØØ]ÜˆHˆ—ŞÛØØ]ÜŸH‚ˆYË˜Y
-ØØ]ÜŠBˆ™]\›ˆØØ]Ü‚‚‚™YˆÜ™Yš^
-›ÙNˆU‘[[Y[Ú\\ˆİ‹™\Ûİ\˜Ù\ÎˆÙ]Üİ—KXY[™ÜÎˆ\İÚ[KYÎˆÙ]Üİ—JHOˆİ‚ˆYÈHİYÊ›ÙJBˆYˆYÈ[ˆ
-š[YÈ‹š[XYÙHŠN‚ˆ™]\›ˆØ\ÜÙ]
-›ÙKÚ\\‹™\Ûİ\˜Ù\ÊBˆYˆYÈ[ˆÒPQS‘ÔÎ‚ˆØØ]ÜˆHÚXY[™×ÛØØ]ÜŠ›ÙKXY[™ÜËYÊBˆ™]\›ˆˆ—ÙXİ[ÛˆØÚ\\ŸHŞÛØØ]ÜŸWÉÈÉÈ
-ˆ[
-YÖÌWJ_H‚ˆYˆYÈ[ˆĞ“ĞÒÔÎ‚ˆ™]\›ˆ—ˆ‚ˆ™]\›ˆˆ›Ü›][HˆYˆYÈOH›X]ˆ[ÙHˆ‚‚‚™YˆÜİ™×Ø\ÜÙ]Ê›ÙNˆU‘[[Y[Ú\\ˆİ‹™\Ûİ\˜Ù\ÎˆÙ]Üİ—JHOˆİ‚ˆ™]\›ˆˆ‹š›Ú[ŠØ\ÜÙ]
-Ú[Ú\\‹™\Ûİ\˜Ù\ÊH›ÜˆÚ[[ˆ›ÙKš]\Š
-HYˆİYÊÚ[
-HOHš[XYÙHŠB‚‚™YˆÜ™[™\Š›ÙNˆU‘[[Y[Ú\\ˆİ‹™\Ûİ\˜Ù\ÎˆÙ]Üİ—KXY[™ÜÎˆ\İÚ[KYÎˆÙ]Üİ—JHOˆİ‚ˆYÈHİYÊ›ÙJBˆYˆYÈOHœİ™È‚ˆ™]\›ˆÜİ™×Ø\ÜÙ]Ê›ÙKÚ\\‹™\Ûİ\˜Ù\ÊBˆYˆYÈ[ˆÔÒÒT‚ˆ™]\›ˆˆ‚ˆİ]H×Ü™Yš^
-›ÙKÚ\\‹™\Ûİ\˜Ù\ËXY[™ÜËYÊK›ÙK^Üˆˆ—Bˆ›ÜˆÚ[[ˆ›ÙN‚ˆİ]™^[™
+def _metadata_value(metadata: ET.Element, key: str) -> str:
+    values = (" ".join(node.itertext()).strip() for node in metadata.findall(f"{{*}}{key}"))
+    return " | ".join(filter(None, values))
 
-Ü™[™\ŠÚ[Ú\\‹™\Ûİ\˜Ù\ËXY[™ÜËYÊKÚ[Z[ÜˆˆŠJBˆYˆYÈ[ˆĞ”‘PRÔÎ‚ˆİ]˜\[™
-—ˆŠBˆ™]\›ˆˆ‹š›Ú[Šİ]
-B‚‚™YˆØÚ\\Š]ˆİ‹]Nˆ]\Ë™\Ûİ\˜Ù\ÎˆÙ]Üİ—JHOˆİ‚ˆ›ÛİHŞ[
-]K]
-BˆYÈHİ˜[YH›Üˆ›ÙH[ˆ›Ûİš]\Š
-HYˆ
-˜[YHH›ÙK™Ù]
-šYŠJ_Bˆ^HÜ™[™\Š›Ûİ]™\Ûİ\˜Ù\ËÌKYÊBˆ^H™KœİXŠˆ–ÈJÈ‹ˆ‹^
-Bˆ^H™KœİXŠˆˆ
-—ˆ
-ˆ‹—ˆ‹^
-Bˆ™]\›ˆ™KœİXŠˆ—ÌËH‹——ˆ‹^
-Kœİš\
 
-B‚‚™Yˆİ^
-˜]Îˆ]\ÊHOˆİ‚ˆÚ\\œË™\Ûİ\˜Ù\ËÈHÜXÚØYÙJ˜]ÊBˆİ]ÙY[ˆH×KÙ]
+def _metadata(package: ET.Element, package_path: str, count: int) -> dict[str, str]:
+    out = {"package_path": package_path, "spine_items": str(count)}
+    if version := package.get("version"):
+        out["version"] = version
+    metadata = package.find(".//{*}metadata")
+    if metadata is None:
+        return out
+    for key in ("title", "language", "identifier"):
+        if value := _metadata_value(metadata, key):
+            out[key] = value
+    return out
 
-Bˆ›Üˆ]]H[ˆÚ\\œÎ‚ˆYÙ\İH\ÚX‹œÚLMŠ]JK™YÙ\İ
 
-BˆYˆYÙ\İ[ˆÙY[‚ˆ˜Z\ÙH˜[YQ\œ›ÜŠˆ™\XØ]HTPˆÜ[™HÛÛ[ˆÜ]HŠBˆÙY[‹˜Y
-YÙ\İ
-Bˆİ]˜\[™
-ˆÚ\\ˆÜ]W×ØÚ\\Š]]K™\Ûİ\˜Ù\Ê_HŠBˆ™]\›ˆ——ˆ‹š›Ú[Šİ]
-B‚‚˜Û\ÜÈTPY\\‚ˆ˜[YHH™\Xˆ‚ˆ™\œÚ[ÛˆHŒH‚ˆİY™š^\ÈH
-‹™\Xˆ‹
-B‚ˆYˆXÛÙJÙ[‹˜]Îˆ]\ÊHOˆ]\Î‚ˆ™]\›ˆ˜]Â‚ˆYˆ^˜Xİİ^
-Ù[‹XÛÙYˆ]\ÊHOˆİ‚ˆ™]\›ˆİ^
-XÛÙY
-B‚ˆYˆX\ÛØØ]ÜŠÙ[‹ØØ]ÜˆİŠHOˆİ‚ˆ™]\›ˆØØ]Ü‹œİš\
+def _tag(node: ET.Element) -> str:
+    return node.tag.rsplit("}", 1)[-1].lower()
 
-B‚ˆYˆ\ÜÙ]ÊÙ[‹XÛÙYˆ]\ÊHOˆ\VÜİ‹‹‹—N‚ˆ™]\›ˆ
 
-B‚ˆYˆY]Y]JÙ[‹]ˆ]X‹”]
-HOˆXİÜİ‹İ—N‚ˆËËXÚØYÙHHÜXÚØYÙJ]œ™XYØ]\Ê
-JBˆ™]\›ˆÈ˜ÛÛ[İ\Hˆ˜\XØ][Û‹Ù\XŠŞš\‹™š[[˜[YHˆ]›˜[YK
-ŠœXÚØYÙ_B
+def _asset(node: ET.Element, chapter: str, resources: set[str]) -> str:
+    target = (
+        node.get("src")
+        or node.get("href")
+        or next((value for key, value in node.attrib.items() if key.endswith("}href")), None)
+    )
+    if not target:
+        return ""
+    path = _member(chapter, target)
+    if path not in resources:
+        raise FileNotFoundError(f"missing EPUB asset: {path}")
+    return f"\n@@asset {path}\n"
+
+
+def _heading_locator(node: ET.Element, headings: list[int], ids: set[str]) -> str:
+    headings[0] += 1
+    if locator := node.get("id"):
+        return locator
+    locator = f"h{headings[0]}"
+    while locator in ids:
+        locator = f"_{locator}"
+    ids.add(locator)
+    return locator
+
+
+def _prefix(node: ET.Element, chapter: str, resources: set[str], headings: list[int], ids: set[str]) -> str:
+    tag = _tag(node)
+    if tag in ("img", "image"):
+        return _asset(node, chapter, resources)
+    if tag in _HEADINGS:
+        locator = _heading_locator(node, headings, ids)
+        return f"\n@@section {chapter}#{locator}\n{'#' * int(tag[1])} "
+    if tag in _BLOCKS:
+        return "\n"
+    return " @@formula " if tag == "math" else ""
+
+
+def _svg_assets(node: ET.Element, chapter: str, resources: set[str]) -> str:
+    return "".join(_asset(child, chapter, resources) for child in node.iter() if _tag(child) == "image")
+
+
+def _render(node: ET.Element, chapter: str, resources: set[str], headings: list[int], ids: set[str]) -> str:
+    tag = _tag(node)
+    if tag == "svg":
+        return _svg_assets(node, chapter, resources)
+    if tag in _SKIP:
+        return ""
+    out = [_prefix(node, chapter, resources, headings, ids), node.text or ""]
+    for child in node:
+        out.extend((_render(child, chapter, resources, headings, ids), child.tail or ""))
+    if tag in _BREAKS:
+        out.append("\n")
+    return "".join(out)
+
+
+def _chapter(path: str, data: bytes, resources: set[str]) -> str:
+    root = _xml(data, path)
+    ids = {value for node in root.iter() if (value := node.get("id"))}
+    text = _render(root, path, resources, [0], ids)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _text(raw: bytes) -> str:
+    chapters, resources, _ = _package(raw)
+    out, seen = [], set()
+    for path, data in chapters:
+        digest = hashlib.sha256(data).digest()
+        if digest in seen:
+            raise ValueError(f"duplicate EPUB spine content: {path}")
+        seen.add(digest)
+        out.append(f"@@chapter {path}\n{_chapter(path, data, resources)}")
+    return "\n\n".join(out)
+
+
+class EPUBAdapter:
+    name = "epub"
+    version = "1"
+    suffixes = (".epub",)
+
+    def decode(self, raw: bytes) -> bytes:
+        return raw
+
+    def extract_text(self, decoded: bytes) -> str:
+        return _text(decoded)
+
+    def map_locator(self, locator: str) -> str:
+        return locator.strip()
+
+    def assets(self, decoded: bytes) -> tuple[str, ...]:
+        return ()
+
+    def metadata(self, path: pathlib.Path) -> dict[str, str]:
+        _, _, package = _package(path.read_bytes())
+        return {"content_type": "application/epub+zip", "filename": path.name, **package}
