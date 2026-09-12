@@ -1,4 +1,4 @@
-"""Source adapter contract and built-in HTML implementation."""
+"""Source adapter contract and built-in text implementations."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import pathlib
 import re
 from html.parser import HTMLParser
 from typing import Protocol
+from urllib.parse import unquote, urlsplit
 
-# Adapter output is the representation hashed and consumed by every downstream gate.
+from markdown_it import MarkdownIt
 
 
 class SourceAdapter(Protocol):
@@ -75,4 +76,46 @@ class HTMLAdapter:
         return {"content_type": "text/html", "filename": path.name}
 
 
-ADAPTERS: tuple[SourceAdapter, ...] = (HTMLAdapter(),)
+_MARKDOWN = MarkdownIt("commonmark")
+
+
+def _image_targets(text: str) -> list[str]:
+    targets = []
+    for token in _MARKDOWN.parse(text):
+        for child in token.children or ():
+            if child.type == "image" and isinstance(src := child.attrGet("src"), str):
+                targets.append(src)
+    return targets
+
+
+def _local_asset(target: str) -> str | None:
+    target = re.sub(r"\\([\\() ])", r"\1", target)
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    return unquote(parsed.path) or None
+
+
+class MarkdownAdapter:
+    name = "markdown"
+    version = "1"
+    suffixes = (".md", ".markdown")
+
+    def decode(self, raw: bytes) -> str:
+        return raw.decode("utf-8")
+
+    def extract_text(self, decoded: str) -> str:
+        return decoded.replace("\r\n", "\n").replace("\r", "\n")
+
+    def map_locator(self, locator: str) -> str:
+        return locator.strip()
+
+    def assets(self, decoded: str) -> tuple[str, ...]:
+        local = (_local_asset(target) for target in _image_targets(decoded))
+        return tuple(dict.fromkeys(asset for asset in local if asset))
+
+    def metadata(self, path: pathlib.Path) -> dict[str, str]:
+        return {"content_type": "text/markdown", "filename": path.name}
+
+
+ADAPTERS: tuple[SourceAdapter, ...] = (HTMLAdapter(), MarkdownAdapter())
