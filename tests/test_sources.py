@@ -91,8 +91,9 @@ def test_markdown_preserves_structure_math_and_assets(tmp_path):
         "````md\r\n```\r\n![not-an-asset](missing.png)\r\n```\r\n````\r\n\r\n"
         "`![inline-example](missing-inline.png)`\r\n\r\n"
         "    ![indented-example](missing-indented.png)\r\n\r\n"
+        "<!-- ![commented](missing-comment.png) -->\r\n\r\n"
         "- item\r\n\r\n    ![Nested](assets/nested.png)\r\n\r\n"
-        "![Same](chart.png)\r\n![Paren](assets/chart(1).png)\r\n![Ref][plot]\r\n![Shortcut]\r\n"
+        "![A \\] chart](chart.png)\r\n![Paren](assets/chart(1).png)\r\n![Ref][plot]\r\n![Shortcut]\r\n"
         "[plot]: assets/ref.png\r\n[shortcut]: assets/shortcut.png\r\n"
         "![Remote](https://example.com/chart.png)\r\n"
     )
