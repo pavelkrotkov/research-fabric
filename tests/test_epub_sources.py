@@ -7,7 +7,7 @@ import pathlib
 
 import pytest
 
-from research_fabric._epub_adapter import _chapter
+from research_fabric._epub_adapter import _chapter, _member
 from research_fabric.sources import adapter_for, bind_manifest, representation_for, source_bundle
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -101,3 +101,8 @@ def test_epub_rejects_utf16_dtd():
     xhtml = '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE html [<!ENTITY x "INJECTED">]><html><body>&x;</body></html>'.encode("utf-16")
     with pytest.raises(ValueError, match="DTD/entity declarations forbidden"):
         _chapter("OEBPS/ch.xhtml", xhtml, set())
+
+
+def test_epub_rejects_backslash_resource_paths():
+    with pytest.raises(ValueError, match="unsafe EPUB resource"):
+        _member("OEBPS/ch.xhtml", r"\\server\share.png")

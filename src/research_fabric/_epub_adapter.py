@@ -51,7 +51,7 @@ def _check_depth(root: ET.Element, label: str) -> None:
 def _member(base: str, href: str) -> str:
     parsed = urlsplit(href)
     path = posixpath.normpath(posixpath.join(posixpath.dirname(base), unquote(parsed.path)))
-    invalid = any((parsed.scheme, parsed.netloc, parsed.query, not parsed.path, path.startswith(("../", "/")), path in (".", "..")))
+    invalid = any((parsed.scheme, parsed.netloc, parsed.query, "\\" in parsed.path, not parsed.path, path.startswith(("../", "/")), path in (".", "..")))
     if invalid:
         raise ValueError(f"unsafe EPUB resource: {href}")
     return path
