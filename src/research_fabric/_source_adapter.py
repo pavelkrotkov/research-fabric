@@ -101,6 +101,10 @@ def _markdown_outside_fences(text: str) -> str:
     return "\n".join(out)
 
 
+def _ends_destination(char: str, depth: int) -> bool:
+    return char.isspace() and not depth
+
+
 def _bare_destination(text: str) -> str | None:
     depth = 0
     chars = iter(enumerate(text))
@@ -113,7 +117,7 @@ def _bare_destination(text: str) -> str | None:
             if not depth:
                 return text[:pos]
             depth -= 1
-        elif char.isspace() and not depth:
+        elif _ends_destination(char, depth):
             return text[:pos]
     return None
 
