@@ -109,6 +109,13 @@ def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
     return metadata
 
 
+def _metadata_keys(row: dict, rep: SourceRepresentation) -> set[str]:
+    keys = set(REPRESENTATION_FIELDS)
+    if rep.assets_sha256 or ASSET_HASH_FIELD in row:
+        keys.add(ASSET_HASH_FIELD)
+    return keys
+
+
 def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.Path) -> dict:
     expected = _representation_metadata(rep)
     present = REPRESENTATION_FIELDS & row.keys()
@@ -117,10 +124,7 @@ def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.P
     if present != REPRESENTATION_FIELDS:
         missing = sorted(REPRESENTATION_FIELDS - present)
         raise RuntimeError(f"source representation metadata incomplete for {source.name}: {missing}")
-    keys = set(REPRESENTATION_FIELDS)
-    if rep.assets_sha256 or ASSET_HASH_FIELD in row:
-        keys.add(ASSET_HASH_FIELD)
-    drift = sorted(key for key in keys if row.get(key) != expected.get(key))
+    drift = sorted(key for key in _metadata_keys(row, rep) if row.get(key) != expected.get(key))
     if drift:
         raise RuntimeError(f"source representation drift for {source.name}: {drift}")
     return dict(row)
