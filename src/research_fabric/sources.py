@@ -146,7 +146,8 @@ def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[di
             raise RuntimeError(f"source manifest has no entry for {source.name}")
         rep = representation_for(source)
         if rep.original_sha256 != row.get("sha256"):
-            raise RuntimeError(f"sha256 mismatch for {source.name}: manifest={row.get('sha256')} actual={rep.original_sha256}")
+            manifest_sha = row.get("sha256")
+            raise RuntimeError(f"sha256 mismatch for {source.name}: manifest={manifest_sha} actual={rep.original_sha256}")
         enriched = dict(row)
         enriched.update(
             adapter=rep.adapter,
