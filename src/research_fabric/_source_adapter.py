@@ -140,11 +140,17 @@ def _reference_destination(alt: str, tail: str, definitions: dict[str, str]) -> 
 
 
 def _image_targets(text: str) -> list[str]:
-    definitions = {_label(label): target1 or target2 for label, target1, target2 in _MD_REF_DEF.findall(text)}
+    definitions = {
+        _label(label): target1 or target2 for label, target1, target2 in _MD_REF_DEF.findall(text)
+    }
     targets = []
     for match in _MD_IMAGE.finditer(text):
         tail = text[match.end() :]
-        target = _inline_destination(tail) if tail.startswith("(") else _reference_destination(match.group(1), tail, definitions)
+        target = (
+            _inline_destination(tail)
+            if tail.startswith("(")
+            else _reference_destination(match.group(1), tail, definitions)
+        )
         if target:
             targets.append(target)
     return targets
