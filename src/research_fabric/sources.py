@@ -62,7 +62,7 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
 def source_bundle(path: pathlib.Path) -> tuple[tuple[pathlib.Path, pathlib.Path], ...]:
     """Return source + local referenced assets as (input, relative-output) pairs."""
     rep = representation_for(path)
-    assets = tuple((_asset_path(path, asset), pathlib.Path(*pathlib.PurePosixPath(asset).parts)) for asset in rep.assets)
+    assets = tuple((_asset_path(path, asset), pathlib.Path(asset)) for asset in rep.assets)
     return ((path, pathlib.Path(path.name)), *assets)
 
 
