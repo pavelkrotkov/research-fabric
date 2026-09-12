@@ -70,7 +70,7 @@ def sha256_of(path: pathlib.Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def collect_provenance() -> dict:
+def collect_provenance(manifest_rows: list[dict]) -> dict:
     """Record the exact toolchain + inputs that produced this run."""
 
     def _toolver(cmd):
@@ -598,7 +598,7 @@ write_json(
         "branch": branch,
         "commit": head,
         "claims": len(claims),
-        "provenance": collect_provenance(),
+        "provenance": collect_provenance(manifest_rows),
     },
 )
 emit_output({"state": "READY_FOR_REVIEW", "claims": len(claims), "branch": branch, "commit": head})
