@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from ._source_adapter import ADAPTERS, SourceAdapter
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
+ASSET_HASH_FIELD = "assets_sha256"
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class SourceRepresentation:
     original_sha256: str
     representation_sha256: str
     assets: tuple[str, ...] = ()
+    assets_sha256: str | None = None
 
 
 def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceAdapter:
@@ -39,15 +41,24 @@ def _asset_path(source: pathlib.Path, relative: str) -> pathlib.Path:
     return candidate
 
 
+def _assets_sha256(source: pathlib.Path, assets: tuple[str, ...]) -> str | None:
+    if not assets:
+        return None
+    digest = hashlib.sha256()
+    for asset in assets:
+        path = _asset_path(source, asset)
+        if not path.is_file():
+            raise FileNotFoundError(f"missing source asset for {source.name}: {asset}")
+        digest.update(asset.encode("utf-8") + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceRepresentation:
     raw = path.read_bytes()
     adapter = adapter_for(path, adapters)
     decoded = adapter.decode(raw)
     text = adapter.extract_text(decoded)
     assets = adapter.assets(decoded)
-    for asset in assets:
-        if not _asset_path(path, asset).is_file():
-            raise FileNotFoundError(f"missing source asset for {path.name}: {asset}")
     return SourceRepresentation(
         path=path,
         adapter=adapter.name,
@@ -56,6 +67,7 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
         original_sha256=hashlib.sha256(raw).hexdigest(),
         representation_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         assets=assets,
+        assets_sha256=_assets_sha256(path, assets),
     )
 
 
@@ -86,12 +98,15 @@ def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ..
 
 
 def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
-    return {
+    metadata = {
         "adapter": rep.adapter,
         "adapter_version": rep.adapter_version,
         "representation_encoding": "utf-8",
         "representation_sha256": rep.representation_sha256,
     }
+    if rep.assets_sha256:
+        metadata[ASSET_HASH_FIELD] = rep.assets_sha256
+    return metadata
 
 
 def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.Path) -> dict:
@@ -102,7 +117,10 @@ def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.P
     if present != REPRESENTATION_FIELDS:
         missing = sorted(REPRESENTATION_FIELDS - present)
         raise RuntimeError(f"source representation metadata incomplete for {source.name}: {missing}")
-    drift = sorted(key for key in REPRESENTATION_FIELDS if row.get(key) != expected[key])
+    keys = set(REPRESENTATION_FIELDS)
+    if rep.assets_sha256 or ASSET_HASH_FIELD in row:
+        keys.add(ASSET_HASH_FIELD)
+    drift = sorted(key for key in keys if row.get(key) != expected.get(key))
     if drift:
         raise RuntimeError(f"source representation drift for {source.name}: {drift}")
     return dict(row)
