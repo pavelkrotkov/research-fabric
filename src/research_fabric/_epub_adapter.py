@@ -11,7 +11,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote, urlsplit
 
-_BLOCKS = {"p", "div", "li", "blockquote", "pre", "tr", "section", "article", "br"}
+_BLOCKS = {"p", "div", "li", "blockquote", "pre", "tr", "td", "th", "section", "article", "br"}
 _HEADINGS = {f"h{i}" for i in range(1, 7)}
 _SKIP = {"head", "script", "style", "svg"}
 _MAX_MEMBER_SIZE = 64 * 1024 * 1024

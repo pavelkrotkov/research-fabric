@@ -7,6 +7,7 @@ import pathlib
 
 import pytest
 
+from research_fabric._epub_adapter import _chapter
 from research_fabric.sources import adapter_for, bind_manifest, representation_for, source_bundle
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -74,3 +75,10 @@ def test_epub_spine_reorder_is_representation_drift(tmp_path):
 def test_epub_invalid_inputs_fail_clearly(name, error, message):
     with pytest.raises(error, match=message):
         representation_for(FIXTURES / name)
+
+
+def test_epub_table_cells_do_not_merge():
+    xhtml = b'<html><body><table><tr><td>12</td><td>34</td></tr></table></body></html>'
+    text = _chapter("OEBPS/ch.xhtml", xhtml, set())
+    assert "1234" not in text
+    assert "12\n\n34" in text
