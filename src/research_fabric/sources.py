@@ -8,9 +8,6 @@ from dataclasses import dataclass
 
 from ._source_adapter import ADAPTERS, SourceAdapter
 
-# A source is trusted only when both the original bytes and worker representation match.
-# Legacy rows have none of these fields; resumed rows must have all of them and match.
-
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 
 
@@ -22,6 +19,7 @@ class SourceRepresentation:
     text: str
     original_sha256: str
     representation_sha256: str
+    assets: tuple[str, ...] = ()
 
 
 def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceAdapter:
@@ -32,10 +30,22 @@ def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTE
     return matches[0]
 
 
+def _asset_path(source: pathlib.Path, relative: str) -> pathlib.Path:
+    path = pathlib.PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"unsafe source asset path in {source.name}: {relative}")
+    return source.parent.joinpath(*path.parts)
+
+
 def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceRepresentation:
     raw = path.read_bytes()
     adapter = adapter_for(path, adapters)
-    text = adapter.extract_text(adapter.decode(raw))
+    decoded = adapter.decode(raw)
+    text = adapter.extract_text(decoded)
+    assets = adapter.assets(decoded)
+    for asset in assets:
+        if not _asset_path(path, asset).is_file():
+            raise FileNotFoundError(f"missing source asset for {path.name}: {asset}")
     return SourceRepresentation(
         path=path,
         adapter=adapter.name,
@@ -43,7 +53,15 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
         text=text,
         original_sha256=hashlib.sha256(raw).hexdigest(),
         representation_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        assets=assets,
     )
+
+
+def source_bundle(path: pathlib.Path) -> tuple[tuple[pathlib.Path, pathlib.Path], ...]:
+    """Return source + local referenced assets as (input, relative-output) pairs."""
+    rep = representation_for(path)
+    assets = tuple((_asset_path(path, asset), pathlib.Path(*pathlib.PurePosixPath(asset).parts)) for asset in rep.assets)
+    return ((path, pathlib.Path(path.name)), *assets)
 
 
 def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> list[pathlib.Path]:
@@ -75,7 +93,6 @@ def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
 
 
 def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.Path) -> dict:
-    # Existing representation metadata is an attestation, not a cache: never rewrite drift.
     expected = _representation_metadata(rep)
     present = REPRESENTATION_FIELDS & row.keys()
     if not present:
