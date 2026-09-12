@@ -52,6 +52,23 @@ def test_html_path_locator_and_representation_mapping(tmp_path):
     assert rep.representation_sha256 == hashlib.sha256(b"Hello world").hexdigest()
 
 
+@pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])
+def test_bind_manifest_rejects_existing_representation_drift(tmp_path, field, value):
+    source = _html(tmp_path / "book-1.html")
+    rep = representation_for(source)
+    row = {
+        "snapshot": source.name,
+        "sha256": rep.original_sha256,
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+    }
+    row[field] = value
+    with pytest.raises(RuntimeError, match="representation drift"):
+        bind_manifest([source], [row])
+
+
 def _ledger(tmp_path: pathlib.Path, **overrides) -> pathlib.Path:
     root = tmp_path / "kb"
     snapshots = root / "evidence" / "snapshots"
