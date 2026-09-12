@@ -43,6 +43,25 @@ def load_jsonl(path: pathlib.Path):
     return rows
 
 
+def _representation_errors(row: dict, sid, snap: pathlib.Path) -> list[str]:
+    if REPRESENTATION_KEYS.isdisjoint(row):
+        return []
+    missing = REPRESENTATION_KEYS - row.keys()
+    if missing:
+        return [f"source representation metadata missing {sorted(missing)}: {sid}"]
+    try:
+        rep = representation_for(snap)
+    except (UnicodeDecodeError, ValueError) as exc:
+        return [f"source representation invalid: {sid}: {exc}"]
+    expected = {
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+    }
+    return [f"{key} mismatch: {sid}" for key, value in expected.items() if row.get(key) != value]
+
+
 def source_errors(root: pathlib.Path, row: dict, sid) -> list[str]:
     snap = (root / row.get("snapshot", "")).resolve()
     if root not in snap.parents:
@@ -53,23 +72,7 @@ def source_errors(root: pathlib.Path, row: dict, sid) -> list[str]:
     digest = hashlib.sha256(snap.read_bytes()).hexdigest()
     if digest != row.get("sha256"):
         errors.append(f"sha256 mismatch: {sid}")
-    if not any(key in row for key in REPRESENTATION_KEYS):
-        return errors
-    missing = REPRESENTATION_KEYS - row.keys()
-    if missing:
-        return errors + [f"source representation metadata missing {sorted(missing)}: {sid}"]
-    try:
-        rep = representation_for(snap)
-    except (UnicodeDecodeError, ValueError) as exc:
-        return errors + [f"source representation invalid: {sid}: {exc}"]
-    expected = {
-        "adapter": rep.adapter,
-        "adapter_version": rep.adapter_version,
-        "representation_encoding": "utf-8",
-        "representation_sha256": rep.representation_sha256,
-    }
-    errors.extend(f"{key} mismatch: {sid}" for key, value in expected.items() if row.get(key) != value)
-    return errors
+    return errors + _representation_errors(row, sid, snap)
 
 
 def main() -> int:
