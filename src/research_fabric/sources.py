@@ -11,9 +11,7 @@ from ._source_adapter import ADAPTERS, SourceAdapter
 # A source is trusted only when both the original bytes and worker representation match.
 # Legacy rows have none of these fields; resumed rows must have all of them and match.
 
-REPRESENTATION_FIELDS = frozenset(
-    {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
-)
+REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 
 
 @dataclass(frozen=True)
