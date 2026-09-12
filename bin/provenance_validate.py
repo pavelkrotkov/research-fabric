@@ -9,7 +9,11 @@ import json
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.sources import representation_for  # noqa: E402
+
 SOURCE_KEYS = {"source_id", "url", "title", "retrieved_at", "content_type", "sha256", "snapshot"}
+REPRESENTATION_KEYS = {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
 CLAIM_KEYS = {
     "claim_id",
     "claim",
@@ -39,6 +43,35 @@ def load_jsonl(path: pathlib.Path):
     return rows
 
 
+def source_errors(root: pathlib.Path, row: dict, sid) -> list[str]:
+    snap = (root / row.get("snapshot", "")).resolve()
+    if root not in snap.parents:
+        return [f"source snapshot escapes root: {sid}"]
+    if not snap.is_file():
+        return [f"missing snapshot: {sid}: {snap}"]
+    errors = []
+    digest = hashlib.sha256(snap.read_bytes()).hexdigest()
+    if digest != row.get("sha256"):
+        errors.append(f"sha256 mismatch: {sid}")
+    if not any(key in row for key in REPRESENTATION_KEYS):
+        return errors
+    missing = REPRESENTATION_KEYS - row.keys()
+    if missing:
+        return errors + [f"source representation metadata missing {sorted(missing)}: {sid}"]
+    try:
+        rep = representation_for(snap)
+    except (UnicodeDecodeError, ValueError) as exc:
+        return errors + [f"source representation invalid: {sid}: {exc}"]
+    expected = {
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+    }
+    errors.extend(f"{key} mismatch: {sid}" for key, value in expected.items() if row.get(key) != value)
+    return errors
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("field_root", type=pathlib.Path)
@@ -57,15 +90,7 @@ def main() -> int:
         if sid in source_ids:
             errors.append(f"duplicate source_id: {sid}")
         source_ids.add(sid)
-        snap = (root / row.get("snapshot", "")).resolve()
-        if root not in snap.parents:
-            errors.append(f"source snapshot escapes root: {sid}")
-        elif not snap.is_file():
-            errors.append(f"missing snapshot: {sid}: {snap}")
-        else:
-            digest = hashlib.sha256(snap.read_bytes()).hexdigest()
-            if digest != row.get("sha256"):
-                errors.append(f"sha256 mismatch: {sid}")
+        errors.extend(source_errors(root, row, sid))
     claim_ids = set()
     for line, row in claim_rows:
         missing = CLAIM_KEYS - row.keys()
