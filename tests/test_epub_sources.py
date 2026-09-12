@@ -77,8 +77,27 @@ def test_epub_invalid_inputs_fail_clearly(name, error, message):
         representation_for(FIXTURES / name)
 
 
-def test_epub_table_cells_do_not_merge():
-    xhtml = b'<html><body><table><tr><td>12</td><td>34</td></tr></table></body></html>'
+def test_epub_block_boundaries_do_not_merge():
+    xhtml = b'<html><body><table><tr><td>12</td><td>34</td></tr></table><dl><dt>56</dt><dd>78</dd></dl></body></html>'
     text = _chapter("OEBPS/ch.xhtml", xhtml, set())
-    assert "1234" not in text
-    assert "12\n\n34" in text
+    assert "1234" not in text and "5678" not in text
+
+
+def test_epub_svg_assets_are_bound_without_visual_text():
+    xhtml = b'<html><body><svg><text>hidden</text><image href="images/chart.png"/></svg></body></html>'
+    text = _chapter("OEBPS/ch.xhtml", xhtml, {"OEBPS/images/chart.png"})
+    assert text == "@@asset OEBPS/images/chart.png"
+    with pytest.raises(FileNotFoundError, match="missing EPUB asset"):
+        _chapter("OEBPS/ch.xhtml", xhtml, set())
+
+
+def test_epub_generated_heading_locators_are_unique():
+    xhtml = b'<html><body><h1 id="h2">First</h1><h1>Second</h1></body></html>'
+    locators = [line for line in _chapter("OEBPS/ch.xhtml", xhtml, set()).splitlines() if line.startswith("@@section ")]
+    assert locators == ["@@section OEBPS/ch.xhtml#h2", "@@section OEBPS/ch.xhtml#_h2"]
+
+
+def test_epub_rejects_utf16_dtd():
+    xhtml = '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE html [<!ENTITY x "INJECTED">]><html><body>&x;</body></html>'.encode("utf-16")
+    with pytest.raises(ValueError, match="DTD/entity declarations forbidden"):
+        _chapter("OEBPS/ch.xhtml", xhtml, set())
