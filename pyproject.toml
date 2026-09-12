@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "PyYAML>=6.0",
+    "defusedxml>=0.7.1,<1",
     "markdown-it-py>=4.2,<5",
     "openai>=1.0",
 ]

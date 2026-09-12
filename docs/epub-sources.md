@@ -1,6 +1,6 @@
 # EPUB sources
 
-EPUB is an optional source format. The adapter uses only the Python standard library and treats the EPUB container as immutable input: provenance records the original EPUB SHA-256, adapter/version, UTF-8 extracted-representation SHA-256, and deterministic package metadata (`title`, `language`, `identifier`, package version/path, and spine count).
+EPUB is an optional source format. The adapter uses `defusedxml` for hostile XML parsing and otherwise Python's standard library. It treats the EPUB container as immutable input: provenance records the original EPUB SHA-256, adapter/version, UTF-8 extracted-representation SHA-256, and deterministic package metadata (`title`, `language`, `identifier`, package version/path, and spine count).
 
 Extraction follows the OPF spine exactly. Each XHTML spine item emits stable `@@chapter <path>` and `@@section <path>#<id-or-heading-ordinal>` locators. Text is extracted in document order; MathML contributes its textual content after an `@@formula` marker. Embedded image references emit `@@asset <path>` markers. Missing package/manifest resources, duplicate archive entries/resources/spine IDs, duplicate spine content, unsupported non-XHTML spine items, unsafe/external paths, malformed ZIP/XML, DTD/entity declarations, excessive XML nesting, and excessive ZIP expansion fail closed.
 

@@ -1,4 +1,4 @@
-"""Deterministic EPUB source extraction using only the standard library."""
+"""Deterministic, fail-closed EPUB source extraction."""
 
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote, urlsplit
 
+from defusedxml import ElementTree as DET
+from defusedxml.common import DefusedXmlException
+
 _BLOCKS = {"p", "div", "li", "blockquote", "pre", "tr", "td", "th", "section", "article", "br"}
 _HEADINGS = {f"h{i}" for i in range(1, 7)}
 _SKIP = {"head", "script", "style", "svg"}
@@ -18,14 +21,13 @@ _MAX_MEMBER_SIZE = 64 * 1024 * 1024
 _MAX_ARCHIVE_SIZE = 256 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 1000
 _MAX_XML_DEPTH = 128
-_FORBIDDEN_XML = re.compile(br"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 
 
 def _xml(data: bytes, label: str) -> ET.Element:
-    if _FORBIDDEN_XML.search(data):
-        raise ValueError(f"DTD/entity declarations forbidden in EPUB XML: {label}")
     try:
-        root = ET.fromstring(data)
+        root = DET.fromstring(data, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+    except DefusedXmlException as exc:
+        raise ValueError(f"DTD/entity declarations forbidden in EPUB XML: {label}") from exc
     except ET.ParseError as exc:
         raise ValueError(f"malformed EPUB XML {label}: {exc}") from exc
     _check_depth(root, label)
@@ -44,13 +46,13 @@ def _check_depth(root: ET.Element, label: str) -> None:
 def _member(base: str, href: str) -> str:
     parsed = urlsplit(href)
     path = posixpath.normpath(posixpath.join(posixpath.dirname(base), unquote(parsed.path)))
-    invalid = any((parsed.scheme, parsed.netloc, not parsed.path, path.startswith(("../", "/")), path in (".", "..")))
+    invalid = any((parsed.scheme, parsed.netloc, parsed.query, not parsed.path, path.startswith(("../", "/")), path in (".", "..")))
     if invalid:
         raise ValueError(f"unsafe EPUB resource: {href}")
     return path
 
 
-def _valid_mimetype_entry(infos: list[zipfile.ZipInfo]) -> bool:
+def _valid_mimetype_entry(infos: list[zipfile.ZipInfo)]) -> bool:
     if not infos:
         return False
     first = infos[0]
@@ -60,8 +62,6 @@ def _valid_mimetype_entry(infos: list[zipfile.ZipInfo]) -> bool:
 def _safe_member(info: zipfile.ZipInfo) -> None:
     if info.file_size > _MAX_MEMBER_SIZE:
         raise ValueError(f"EPUB member too large: {info.filename}")
-    if info.file_size and not info.compress_size:
-        raise ValueError(f"unsafe EPUB compression ratio: {info.filename}")
     if info.compress_size and info.file_size > info.compress_size * _MAX_COMPRESSION_RATIO:
         raise ValueError(f"unsafe EPUB compression ratio: {info.filename}")
 
@@ -175,7 +175,7 @@ def _tag(node: ET.Element) -> str:
 def _asset(node: ET.Element, chapter: str, resources: set[str]) -> str:
     target = (
         node.get("src")
-        or node.get("href")
+        or noe.get("href")
         or next((value for key, value in node.attrib.items() if key.endswith("}href")), None)
     )
     if not target:
@@ -237,7 +237,6 @@ class EPUBAdapter:
     suffixes = (".epub",)
 
     def decode(self, raw: bytes) -> bytes:
-        _package(raw)
         return raw
 
     def extract_text(self, decoded: bytes) -> str:
