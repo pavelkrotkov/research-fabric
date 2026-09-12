@@ -97,11 +97,12 @@ def test_markdown_preserves_structure_math_and_assets(tmp_path):
     adapter = adapter_for(source)
     rep = representation_for(source)
     expected_assets = ("chart.png", "assets/chart(1).png", "assets/ref.png", "assets/shortcut.png")
+    expected_bundle = ((source, pathlib.Path("book-1.md")), *zip(paths, map(pathlib.Path, expected_assets)))
     assert adapter.metadata(source) == {"content_type": "text/markdown", "filename": "book-1.md"}
     assert adapter.map_locator("  Heading > table row 1  ") == "Heading > table row 1"
     assert rep.text == raw.replace("\r\n", "\n")
     assert rep.assets == expected_assets
-    assert source_bundle(source) == ((source, pathlib.Path("book-1.md")), *zip(paths, map(pathlib.Path, expected_assets)))
+    assert source_bundle(source) == expected_bundle
 
 
 def test_markdown_missing_or_unsafe_assets_fail_closed(tmp_path):
@@ -124,7 +125,9 @@ def test_markdown_asset_change_invalidates_provenance(tmp_path):
         bind_manifest([source], [row])
 
 
-@pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])
+@pytest.mark.parametrize(
+    "field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)]
+)
 def test_bind_manifest_rejects_existing_representation_drift(tmp_path, field, value):
     source = _html(tmp_path / "book-1.html")
     row = _manifest_row(source)
