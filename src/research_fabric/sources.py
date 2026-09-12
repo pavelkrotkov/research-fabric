@@ -32,9 +32,11 @@ def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTE
 
 def _asset_path(source: pathlib.Path, relative: str) -> pathlib.Path:
     path = pathlib.PurePosixPath(relative)
-    if path.is_absolute() or ".." in path.parts:
+    root = source.parent.resolve()
+    candidate = root.joinpath(*path.parts).resolve()
+    if path.is_absolute() or ".." in path.parts or (candidate != root and root not in candidate.parents):
         raise ValueError(f"unsafe source asset path in {source.name}: {relative}")
-    return source.parent.joinpath(*path.parts)
+    return candidate
 
 
 def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceRepresentation:
