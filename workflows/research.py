@@ -26,7 +26,7 @@ from research_fabric.core import (
 from research_fabric.core import (
     load_project as load_project_spec,
 )
-from research_fabric.sources import bind_manifest, discover_sources
+from research_fabric.sources import bind_manifest, discover_sources, source_bundle
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
 # into claims + notes (snapshot regex, themes, source-id/note templates,
@@ -417,11 +417,13 @@ if compiler_dir.exists():
     shutil.rmtree(compiler_dir)
 compiler_dir.mkdir()
 for src in source_files:
-    dest = snap_dest / src.name
-    if dest.exists():
-        dest.chmod(0o644)
-    shutil.copy2(src, dest)
-    dest.chmod(0o444)
+    for original, relative in source_bundle(src):
+        dest = snap_dest / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            dest.chmod(0o644)
+        shutil.copy2(original, dest)
+        dest.chmod(0o444)
     shutil.copy2(src, compiler_dir / src.name)
 subprocess.run(["openkb", "--kb-dir", str(field_root), "add", str(compiler_dir)], check=True, text=True)
 subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
