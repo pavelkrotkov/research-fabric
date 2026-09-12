@@ -135,12 +135,16 @@ def _materialize_claims(packet_dir, field_root, note_by_source, source_by_file):
         print(f"[dryrun] DROPPED {len(dropped)} claim(s): {json.dumps(dropped, indent=2)}")
         return None
     assert claims, "no claims materialized"
-    (field_root / "evidence" / "claims.jsonl").write_text(
-        "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n"
-    )
-    print(f"[dryrun] claims materialized: {len(claims)}")
-    print(f"[dryrun] distinct note targets: {sorted({c['note'] for c in claims})}")
     return claims
+
+
+def _write_claims(field_root: pathlib.Path, claims: list[dict]):
+    (field_root / "evidence" / "claims.jsonl").write_text(
+        "\n".join(json.dumps(claim, ensure_ascii=False) for claim in claims) + "\n"
+    )
+    notes_used = sorted({claim["note"] for claim in claims})
+    print(f"[dryrun] claims materialized: {len(claims)}")
+    print(f"[dryrun] distinct note targets: {notes_used}")
 
 
 def _write_sources_manifest(field_root, source_files, manifest_rows):
@@ -241,6 +245,7 @@ def main() -> int:
     claims = _materialize_claims(run_root / "evidence", field_root, note_by_source, source_by_file)
     if claims is None:
         return 1
+    _write_claims(field_root, claims)
     _write_sources_manifest(field_root, source_files, manifest_rows)
     if not _gate(field_root, "provenance_validate.py", "provenance"):
         return 1
