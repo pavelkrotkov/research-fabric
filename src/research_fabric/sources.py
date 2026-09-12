@@ -10,6 +10,10 @@ from ._source_adapter import ADAPTERS, SourceAdapter
 
 # A source is trusted only when both the original bytes and worker representation match.
 
+REPRESENTATION_FIELDS = frozenset(
+    {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
+)
+
 
 @dataclass(frozen=True)
 class SourceRepresentation:
@@ -62,8 +66,32 @@ def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ..
     return found
 
 
+def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
+    return {
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+    }
+
+
+def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.Path) -> dict:
+    # Existing representation metadata is an attestation, not a cache: never rewrite drift.
+    expected = _representation_metadata(rep)
+    present = REPRESENTATION_FIELDS & row.keys()
+    if not present:
+        return {**row, **expected}
+    if present != REPRESENTATION_FIELDS:
+        missing = sorted(REPRESENTATION_FIELDS - present)
+        raise RuntimeError(f"source representation metadata incomplete for {source.name}: {missing}")
+    drift = sorted(key for key in REPRESENTATION_FIELDS if row.get(key) != expected[key])
+    if drift:
+        raise RuntimeError(f"source representation drift for {source.name}: {drift}")
+    return dict(row)
+
+
 def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[dict]:
-    """Verify original bytes and add exact worker-representation provenance."""
+    """Verify original bytes and bind exact worker-representation provenance."""
     by_name = {}
     for row in rows:
         name = pathlib.Path(row.get("snapshot", "")).name
@@ -80,12 +108,5 @@ def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[di
         rep = representation_for(source)
         if rep.original_sha256 != row.get("sha256"):
             raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
-        enriched = dict(row)
-        enriched.update(
-            adapter=rep.adapter,
-            adapter_version=rep.adapter_version,
-            representation_encoding="utf-8",
-            representation_sha256=rep.representation_sha256,
-        )
-        bound.append(enriched)
+        bound.append(_bind_representation(row, rep, source))
     return bound
