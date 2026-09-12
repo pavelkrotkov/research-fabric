@@ -9,6 +9,8 @@ from html.parser import HTMLParser
 from typing import Protocol
 from urllib.parse import unquote, urlsplit
 
+from markdown_it import MarkdownIt
+
 
 class SourceAdapter(Protocol):
     """Minimal contract every source format must implement."""
@@ -74,161 +76,15 @@ class HTMLAdapter:
         return {"content_type": "text/html", "filename": path.name}
 
 
-_MD_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
-_MD_IMAGE = re.compile(r"(?<!\\)!\[([^\]]*)\]")
-_MD_REF_DEF = re.compile(r"(?m)^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))")
-_MD_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", re.DOTALL)
-_MD_LIST_ITEM = re.compile(r"^ *(?:[-+*]|\d+[.)])[ \t]+")
-
-
-def _closes_fence(match, fence: str) -> bool:
-    if not match:
-        return False
-    marker, tail = match.groups()
-    return marker[0] == fence[0] and len(marker) >= len(fence) and not tail.strip()
-
-
-def _markdown_outside_fences(text: str) -> str:
-    out, fence = [], None
-    for line in text.splitlines():
-        match = _MD_FENCE.match(line)
-        if fence:
-            if _closes_fence(match, fence):
-                fence = None
-            continue
-        if match:
-            fence = match.group(1)
-            continue
-        out.append(line)
-    return "\n".join(out)
-
-
-def _indent_width(line: str) -> int:
-    expanded = line.expandtabs(4)
-    return len(expanded) - len(expanded.lstrip(" "))
-
-
-def _list_content_indent(line: str) -> int | None:
-    match = _MD_LIST_ITEM.match(line.expandtabs(4))
-    return match.end() if match else None
-
-
-def _code_indent(list_indent: int) -> int:
-    return list_indent + 4 if list_indent else 4
-
-
-def _code_continues(in_code: bool, blank: bool, indent: int, threshold: int) -> bool:
-    return in_code and (blank or indent >= threshold)
-
-
-def _code_starts(blank: bool, previous_blank: bool, indent: int, threshold: int) -> bool:
-    return not blank and previous_blank and indent >= threshold
-
-
-def _next_list_indent(line: str, blank: bool, indent: int, current: int) -> int:
-    if blank:
-        return current
-    item_indent = _list_content_indent(line)
-    if item_indent is not None:
-        return item_indent
-    if current and indent < current:
-        return 0
-    return current
-
-
-def _markdown_outside_indented_code(text: str) -> str:
-    out = []
-    list_indent = 0
-    in_code = False
-    previous_blank = True
-    for line in text.splitlines():
-        blank = not line.strip()
-        indent = _indent_width(line)
-        threshold = _code_indent(list_indent)
-        if _code_continues(in_code, blank, indent, threshold):
-            previous_blank = blank
-            continue
-        if in_code:
-            in_code = False
-        if _code_starts(blank, previous_blank, indent, threshold):
-            in_code = True
-            previous_blank = False
-            continue
-        list_indent = _next_list_indent(line, blank, indent, list_indent)
-        out.append(line)
-        previous_blank = blank
-    return "\n".join(out)
-
-
-def _mask_code_span(match: re.Match) -> str:
-    return re.sub(r"[^\n]", " ", match.group(0))
-
-
-def _markdown_asset_text(text: str) -> str:
-    text = _markdown_outside_fences(text)
-    text = _markdown_outside_indented_code(text)
-    return _MD_CODE_SPAN.sub(_mask_code_span, text)
-
-
-def _destination_step(char: str, depth: int) -> tuple[int, bool]:
-    if char == "(":
-        return depth + 1, False
-    if char == ")":
-        return max(depth - 1, 0), not depth
-    return depth, char.isspace() and not depth
-
-
-def _bare_destination(text: str) -> str | None:
-    depth = 0
-    escaped = False
-    for pos, char in enumerate(text):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        depth, done = _destination_step(char, depth)
-        if done:
-            return text[:pos]
-    return None
-
-
-def _inline_destination(tail: str) -> str | None:
-    body = tail[1:].lstrip()
-    if body.startswith("<"):
-        end = body.find(">")
-        return body[1:end] if end >= 0 else None
-    return _bare_destination(body)
-
-
-def _label(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _reference_destination(alt: str, tail: str, definitions: dict[str, str]) -> str | None:
-    if not tail.startswith("["):
-        return definitions.get(_label(alt))
-    end = tail.find("]")
-    if end < 0:
-        return None
-    return definitions.get(_label(tail[1:end] or alt))
+_MARKDOWN = MarkdownIt("commonmark")
 
 
 def _image_targets(text: str) -> list[str]:
-    definitions = {
-        _label(label): target1 or target2 for label, target1, target2 in _MD_REF_DEF.findall(text)
-    }
     targets = []
-    for match in _MD_IMAGE.finditer(text):
-        tail = text[match.end() :]
-        target = (
-            _inline_destination(tail)
-            if tail.startswith("(")
-            else _reference_destination(match.group(1), tail, definitions)
-        )
-        if target:
-            targets.append(target)
+    for token in _MARKDOWN.parse(text):
+        for child in token.children or ():
+            if child.type == "image" and isinstance(src := child.attrGet("src"), str):
+                targets.append(src)
     return targets
 
 
@@ -255,8 +111,7 @@ class MarkdownAdapter:
         return locator.strip()
 
     def assets(self, decoded: str) -> tuple[str, ...]:
-        targets = _image_targets(_markdown_asset_text(decoded))
-        local = (_local_asset(target) for target in targets)
+        local = (_local_asset(target) for target in _image_targets(decoded))
         return tuple(dict.fromkeys(asset for asset in local if asset))
 
     def metadata(self, path: pathlib.Path) -> dict[str, str]:
