@@ -13,7 +13,6 @@ path and commit template, mirroring the engine. Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import pathlib
 import re
@@ -26,6 +25,9 @@ import yaml
 
 FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
+from research_fabric.sources import bind_manifest, discover_sources, representation_for, source_bundle  # noqa: E402
 
 
 def _load_project(name):
@@ -39,16 +41,6 @@ def _template(tpl, **kw):
     return tpl.format(**kw)
 
 
-def normalize_packet(value):
-    for claim in value.get("claims", []):
-        if isinstance(claim, dict):
-            if isinstance(claim.get("source_file"), str):
-                claim["source_file"] = re.sub(r"\s+", "", claim["source_file"])
-            if isinstance(claim.get("excerpt"), str):
-                claim["excerpt"] = re.sub(r"\s+", " ", claim["excerpt"]).strip()
-    return value
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("run_root")
@@ -58,17 +50,13 @@ def main() -> int:
     args = ap.parse_args()
     run_root = pathlib.Path(args.run_root).resolve()
     project = _load_project(args.project)
-    # Mirror the engine's dynamic source mapping from the project spec.
     BOOK_RE = re.compile(project["snapshot_pattern"])
     source_dir = run_root / "sources"
     packet_dir = run_root / "evidence"
-    source_files = sorted(p for p in source_dir.glob("*.html") if BOOK_RE.search(p.name))
-    books = [int(m.group(1)) for p in source_files if (m := BOOK_RE.search(p.name))]
-    _sid = project["source_id_template"]
-    _nt = project["note_template"]
-    _bt = project.get("book_label_template", "{n}.html")
-    SOURCE_BY_FILE = {_bt.format(n=b): _sid.format(n=b) for b in books}
-    NOTE_BY_SOURCE = {_sid.format(n=b): _nt.format(n=b) for b in books}
+    source_files = [p for p in discover_sources(source_dir) if BOOK_RE.search(p.name)]
+    assert source_files, "no supported source snapshots"
+    books = sorted({int(m.group(1)) for p in source_files if (m := BOOK_RE.search(p.name))})
+    NOTE_BY_SOURCE, SOURCE_BY_FILE = source_mappings(project, books)
 
     workdir = pathlib.Path(tempfile.mkdtemp(prefix="dryrun-pub-"))
     field_root = workdir / "kb"
@@ -80,7 +68,6 @@ def main() -> int:
     subprocess.run(["git", "-C", str(field_root), "config", "user.email", "dryrun@local"], check=True)
     subprocess.run(["git", "-C", str(field_root), "config", "user.name", "dryrun"], check=True)
 
-    # --- manifest resolution + digest re-verification -----------------------
     run_manifest = run_root / "source-manifest.jsonl"
     canonical = (
         pathlib.Path(__file__).resolve().parents[1] / "corpora" / project["corpus_dir"] / project["manifest_path"]
@@ -89,26 +76,21 @@ def main() -> int:
     assert manifest_path.exists(), f"no manifest at {manifest_path}"
     print(f"[dryrun] manifest: {manifest_path}")
     manifest_rows = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
-    by_name = {pathlib.Path(r["snapshot"]).name: r for r in manifest_rows}
-    for src in source_files:
-        row = by_name.get(src.name)
-        assert row is not None, f"manifest missing {src.name}"
-        digest = hashlib.sha256(src.read_bytes()).hexdigest()
-        assert digest == row["sha256"], f"sha256 mismatch {src.name}"
+    manifest_rows = bind_manifest(source_files, manifest_rows)
     print(f"[dryrun] manifest digests verified for {len(source_files)} sources")
 
-    # --- snapshots ----------------------------------------------------------
     snap_dest = field_root / "evidence" / "snapshots"
     snap_dest.mkdir(parents=True, exist_ok=True)
     for src in source_files:
-        dest = snap_dest / src.name
-        if dest.exists():
-            dest.chmod(0o644)
-        shutil.copy2(src, dest)
-        dest.chmod(0o444)
+        for original, relative in source_bundle(src):
+            dest = snap_dest / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                dest.chmod(0o644)
+            shutil.copy2(original, dest)
+            dest.chmod(0o444)
     print(f"[dryrun] snapshots copied: {len(source_files)}")
 
-    # --- ledger materialization --------------------------------------------
     claims, dropped = [], []
     for packet_path in sorted(packet_dir.glob("worker-*.json")):
         sid = packet_path.stem.replace("worker-", "")
@@ -150,7 +132,6 @@ def main() -> int:
     manifest_out = []
     present_names = {p.name for p in source_files}
     for row in manifest_rows:
-        # Only emit rows for snapshots present in this run (mirrors engine).
         if pathlib.Path(row["snapshot"]).name not in present_names:
             continue
         row = dict(row)
@@ -158,7 +139,6 @@ def main() -> int:
         manifest_out.append(json.dumps(row, ensure_ascii=False))
     (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n")
 
-    # --- deterministic provenance gate --------------------------------------
     prov = subprocess.run(
         [sys.executable, str(FABRIC / "bin" / "provenance_validate.py"), str(field_root)],
         text=True,
@@ -168,7 +148,6 @@ def main() -> int:
     if prov.returncode != 0:
         return 1
 
-    # --- deterministic excerpt-grounding gate -------------------------------
     ground = subprocess.run(
         [sys.executable, str(FABRIC / "bin" / "excerpt_grounding.py"), str(field_root)], text=True, capture_output=True
     )
@@ -176,7 +155,6 @@ def main() -> int:
     if ground.returncode != 0:
         return 1
 
-    # --- diff generation ----------------------------------------------------
     subprocess.run(["git", "-C", str(field_root), "add", "-N", "--", "evidence"], check=True)
     diff = subprocess.run(
         ["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
@@ -192,11 +170,14 @@ def main() -> int:
     for f in files_in_diff:
         print(f"[dryrun]   {f}")
 
-    # --- excerpt grounding (mirrors the deterministic gate) -----------------
     sys.path.insert(0, str(FABRIC / "bin"))
     import excerpt_grounding
 
-    snaps = {p.name: p.read_text(encoding="utf-8", errors="replace") for p in snap_dest.iterdir()}
+    snaps = {
+        name: representation_for(snap_dest / name).text
+        for name in SOURCE_BY_FILE
+        if (snap_dest / name).is_file()
+    }
     file_by_source = {v: k for k, v in SOURCE_BY_FILE.items()}
     misses = []
     for c in claims:
@@ -207,7 +188,6 @@ def main() -> int:
     for cid, frag in misses[:10]:
         print(f"[dryrun]   MISS {cid}: {frag}...")
 
-    # --- commit -------------------------------------------------------------
     subprocess.run(["git", "-C", str(field_root), "add", "--", "evidence"], check=True)
     subprocess.run(["git", "-C", str(field_root), "diff", "--cached", "--check"], check=True)
     subprocess.run(
