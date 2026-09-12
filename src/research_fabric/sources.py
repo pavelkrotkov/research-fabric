@@ -36,7 +36,7 @@ def _asset_path(source: pathlib.Path, relative: str) -> pathlib.Path:
     path = pathlib.PurePosixPath(relative)
     root = source.parent.resolve()
     candidate = root.joinpath(*path.parts).resolve()
-    if path.is_absolute() or ".." in path.parts or (candidate != root and root not in candidate.parents):
+    if path.is_absolute() or ".." in path.parts or candidate == root or root not in candidate.parents:
         raise ValueError(f"unsafe source asset path in {source.name}: {relative}")
     return candidate
 
