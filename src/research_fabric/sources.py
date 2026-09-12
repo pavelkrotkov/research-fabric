@@ -130,6 +130,13 @@ def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.P
     return dict(row)
 
 
+def _manifest_representation(source: pathlib.Path) -> SourceRepresentation:
+    try:
+        return representation_for(source)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"source representation invalid for {source.name}: {exc}") from exc
+
+
 def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[dict]:
     """Verify original bytes and bind exact worker-representation provenance."""
     by_name = {}
@@ -145,7 +152,7 @@ def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[di
         row = by_name.get(source.name)
         if row is None:
             raise RuntimeError(f"source manifest has no entry for {source.name}")
-        rep = representation_for(source)
+        rep = _manifest_representation(source)
         if rep.original_sha256 != row.get("sha256"):
             raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
         bound.append(_bind_representation(row, rep, source))
