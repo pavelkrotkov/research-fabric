@@ -66,6 +66,9 @@ def test_epub_spine_reorder_is_representation_drift(tmp_path):
         ("malformed.epub", ValueError, "malformed EPUB archive"),
         ("missing-resource.epub", FileNotFoundError, "missing EPUB resource"),
         ("duplicate-content.epub", ValueError, "duplicate EPUB spine content"),
+        ("dtd.epub", ValueError, "DTD/entity declarations forbidden"),
+        ("deep.epub", ValueError, "XML nesting exceeds"),
+        ("zip-bomb.epub", ValueError, "unsafe EPUB compression ratio"),
     ],
 )
 def test_epub_invalid_inputs_fail_clearly(name, error, message):

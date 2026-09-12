@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import io
 import pathlib
 import posixpath
@@ -15,13 +14,31 @@ from urllib.parse import unquote, urlsplit
 _BLOCKS = {"p", "div", "li", "blockquote", "pre", "tr", "section", "article", "br"}
 _HEADINGS = {f"h{i}" for i in range(1, 7)}
 _SKIP = {"head", "script", "style", "svg"}
+_MAX_MEMBER_SIZE = 64 * 1024 * 1024
+_MAX_ARCHIVE_SIZE = 256 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 1000
+_MAX_XML_DEPTH = 128
+_FORBIDDEN_XML = re.compile(br"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 
 
 def _xml(data: bytes, label: str) -> ET.Element:
+    if _FORBIDDEN_XML.search(data):
+        raise ValueError(f"DTD/entity declarations forbidden in EPUB XML: {label}")
     try:
-        return ET.fromstring(data)
+        root = ET.fromstring(data)
     except ET.ParseError as exc:
         raise ValueError(f"malformed EPUB XML {label}: {exc}") from exc
+    _check_depth(root, label)
+    return root
+
+
+def _check_depth(root: ET.Element, label: str) -> None:
+    stack = [(root, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > _MAX_XML_DEPTH:
+            raise ValueError(f"EPUB XML nesting exceeds {_MAX_XML_DEPTH}: {label}")
+        stack.extend((child, depth + 1) for child in node)
 
 
 def _member(base: str, href: str) -> str:
@@ -40,23 +57,43 @@ def _valid_mimetype_entry(infos: list[zipfile.ZipInfo]) -> bool:
     return first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED
 
 
+def _safe_member(info: zipfile.ZipInfo) -> None:
+    if info.file_size > _MAX_MEMBER_SIZE:
+        raise ValueError(f"EPUB member too large: {info.filename}")
+    if info.file_size and not info.compress_size:
+        raise ValueError(f"unsafe EPUB compression ratio: {info.filename}")
+    if info.compress_size and info.file_size > info.compress_size * _MAX_COMPRESSION_RATIO:
+        raise ValueError(f"unsafe EPUB compression ratio: {info.filename}")
+
+
+def _safe_archive(infos: list[zipfile.ZipInfo]) -> None:
+    total = 0
+    for info in infos:
+        _safe_member(info)
+        total += info.file_size
+        if total > _MAX_ARCHIVE_SIZE:
+            raise ValueError("EPUB uncompressed size limit exceeded")
+
+
 def _archive(raw: bytes) -> tuple[zipfile.ZipFile, set[str]]:
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile as exc:
         raise ValueError("malformed EPUB archive") from exc
-    infos = zf.infolist()
-    names = [info.filename for info in infos]
-    if len(names) != len(set(names)):
+    try:
+        infos = zf.infolist()
+        _safe_archive(infos)
+        names = [info.filename for info in infos]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate EPUB archive member")
+        if not _valid_mimetype_entry(infos):
+            raise ValueError("invalid EPUB mimetype entry")
+        if zf.read("mimetype") != b"application/epub+zip":
+            raise ValueError("invalid EPUB mimetype")
+        return zf, set(names)
+    except Exception:
         zf.close()
-        raise ValueError("duplicate EPUB archive member")
-    if not _valid_mimetype_entry(infos):
-        zf.close()
-        raise ValueError("invalid EPUB mimetype entry")
-    if zf.read("mimetype") != b"application/epub+zip":
-        zf.close()
-        raise ValueError("invalid EPUB mimetype")
-    return zf, set(names)
+        raise
 
 
 def _manifest(package: ET.Element, package_path: str, names: set[str]) -> dict[str, tuple[str, str]]:
@@ -176,7 +213,7 @@ def _render(node: ET.Element, chapter: str, resources: set[str], headings: list[
 
 def _chapter(path: str, data: bytes, resources: set[str]) -> str:
     root = _xml(data, path)
-    text = html.unescape(_render(root, path, resources, [0]))
+    text = _render(root, path, resources, [0])
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
