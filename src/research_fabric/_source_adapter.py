@@ -101,23 +101,26 @@ def _markdown_outside_fences(text: str) -> str:
     return "\n".join(out)
 
 
-def _ends_destination(char: str, depth: int) -> bool:
-    return char.isspace() and not depth
+def _destination_step(char: str, depth: int) -> tuple[int, bool]:
+    if char == "(":
+        return depth + 1, False
+    if char == ")":
+        return max(depth - 1, 0), not depth
+    return depth, char.isspace() and not depth
 
 
 def _bare_destination(text: str) -> str | None:
     depth = 0
-    chars = iter(enumerate(text))
-    for pos, char in chars:
+    escaped = False
+    for pos, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
         if char == "\\":
-            next(chars, None)
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            if not depth:
-                return text[:pos]
-            depth -= 1
-        elif _ends_destination(char, depth):
+            escaped = True
+            continue
+        depth, done = _destination_step(char, depth)
+        if done:
             return text[:pos]
     return None
 
