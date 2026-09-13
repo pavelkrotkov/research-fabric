@@ -9,10 +9,8 @@ import posixpath
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+import xml.parsers.expat as expat
 from urllib.parse import unquote, urlsplit
-
-from defusedxml import ElementTree as DET
-from defusedxml.common import DefusedXmlException
 
 _BLOCKS = {
     "address", "article", "aside", "blockquote", "br", "caption", "dd", "details", "div", "dl", "dt",
@@ -28,12 +26,30 @@ _MAX_COMPRESSION_RATIO = 1000
 _MAX_XML_DEPTH = 128
 
 
+def _qname(name: str) -> str:
+    uri, separator, local = name.partition("}")
+    return f"{{{uri}}}{local}" if separator else name
+
+
+def _forbid_xml(*_args) -> None:
+    raise ValueError("DTD/entity declarations forbidden in EPUB XML")
+
+
 def _xml(data: bytes, label: str) -> ET.Element:
+    builder = ET.TreeBuilder()
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.StartElementHandler = lambda name, attrs: builder.start(
+        _qname(name), {_qname(key): value for key, value in attrs.items()}
+    )
+    parser.EndElementHandler = lambda name: builder.end(_qname(name))
+    parser.CharacterDataHandler = builder.data
+    parser.StartDoctypeDeclHandler = _forbid_xml
+    parser.EntityDeclHandler = _forbid_xml
+    parser.ExternalEntityRefHandler = _forbid_xml
     try:
-        root = DET.fromstring(data, forbid_dtd=True, forbid_entities=True, forbid_external=True)
-    except DefusedXmlException as exc:
-        raise ValueError(f"DTD/entity declarations forbidden in EPUB XML: {label}") from exc
-    except ET.ParseError as exc:
+        parser.Parse(data, True)
+        root = builder.close()
+    except expat.ExpatError as exc:
         raise ValueError(f"malformed EPUB XML {label}: {exc}") from exc
     _check_depth(root, label)
     return root
@@ -50,9 +66,13 @@ def _check_depth(root: ET.Element, label: str) -> None:
 
 def _member(base: str, href: str) -> str:
     parsed = urlsplit(href)
-    path = posixpath.normpath(posixpath.join(posixpath.dirname(base), unquote(parsed.path)))
-    invalid = any((parsed.scheme, parsed.netloc, parsed.query, "\\" in parsed.path, not parsed.path, path.startswith(("../", "/")), path in (".", "..")))
-    if invalid:
+    decoded = unquote(parsed.path)
+    path = posixpath.normpath(posixpath.join(posixpath.dirname(base), decoded))
+    if any((parsed.scheme, parsed.netloc, parsed.query)):
+        raise ValueError(f"unsafe EPUB resource: {href}")
+    if any((not decoded, "\\" in decoded)):
+        raise ValueError(f"unsafe EPUB resource: {href}")
+    if path.startswith(("../", "/")) or path in (".", ".."):
         raise ValueError(f"unsafe EPUB resource: {href}")
     return path
 
@@ -234,6 +254,9 @@ def _render(node: ET.Element, chapter: str, resources: set[str], headings: list[
 
 def _chapter(path: str, data: bytes, resources: set[str]) -> str:
     root = _xml(data, path)
+    heading_ids = [node.get("id") for node in root.iter() if _tag(node) in _HEADINGS and node.get("id")]
+    if len(heading_ids) != len(set(heading_ids)):
+        raise ValueError("duplicate EPUB heading id")
     ids = {value for node in root.iter() if (value := node.get("id"))}
     text = _render(root, path, resources, [0], ids)
     text = re.sub(r"[ \t]+", " ", text)

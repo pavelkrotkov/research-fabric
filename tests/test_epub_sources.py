@@ -95,6 +95,8 @@ def test_epub_generated_heading_locators_are_unique():
     xhtml = b'<html><body><h1 id="h2">First</h1><h1>Second</h1></body></html>'
     locators = [line for line in _chapter("OEBPS/ch.xhtml", xhtml, set()).splitlines() if line.startswith("@@section ")]
     assert locators == ["@@section OEBPS/ch.xhtml#h2", "@@section OEBPS/ch.xhtml#_h2"]
+    with pytest.raises(ValueError, match="duplicate EPUB heading id"):
+        _chapter("OEBPS/ch.xhtml", b'<html><body><h1 id="dup">A</h1><h2 id="dup">B</h2></body></html>', set())
 
 
 def test_epub_rejects_utf16_dtd():
@@ -103,6 +105,7 @@ def test_epub_rejects_utf16_dtd():
         _chapter("OEBPS/ch.xhtml", xhtml, set())
 
 
-def test_epub_rejects_backslash_resource_paths():
+@pytest.mark.parametrize("href", [r"\\server\share.png", "%2e%2e%5csecret"])
+def test_epub_rejects_backslash_resource_paths(href):
     with pytest.raises(ValueError, match="unsafe EPUB resource"):
-        _member("OEBPS/ch.xhtml", r"\\server\share.png")
+        _member("OEBPS/ch.xhtml", href)
