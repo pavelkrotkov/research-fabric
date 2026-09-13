@@ -106,7 +106,11 @@ def test_epub_generated_heading_locators_are_unique_and_not_evidence():
     assert locators == ["<!--@@section OEBPS/ch.xhtml#h2-->", "<!--@@section OEBPS/ch.xhtml#_h2-->"]
     with pytest.raises(ValueError, match="duplicate EPUB heading id"):
         _chapter("OEBPS/ch.xhtml", b'<html><body><h1 id="dup">A</h1><h2 id="dup">B</h2></body></html>', set())
-    poisoned = _chapter("OEBPS/ch.xhtml", b'<html><body><h1 id="x&#10;invented claim">Real heading</h1></body></html>', set())
+    poisoned = _chapter(
+        "OEBPS/ch.xhtml",
+        b'<html><body><h1 id="x&#10;invented claim">Real heading</h1></body></html>',
+        set(),
+    )
     assert "%0Ainvented%20claim" in poisoned
     assert grounded("Real heading", poisoned) and not grounded("invented claim", poisoned)
 
@@ -119,7 +123,11 @@ def test_epub_section_locator_components_are_escaped_independently():
 
 
 def test_epub_rejects_utf16_dtd():
-    xhtml = '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE html [<!ENTITY x "INJECTED">]><html><body>&x;</body></html>'.encode("utf-16")
+    xhtml = (
+        '<?xml version="1.0" encoding="utf-16"?>'
+        '<!DOCTYPE html [<!ENTITY x "INJECTED">]>'
+        "<html><body>&x;</body></html>"
+    ).encode("utf-16")
     with pytest.raises(ValueError, match="DTD/entity declarations forbidden"):
         _chapter("OEBPS/ch.xhtml", xhtml, set())
 
