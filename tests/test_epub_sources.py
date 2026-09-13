@@ -8,11 +8,12 @@ import sys
 
 import pytest
 
+from research_fabric._epub_adapter import _chapter, _member
+from research_fabric.sources import adapter_for, bind_manifest, representation_for, source_bundle
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from bin.excerpt_grounding import grounded  # noqa: E402
-from research_fabric._epub_adapter import _chapter, _member
-from research_fabric.sources import adapter_for, bind_manifest, representation_for, source_bundle
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
