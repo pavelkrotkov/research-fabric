@@ -38,30 +38,29 @@ def _forbid_xml(*_args) -> None:
 def _xml(data: bytes, label: str) -> ET.Element:
     builder = ET.TreeBuilder()
     parser = expat.ParserCreate(namespace_separator="}")
-    parser.StartElementHandler = lambda name, attrs: builder.start(
-        _qname(name), {_qname(key): value for key, value in attrs.items()}
-    )
-    parser.EndElementHandler = lambda name: builder.end(_qname(name))
+    depth = [0]
+
+    def start(name, attrs):
+        depth[0] += 1
+        if depth[0] > _MAX_XML_DEPTH:
+            raise ValueError(f"EPUB XML nesting exceeds {_MAX_XML_DEPTH}: {label}")
+        builder.start(_qname(name), {_qname(key): value for key, value in attrs.items()})
+
+    def end(name):
+        builder.end(_qname(name))
+        depth[0] -= 1
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
     parser.CharacterDataHandler = builder.data
     parser.StartDoctypeDeclHandler = _forbid_xml
     parser.EntityDeclHandler = _forbid_xml
     parser.ExternalEntityRefHandler = _forbid_xml
     try:
         parser.Parse(data, True)
-        root = builder.close()
+        return builder.close()
     except expat.ExpatError as exc:
         raise ValueError(f"malformed EPUB XML {label}: {exc}") from exc
-    _check_depth(root, label)
-    return root
-
-
-def _check_depth(root: ET.Element, label: str) -> None:
-    stack = [(root, 1)]
-    while stack:
-        node, depth = stack.pop()
-        if depth > _MAX_XML_DEPTH:
-            raise ValueError(f"EPUB XML nesting exceeds {_MAX_XML_DEPTH}: {label}")
-        stack.extend((child, depth + 1) for child in node)
 
 
 def _member(base: str, href: str) -> str:
@@ -198,7 +197,13 @@ def _tag(node: ET.Element) -> str:
 
 
 def _marker(kind: str, value: str) -> str:
-    return f"<!--@@{kind} {quote(value, safe='/-._~#')}-->"
+    return f"<!--@@{kind} {quote(value, safe='/-._~')}-->"
+
+
+def _section_marker(chapter: str, locator: str) -> str:
+    chapter = quote(chapter, safe="/-._~")
+    locator = quote(locator, safe="/-._~")
+    return f"<!--@@section {chapter}#{locator}-->"
 
 
 def _asset(node: ET.Element, chapter: str, resources: set[str]) -> str:
@@ -232,10 +237,10 @@ def _prefix(node: ET.Element, chapter: str, resources: set[str], headings: list[
         return _asset(node, chapter, resources)
     if tag in _HEADINGS:
         locator = _heading_locator(node, headings, ids)
-        return f"\n{_marker('section', f'{chapter}#{locator}')}\n{'#' * int(tag[1])} "
+        return f"\n{_section_marker(chapter, locator)}\n{'#' * int(tag[1])} "
     if tag in _BLOCKS:
         return "\n"
-    return " @@formula " if tag == "math" else ""
+    return " <!--@@formula--> " if tag == "math" else ""
 
 
 def _svg_assets(node: ET.Element, chapter: str, resources: set[str]) -> str:

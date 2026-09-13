@@ -2,7 +2,7 @@
 <!--@@section OEBPS/ch1.xhtml#intro-->
 # Introduction
 
-Alpha @@formula x=1 omega.
+Alpha <!--@@formula--> x=1 omega.
 
 <!--@@asset OEBPS/images/chart.png-->
 

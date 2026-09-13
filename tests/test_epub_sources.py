@@ -40,8 +40,9 @@ def test_epub_golden_representation_and_metadata():
     assert first.text == second.text == expected
     assert first.representation_sha256 == hashlib.sha256(expected.encode()).hexdigest()
     assert "<!--@@section OEBPS/ch1.xhtml#intro-->" in first.text
-    assert "@@formula x=1 omega." in first.text
+    assert "<!--@@formula--> x=1 omega." in first.text
     assert "<!--@@asset OEBPS/images/chart.png-->" in first.text
+    assert grounded("x=1 omega", first.text) and not grounded("formula x=1", first.text)
     assert source_bundle(source) == ((source, pathlib.Path("minimal.epub")),)
     assert adapter_for(source).map_locator(" OEBPS/ch1.xhtml#intro ") == "OEBPS/ch1.xhtml#intro"
     bound = bind_manifest([source], [{"snapshot": source.name, "sha256": first.original_sha256}])[0]
@@ -107,6 +108,13 @@ def test_epub_generated_heading_locators_are_unique_and_not_evidence():
     poisoned = _chapter("OEBPS/ch.xhtml", b'<html><body><h1 id="x&#10;invented claim">Real heading</h1></body></html>', set())
     assert "%0Ainvented%20claim" in poisoned
     assert grounded("Real heading", poisoned) and not grounded("invented claim", poisoned)
+
+
+def test_epub_section_locator_components_are_escaped_independently():
+    left = _chapter("a#b", b'<html><body><h1 id="c">Left</h1></body></html>', set())
+    right = _chapter("a", b'<html><body><h1 id="b#c">Right</h1></body></html>', set())
+    assert "<!--@@section a%23b#c-->" in left
+    assert "<!--@@section a#b%23c-->" in right
 
 
 def test_epub_rejects_utf16_dtd():
