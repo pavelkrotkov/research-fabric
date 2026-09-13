@@ -61,6 +61,8 @@ def _representation_errors(row: dict, sid, snap: pathlib.Path) -> list[str]:
     }
     if rep.assets_sha256 or "assets_sha256" in row:
         expected["assets_sha256"] = rep.assets_sha256
+    if rep.source_metadata or "source_metadata" in row:
+        expected["source_metadata"] = dict(rep.source_metadata)
     return [f"{key} mismatch: {sid}" for key, value in expected.items() if row.get(key) != value]
 
 
