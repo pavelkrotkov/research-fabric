@@ -7,6 +7,7 @@ import pathlib
 
 import pytest
 
+from bin.excerpt_grounding import grounded
 from research_fabric._epub_adapter import _chapter, _member
 from research_fabric.sources import adapter_for, bind_manifest, representation_for, source_bundle
 
@@ -35,9 +36,9 @@ def test_epub_golden_representation_and_metadata():
     second = representation_for(source)
     assert first.text == second.text == expected
     assert first.representation_sha256 == hashlib.sha256(expected.encode()).hexdigest()
-    assert "@@section OEBPS/ch1.xhtml#intro" in first.text
+    assert "<!--@@section OEBPS/ch1.xhtml#intro-->" in first.text
     assert "@@formula x=1 omega." in first.text
-    assert "@@asset OEBPS/images/chart.png" in first.text
+    assert "<!--@@asset OEBPS/images/chart.png-->" in first.text
     assert source_bundle(source) == ((source, pathlib.Path("minimal.epub")),)
     assert adapter_for(source).map_locator(" OEBPS/ch1.xhtml#intro ") == "OEBPS/ch1.xhtml#intro"
     bound = bind_manifest([source], [{"snapshot": source.name, "sha256": first.original_sha256}])[0]
@@ -78,25 +79,31 @@ def test_epub_invalid_inputs_fail_clearly(name, error, message):
 
 
 def test_epub_block_boundaries_do_not_merge():
-    xhtml = b'<html><body><table><tr><td>12</td><td>34</td></tr></table><dl><dt>56</dt><dd>78</dd></dl></body></html>'
+    xhtml = (
+        b"<html><body><table><tr><td>12</td><td>34</td></tr></table>"
+        b"<dl><dt>56</dt><dd>78</dd></dl><select><option>90</option><option>12</option></select></body></html>"
+    )
     text = _chapter("OEBPS/ch.xhtml", xhtml, set())
-    assert "1234" not in text and "5678" not in text
+    assert all(joined not in text for joined in ("1234", "5678", "9012"))
 
 
 def test_epub_svg_assets_are_bound_without_visual_text():
     xhtml = b'<html><body><svg><text>hidden</text><image href="images/chart.png"/></svg></body></html>'
     text = _chapter("OEBPS/ch.xhtml", xhtml, {"OEBPS/images/chart.png"})
-    assert text == "@@asset OEBPS/images/chart.png"
+    assert text == "<!--@@asset OEBPS/images/chart.png-->"
     with pytest.raises(FileNotFoundError, match="missing EPUB asset"):
         _chapter("OEBPS/ch.xhtml", xhtml, set())
 
 
-def test_epub_generated_heading_locators_are_unique():
+def test_epub_generated_heading_locators_are_unique_and_not_evidence():
     xhtml = b'<html><body><h1 id="h2">First</h1><h1>Second</h1></body></html>'
-    locators = [line for line in _chapter("OEBPS/ch.xhtml", xhtml, set()).splitlines() if line.startswith("@@section ")]
-    assert locators == ["@@section OEBPS/ch.xhtml#h2", "@@section OEBPS/ch.xhtml#_h2"]
+    locators = [line for line in _chapter("OEBPS/ch.xhtml", xhtml, set()).splitlines() if "@@section " in line]
+    assert locators == ["<!--@@section OEBPS/ch.xhtml#h2-->", "<!--@@section OEBPS/ch.xhtml#_h2-->"]
     with pytest.raises(ValueError, match="duplicate EPUB heading id"):
         _chapter("OEBPS/ch.xhtml", b'<html><body><h1 id="dup">A</h1><h2 id="dup">B</h2></body></html>', set())
+    poisoned = _chapter("OEBPS/ch.xhtml", b'<html><body><h1 id="x&#10;invented claim">Real heading</h1></body></html>', set())
+    assert "%0Ainvented%20claim" in poisoned
+    assert grounded("Real heading", poisoned) and not grounded("invented claim", poisoned)
 
 
 def test_epub_rejects_utf16_dtd():

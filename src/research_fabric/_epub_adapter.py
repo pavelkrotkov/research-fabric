@@ -10,12 +10,12 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 import xml.parsers.expat as expat
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 _BLOCKS = {
     "address", "article", "aside", "blockquote", "br", "caption", "dd", "details", "div", "dl", "dt",
-    "fieldset", "figcaption", "figure", "footer", "form", "header", "hr", "li", "main", "nav", "ol", "p",
-    "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+    "fieldset", "figcaption", "figure", "footer", "form", "header", "hr", "li", "main", "nav", "ol", "option",
+    "optgroup", "p", "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
 }
 _HEADINGS = {f"h{i}" for i in range(1, 7)}
 _BREAKS = _BLOCKS | _HEADINGS
@@ -197,6 +197,10 @@ def _tag(node: ET.Element) -> str:
     return node.tag.rsplit("}", 1)[-1].lower()
 
 
+def _marker(kind: str, value: str) -> str:
+    return f"<!--@@{kind} {quote(value, safe='/-._~#')}-->"
+
+
 def _asset(node: ET.Element, chapter: str, resources: set[str]) -> str:
     target = (
         node.get("src")
@@ -208,7 +212,7 @@ def _asset(node: ET.Element, chapter: str, resources: set[str]) -> str:
     path = _member(chapter, target)
     if path not in resources:
         raise FileNotFoundError(f"missing EPUB asset: {path}")
-    return f"\n@@asset {path}\n"
+    return f"\n{_marker('asset', path)}\n"
 
 
 def _heading_locator(node: ET.Element, headings: list[int], ids: set[str]) -> str:
@@ -228,7 +232,7 @@ def _prefix(node: ET.Element, chapter: str, resources: set[str], headings: list[
         return _asset(node, chapter, resources)
     if tag in _HEADINGS:
         locator = _heading_locator(node, headings, ids)
-        return f"\n@@section {chapter}#{locator}\n{'#' * int(tag[1])} "
+        return f"\n{_marker('section', f'{chapter}#{locator}')}\n{'#' * int(tag[1])} "
     if tag in _BLOCKS:
         return "\n"
     return " @@formula " if tag == "math" else ""
@@ -272,7 +276,7 @@ def _text(raw: bytes) -> str:
         if digest in seen:
             raise ValueError(f"duplicate EPUB spine content: {path}")
         seen.add(digest)
-        out.append(f"@@chapter {path}\n{_chapter(path, data, resources)}")
+        out.append(f"{_marker('chapter', path)}\n{_chapter(path, data, resources)}")
     return "\n\n".join(out)
 
 

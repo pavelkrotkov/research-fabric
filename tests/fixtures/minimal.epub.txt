@@ -1,13 +1,13 @@
-@@chapter OEBPS/ch1.xhtml
-@@section OEBPS/ch1.xhtml#intro
+<!--@@chapter OEBPS/ch1.xhtml-->
+<!--@@section OEBPS/ch1.xhtml#intro-->
 # Introduction
 
 Alpha @@formula x=1 omega.
 
-@@asset OEBPS/images/chart.png
+<!--@@asset OEBPS/images/chart.png-->
 
-@@chapter OEBPS/ch2.xhtml
-@@section OEBPS/ch2.xhtml#h1
+<!--@@chapter OEBPS/ch2.xhtml-->
+<!--@@section OEBPS/ch2.xhtml#h1-->
 ## Second
 
 Beta text.
