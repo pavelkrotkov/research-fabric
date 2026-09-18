@@ -279,6 +279,18 @@ def _validate_packet_states(bindings, packets, targets, report_id):
         _validate_packet_state(worker, binding, packets[worker], targets, report_id)
 
 
+def _legacy_report_bindings(packets, targets):
+    """Old reports are usable only against their original migration state."""
+    bindings = {}
+    for worker in {target[1] for target in targets}:
+        packet = packets[worker]
+        original = packet.get("legacy_original_state")
+        if not original or not packet.get("legacy_ledger_revision"):
+            raise ClaimIdentityError("legacy report requires migration bound to the original published ledger")
+        bindings[worker] = {"packet_state_revision": original}
+    return bindings
+
+
 def _validate_targets(metadata, failures, report_id, packets, current_source_revision):
     bindings = _validate_report_header(metadata, report_id, current_source_revision)
     _validate_packet_bindings(bindings, packets)
@@ -291,13 +303,7 @@ def _validate_targets(metadata, failures, report_id, packets, current_source_rev
         seen.add(cid)
         targets.append((failure, worker, packet, cid, already))
     if metadata is None:
-        for worker, packet in packets.items():
-            if not any(target[1] == worker for target in targets):
-                continue
-            original = packet.get("legacy_original_state")
-            if not original or not packet.get("legacy_ledger_revision"):
-                raise ClaimIdentityError("legacy report requires migration bound to the original published ledger")
-            bindings[worker] = {"packet_state_revision": original}
+        bindings = _legacy_report_bindings(packets, targets)
     _validate_packet_states(bindings, packets, targets, report_id)
     return targets
 

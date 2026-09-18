@@ -710,3 +710,15 @@ def test_legacy_migration_rejects_changed_source_with_identical_quote(tmp_path):
     packet["parsed"]["claims"][0]["source_file"] = "other.html"
     with pytest.raises(ClaimIdentityError, match="original ledger"):
         migrate_legacy_packet(packet, "book-1", ledger, source_dir=source_dir)
+
+
+@pytest.mark.parametrize("corruption", ["mapping", "binding"])
+def test_persisted_identity_rejects_corrupt_mapping_or_missing_binding(tmp_path, corruption):
+    source_dir = _source(tmp_path)
+    packet = accept_packet(_packet(), "book-1", source_dir=source_dir)
+    if corruption == "mapping":
+        packet["legacy_claim_id_map"] = {"old-1": "unknown"}
+    else:
+        packet["claim_source_bindings"].pop("c-book-1-1")
+    with pytest.raises(ClaimIdentityError):
+        accept_packet(packet, "book-1", source_dir=source_dir)

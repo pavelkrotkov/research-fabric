@@ -114,34 +114,12 @@ def _bind_claim_source(claim: dict, source_dir: pathlib.Path, source_bindings: d
     claim["source_revision"] = digest
 
 
-def _prepare_claim(
-    claim: dict,
-    worker: str,
-    ordinal: int,
-    source_dir: pathlib.Path | None,
-    source_bindings: dict,
-    legacy_map: dict,
-    attempt_id: str | None,
-) -> None:
-    if not claim.get("claim_id"):
-        old_id = claim_id_for(worker, ordinal)
-        claim["claim_id"] = old_id
-    if source_dir is not None:
-        _bind_claim_source(claim, source_dir, source_bindings)
-    if attempt_id and not claim.get("accepted_attempt_id"):
-        claim["accepted_attempt_id"] = attempt_id
-
-
-def _prepare_claims(
-    claims: list[dict],
-    worker: str,
-    source_dir: pathlib.Path | None,
-    source_bindings: dict,
-    legacy_map: dict,
-    attempt_id: str | None,
-) -> None:
+def _prepare_claims(claims, worker, source_dir, source_bindings, attempt_id):
     for ordinal, claim in enumerate(claims, 1):
-        _prepare_claim(claim, worker, ordinal, source_dir, source_bindings, legacy_map, attempt_id)
+        claim.setdefault("claim_id", claim_id_for(worker, ordinal))
+        _bind_claim_source(claim, source_dir, source_bindings)
+        if attempt_id:
+            claim.setdefault("accepted_attempt_id", attempt_id)
     validate_claim_ids(claims)
 
 
@@ -172,34 +150,14 @@ def _claim_ids(claims: list[dict]) -> set[str | None]:
     return {claim.get("claim_id") for claim in claims}
 
 
-def _validate_acceptance_state(packet, claims, existing_lineage, identity_initialized):
-    if identity_initialized and not existing_lineage:
-        raise ClaimIdentityError("claim identity is missing packet_revision")
-    if existing_lineage and any(not claim.get("claim_id") for claim in claims):
-        raise ClaimIdentityError("accepted packet has a missing claim_id")
-
-
-def _claim_ids_supplied(claims):
-    return any(claim.get("claim_id") for claim in claims)
-
-
-def _validate_legacy_map(claims, legacy_map, original_ids=None):
-    if legacy_map and any(not claim.get("claim_id") for claim in claims):
-        raise ClaimIdentityError("legacy ID map has no per-record claim identity")
-    claim_ids = original_ids or _claim_ids(claims)
-    mapped_ids = list(legacy_map.values())
-    if any(mapped_id not in claim_ids for mapped_id in mapped_ids):
-        raise ClaimIdentityError("legacy ID map points outside the accepted packet")
-    if len(mapped_ids) != len(set(mapped_ids)):
-        raise ClaimIdentityError("legacy ID map has ambiguous target identities")
-
-
-def _validate_untrusted_claim_ids(packet, claims, existing_lineage, identity_initialized, legacy_map):
-    trusted_identity = bool(existing_lineage or identity_initialized or legacy_map)
-    if _claim_ids_supplied(claims) and not trusted_identity:
-        raise ClaimIdentityError("packet contains claim IDs before host identity was persisted")
-    identity = packet.get("claim_identity") if identity_initialized else None
-    _validate_legacy_map(claims, legacy_map, (identity or {}).get("claim_ids"))
+def _validate_identity_bindings(packet, original_ids):
+    legacy_map = packet.get("legacy_claim_id_map", {})
+    targets = list(legacy_map.values())
+    if len(targets) != len(set(targets)) or not set(targets).issubset(original_ids):
+        raise ClaimIdentityError("legacy ID map has ambiguous or unknown target identities")
+    bindings = packet.get("claim_source_bindings")
+    if not isinstance(bindings, dict) or not set(original_ids).issubset(bindings):
+        raise ClaimIdentityError("accepted packet is missing original source bindings")
 
 
 def _validate_persisted_identity(packet: dict, worker: str, claims: list[dict]) -> None:
@@ -208,48 +166,21 @@ def _validate_persisted_identity(packet: dict, worker: str, claims: list[dict]) 
         raise ClaimIdentityError("packet revision has no persisted claim identity")
     if identity.get("version") != 1 or identity.get("worker") != worker:
         raise ClaimIdentityError("packet claim identity metadata is invalid")
-    if identity.get("source_bindings") != packet.get("claim_source_bindings"):
-        raise ClaimIdentityError("packet claim source bindings are inconsistent")
-    if identity.get("packet_revision") != packet.get("packet_revision"):
-        raise ClaimIdentityError("packet claim identity revision is inconsistent")
     original_ids = identity.get("claim_ids")
-    if (
-        not isinstance(original_ids, list)
-        or any(not isinstance(claim_id, str) or not claim_id for claim_id in original_ids)
-        or len(original_ids) != len(set(original_ids))
-    ):
+    if not isinstance(original_ids, list):
         raise ClaimIdentityError("packet claim identity has no immutable original claim order")
+    validate_claim_ids([{"claim_id": cid} for cid in original_ids])
+    _validate_identity_bindings(packet, original_ids)
     current_ids = _claim_ids(claims)
-    if None in current_ids or not current_ids.issubset(set(original_ids)):
+    if not current_ids.issubset(set(original_ids)):
         raise ClaimIdentityError("packet contains a claim outside its accepted identity")
-
-
-def _set_packet_identity(packet, worker, claims, existing_lineage, legacy_map, source_bindings):
-    initialized = bool(packet.get("claim_identity"))
-    if not existing_lineage:
-        packet["packet_revision"] = _lineage_revision(worker, claims)
-        initialized = False
-    prior_identity = packet.get("claim_identity") if initialized else None
-    original_ids = (prior_identity or {}).get("claim_ids") or [claim["claim_id"] for claim in claims]
-    packet["packet_state_revision"] = packet_state_revision(packet.get("parsed") or packet)
-    packet["legacy_claim_id_map"] = legacy_map
-    packet["claim_source_bindings"] = source_bindings
-    packet["claim_identity"] = {
-        "version": 1,
-        "worker": worker,
-        "packet_revision": packet["packet_revision"],
-        "claim_ids": original_ids,
-        "legacy_claim_id_map": legacy_map,
-        "source_bindings": source_bindings,
-    }
-    return initialized
 
 
 def accept_packet(
     packet: dict,
     worker: str,
     *,
-    source_dir: pathlib.Path | None = None,
+    source_dir: pathlib.Path,
     attempt_id: str | None = None,
 ) -> dict:
     """Bind accepted claims to durable IDs and immutable packet provenance.
@@ -260,21 +191,35 @@ def accept_packet(
     """
     if not isinstance(packet, dict):
         raise ClaimIdentityError("packet is not a JSON object")
-    parsed = packet.get("parsed") if isinstance(packet.get("parsed"), dict) else packet
+    parsed = packet.get("parsed", packet)
     claims = _claims(parsed)
-    existing_lineage = packet.get("packet_revision")
-    legacy_map = dict(packet.get("legacy_claim_id_map") or {})
-    source_bindings = dict(packet.get("claim_source_bindings") or {})
-    identity_initialized = bool(packet.get("claim_identity"))
-    _validate_acceptance_state(packet, claims, existing_lineage, identity_initialized)
-    if existing_lineage or identity_initialized:
+    initialized = bool(packet.get("packet_revision"))
+    if initialized:
         _validate_persisted_identity(packet, worker, claims)
-    _validate_untrusted_claim_ids(packet, claims, existing_lineage, identity_initialized, legacy_map)
-    _prepare_claims(claims, worker, source_dir, source_bindings, legacy_map, attempt_id)
-    identity_initialized = _set_packet_identity(packet, worker, claims, existing_lineage, legacy_map, source_bindings)
-    _record_acceptance(packet, claims, identity_initialized)
-    packet["source_revision"] = source_revision(source_dir) if source_dir is not None else packet.get("source_revision")
+    elif any(claim.get("claim_id") for claim in claims):
+        raise ClaimIdentityError("packet contains claim IDs before host identity was persisted")
+    bindings = packet.setdefault("claim_source_bindings", {})
+    _prepare_claims(claims, worker, source_dir, bindings, attempt_id)
+    if not initialized:
+        packet["packet_revision"] = _lineage_revision(worker, claims)
+        packet["claim_identity"] = {
+            "version": 1,
+            "worker": worker,
+            "claim_ids": [claim["claim_id"] for claim in claims],
+        }
+        packet["legacy_claim_id_map"] = {}
+    packet["packet_state_revision"] = packet_state_revision(parsed)
+    _record_acceptance(packet, claims, initialized)
+    packet["source_revision"] = source_revision(source_dir)
     return packet
+
+
+def _validate_legacy_record(row, claim, source_dir):
+    fields = ("claim", "excerpt", "locator", "stance", "source_file")
+    if any(row.get(field) != claim.get(field) for field in fields):
+        raise ClaimIdentityError("legacy packet records differ from original ledger")
+    if row.get("source_revision") != source_file_revision(source_dir, claim.get("source_file", "")):
+        raise ClaimIdentityError("legacy migration requires source revision from the retained original source ledger")
 
 
 def migrate_legacy_packet(packet: dict, worker: str, original_ledger: list[dict], *, source_dir: pathlib.Path) -> dict:
@@ -284,22 +229,15 @@ def migrate_legacy_packet(packet: dict, worker: str, original_ledger: list[dict]
     from the current packet. A shortened, reordered, or repaired legacy packet
     cannot be safely recovered without its original per-record correspondence.
     """
-    claims = _claims(packet.get("parsed") if isinstance(packet.get("parsed"), dict) else packet)
+    claims = _claims(packet.get("parsed", packet))
     rows = [row for row in original_ledger if str(row.get("claim_id", "")).startswith(f"c-{worker}-")]
     expected_ids = [claim_id_for(worker, ordinal) for ordinal in range(1, len(claims) + 1)]
     if [row.get("claim_id") for row in rows] != expected_ids:
         raise ClaimIdentityError("legacy packet order/count differs from original ledger")
-    fields = ("claim", "excerpt", "locator", "stance", "source_file")
-    if any(any(row.get(field) != claim.get(field) for field in fields) for row, claim in zip(rows, claims)):
-        raise ClaimIdentityError("legacy packet records differ from original ledger")
     for row, claim in zip(rows, claims):
-        if row.get("source_revision") != source_file_revision(source_dir, claim.get("source_file", "")):
-            raise ClaimIdentityError(
-                "legacy migration requires source revision from the retained original source ledger"
-            )
+        _validate_legacy_record(row, claim, source_dir)
     accepted = accept_packet(packet, worker, source_dir=source_dir)
     accepted["legacy_claim_id_map"] = dict(zip(expected_ids, expected_ids))
-    accepted["claim_identity"]["legacy_claim_id_map"] = accepted["legacy_claim_id_map"]
     accepted["legacy_original_state"] = accepted["packet_state_revision"]
     accepted["legacy_ledger_revision"] = stable_revision(rows)
     return accepted
@@ -307,7 +245,7 @@ def migrate_legacy_packet(packet: dict, worker: str, original_ledger: list[dict]
 
 def resolve_claim_id(packet: dict, reported_id: str) -> str | None:
     """Resolve a current or explicitly mapped legacy report ID."""
-    claims = _claims(packet.get("parsed") if isinstance(packet.get("parsed"), dict) else packet)
+    claims = _claims(packet.get("parsed", packet))
     if reported_id in _claim_ids(claims):
         return reported_id
     mapped = packet.get("legacy_claim_id_map") or {}
@@ -360,7 +298,7 @@ def transition_claim(
     """Apply one ID-addressed repair/drop transition and record its audit row."""
     if action not in {"repair", "drop"}:
         raise ClaimIdentityError(f"unsupported claim transition: {action}")
-    parsed = packet.get("parsed") if isinstance(packet.get("parsed"), dict) else packet
+    parsed = packet.get("parsed", packet)
     claims = _claims(parsed)
     if _history_match(packet, claim_id, report_id):
         return packet, None
