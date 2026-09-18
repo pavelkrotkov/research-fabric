@@ -10,6 +10,7 @@ from ._source_adapter import ADAPTERS, SourceAdapter
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 ASSET_HASH_FIELD = "assets_sha256"
+SOURCE_PROVENANCE_FIELDS = frozenset({"source_file", "sha256", *REPRESENTATION_FIELDS})
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,18 @@ class SourceRepresentation:
     representation_sha256: str
     assets: tuple[str, ...] = ()
     assets_sha256: str | None = None
+
+
+def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
+    """Return the exact source input attestation consumed by a worker."""
+    return {
+        "source_file": rep.path.name,
+        "sha256": rep.original_sha256,
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+    }
 
 
 def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceAdapter:
@@ -78,6 +91,40 @@ def source_bundle(path: pathlib.Path) -> tuple[tuple[pathlib.Path, pathlib.Path]
     return ((path, pathlib.Path(path.name)), *assets)
 
 
+def source_provenance(
+    source_files: list[pathlib.Path], adapters: tuple[SourceAdapter, ...] = ADAPTERS
+) -> list[dict[str, str]]:
+    """Hash and describe the representations supplied to one worker."""
+    return sorted(
+        (source_attestation(representation_for(path, adapters)) for path in source_files),
+        key=lambda row: row["source_file"],
+    )
+
+
+def source_provenance_errors(actual, expected: list[dict[str, str]]) -> list[str]:
+    """Return fail-closed errors for a packet's source input attestation."""
+    if not isinstance(actual, list):
+        return ["packet source provenance missing"]
+    if any(not isinstance(row, dict) for row in actual):
+        return ["packet source provenance contains a non-object entry"]
+    actual_rows = sorted(actual, key=lambda row: str(row.get("source_file", "")))
+    expected_rows = sorted(expected, key=lambda row: row["source_file"])
+    if len(actual_rows) != len(expected_rows):
+        return ["packet source provenance input count mismatch"]
+    for actual_row, expected_row in zip(actual_rows, expected_rows):
+        if set(actual_row) != SOURCE_PROVENANCE_FIELDS or actual_row != expected_row:
+            return [f"packet source provenance mismatch for {expected_row['source_file']}"]
+    return []
+
+
+def packet_source_defects(packet: dict, expected: list[dict[str, str]], validator) -> list[str]:
+    """Combine packet-shape and source-attestation checks at the worker boundary."""
+    defects = list(validator(packet.get("parsed"))) if isinstance(packet, dict) else ["packet is not an object"]
+    if isinstance(packet, dict):
+        defects.extend(source_provenance_errors(packet.get("source_provenance"), expected))
+    return defects
+
+
 def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> list[pathlib.Path]:
     """Return supported sources deterministically; reject same-stem ambiguity."""
     found = []
@@ -130,14 +177,16 @@ def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.P
     return dict(row)
 
 
-def _manifest_representation(source: pathlib.Path) -> SourceRepresentation:
+def _manifest_representation(source: pathlib.Path, adapters: tuple[SourceAdapter, ...]) -> SourceRepresentation:
     try:
-        return representation_for(source)
+        return representation_for(source, adapters)
     except (OSError, UnicodeError, ValueError) as exc:
         raise RuntimeError(f"source representation invalid for {source.name}: {exc}") from exc
 
 
-def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[dict]:
+def bind_manifest(
+    source_files: list[pathlib.Path], rows: list[dict], adapters: tuple[SourceAdapter, ...] = ADAPTERS
+) -> list[dict]:
     """Verify original bytes and bind exact worker-representation provenance."""
     by_name = {}
     for row in rows:
@@ -152,7 +201,7 @@ def bind_manifest(source_files: list[pathlib.Path], rows: list[dict]) -> list[di
         row = by_name.get(source.name)
         if row is None:
             raise RuntimeError(f"source manifest has no entry for {source.name}")
-        rep = _manifest_representation(source)
+        rep = _manifest_representation(source, adapters)
         if rep.original_sha256 != row.get("sha256"):
             raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
         bound.append(_bind_representation(row, rep, source))
