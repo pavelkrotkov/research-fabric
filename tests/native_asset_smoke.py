@@ -18,6 +18,8 @@ from research_fabric._source_assets import digest, publish_bundle
 from research_fabric.sources import prepare_source_bundle, representation_for, source_attestation
 
 ENGINE = pathlib.Path(__file__).resolve().parents[1]
+SCIENCE = (ENGINE / "tests/fixtures/scientific_text.md").read_text()
+CAPTION = r"$n!$ and $$\begin{aligned} a &= b \\ c &= d \end{aligned}$$"
 
 with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
     root = pathlib.Path(directory)
@@ -33,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
     config.GLOBAL_CONFIG_LOCK_PATH = root / "global/global.lock"
     result = CliRunner().invoke(cli, ["init", "--model", "openai/test", "--language", "en"], input="\n")
     assert result.exit_code == 0, (result.output, repr(result.exception))
-    for work, color in (("first", "red"), ("second", "blue")):
+    for work, color in (("first", "red"), ("second", "blue"), ("text-only", "green")):
         originals = root / work
         originals.mkdir()
         Image.new("RGB", (40, 30), color).save(originals / "figure one.png")
@@ -43,12 +45,15 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
         )
         source = originals / "paper.md"
         source.write_text(
-            "# Experiment\n\nThe measurement is $x = 1$.\n\n![Caption][plot]\n\n"
+            SCIENCE + "# Experiment\n\nThe measurement is $x = 1$.\n\n![Caption][plot]\n\n"
             '[plot]: <figure one.png#detail>\n\n<img src="figure%20one.png" alt="Second caption">\n\n'
             '<embed src="figure.pdf">\n\n<object data="figure.eps"></object>\n\n'
             "<!-- ![example](missing.png) -->\n\n`![example](missing-inline.png)`\n\n"
             "```md\n![example](missing-fenced.png)\n```\n"
         )
+        source.write_text(source.read_text().replace("Second caption", CAPTION))
+        if work == "text-only":
+            source.write_text(SCIENCE)
         before = {path.name: digest(path.read_bytes()) for path in originals.iterdir()}
         manifest = prepare_source_bundle(source, root / "bundles", source_attestation(representation_for(source)))
         bundle_root = root / "bundles" / manifest["key"]
@@ -57,7 +62,11 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
         assert converted.source_path.is_file()
         publish_bundle(bundle_root, manifest, root / "wiki", converted.doc_name)
         assert before == {path.name: digest(path.read_bytes()) for path in originals.iterdir()}
-        assert "$x = 1$" in converted.source_path.read_text()
+        assert SCIENCE in converted.source_path.read_text()
+        if work != "text-only":
+            assert CAPTION in converted.source_path.read_text()
+        if work == "text-only":
+            assert not manifest["assets"]
         for row in manifest["assets"]:
             copied = root / "wiki/sources/images" / converted.doc_name / pathlib.Path(row["derivative_path"]).name
             assert digest(copied.read_bytes()) == row["derivative_sha256"]
@@ -69,8 +78,11 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
         check=True,
     )
     pages = list((docs / "sources").glob("*.md"))
-    assert len(pages) == 2
+    assert len(pages) == 3
     for page in pages:
+        assert SCIENCE in page.read_text()
+        if "# Experiment" in page.read_text():
+            assert CAPTION in page.read_text()
         links = []
         for token in MarkdownIt("commonmark").parse(page.read_text()):
             for child in token.children or ():
@@ -78,7 +90,9 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
                     links.append(child.attrGet("src"))
                 elif child.type == "link_open":
                     links.append(child.attrGet("href"))
-        assert len(links) == 8, links
+        assert len(links) in (0, 8), links
+        if not links:
+            assert "# Experiment" not in page.read_text()
         for link in links:
             assert (page.parent / unquote(link)).resolve().is_file(), (page, link)
     assert not list(docs.rglob("missing*"))

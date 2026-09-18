@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import io
 import json
 import pathlib
@@ -12,9 +11,9 @@ import subprocess
 import tempfile
 from urllib.parse import quote, urlsplit
 
-from markdown_it import MarkdownIt
 from PIL import Image
 
+from ._asset_input import literal_caption, normalize_images
 from ._source_adapter import _local_asset, visual_references
 
 POLICY = {"version": 1, "page": 1, "region": "whole-page", "max_pixels": 1600, "timeout_seconds": 30}
@@ -162,27 +161,19 @@ def _record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> dict:
 
 
 def _derived_text(text: str, records: list[dict], key: str) -> str:
-    # Native 0.4.5 scans images with a regex, including code/comments. Render the
-    # text with CommonMark and inert raw HTML; only the mapped gallery is active.
-    parser = MarkdownIt("commonmark")
-    parser.add_render_rule(
-        "image", lambda self, tokens, idx, *args: "[Figure: " + html.escape(tokens[idx].content) + "]"
-    )
-    parser.add_render_rule("html_inline", lambda self, tokens, idx, *args: html.escape(tokens[idx].content))
-    parser.add_render_rule("html_block", lambda self, tokens, idx, *args: html.escape(tokens[idx].content))
-    result = parser.render(text).replace("!", "&#33;")
+    result = normalize_images(text)
+    if not records:
+        return result
     gallery = []
     for number, row in enumerate(records, 1):
-        gallery.append(
-            f"\nFigure {number} ({html.escape(row.get('caption', '')).replace('!', '&#33;')}); "
-            f"source locator: {json.dumps(row['locator'], sort_keys=True)}\n"
-        )
+        gallery.append(f"\nFigure {number}; source locator: {json.dumps(row['locator'], sort_keys=True)}\n")
+        gallery.append(literal_caption(row.get("caption", "")) + "\n")
         if row.get("derivative_path"):
             gallery.append(f"![Figure {number}]({row['derivative_path'].removeprefix('prepared/')})\n")
         if row.get("original_path"):
             gallery.append(f"[Original figure {number}](../assets/{key}/{quote(row['original_path'])})\n")
         if row.get("limitation"):
-            gallery.append(f"Visual unavailable: {html.escape(row['limitation']).replace('!', '&#33;')}\n")
+            gallery.append("Visual unavailable:\n\n" + literal_caption(row["limitation"]) + "\n")
     return result + "\n\n## Source figures\n" + "\n".join(gallery)
 
 
@@ -245,7 +236,7 @@ def _verify_source(root: pathlib.Path, manifest: dict) -> None:
 
 
 def _verify_mapping(source: pathlib.Path, manifest: dict) -> bytes:
-    text = source.read_text(encoding="utf-8")
+    text = source.read_bytes().decode("utf-8")
     references = visual_references(text)
     actual = [{key: row[key] for key in reference} for row, reference in zip(manifest["assets"], references)]
     if actual != references or len(actual) != len(manifest["assets"]):

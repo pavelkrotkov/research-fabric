@@ -277,3 +277,41 @@ def test_bundle_cannot_drop_parsed_references_on_resume(tmp_path):
     (root / "bundle.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="reference mapping drift"):
         prepare(source, tmp_path / "bundles")
+
+
+SCIENCE = (pathlib.Path(__file__).parent / "fixtures/scientific_text.md").read_text()
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+@pytest.mark.parametrize("figures", ["", "\n![Plot][figure]\n\n[figure]: figure.png\n"])
+def test_prepared_input_preserves_scientific_source_outside_visuals(tmp_path, ending, figures):
+    source = tmp_path / "paper.md"
+    png(tmp_path / "figure.png")
+    text = (SCIENCE + figures).replace("\n", ending)
+    source.write_bytes(text.encode())
+    manifest = prepare(source, tmp_path / "bundles")
+    prepared = (tmp_path / "bundles" / manifest["key"] / manifest["input_path"]).read_bytes()
+    assert prepared.startswith(SCIENCE.replace("\n", ending).encode())
+    if not figures:
+        assert prepared == source.read_bytes()
+    assets.verify_bundle(tmp_path / "bundles" / manifest["key"], manifest)
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_reference_edits_preserve_container_text_and_unrelated_html(tmp_path, ending):
+    source = tmp_path / "paper.md"
+    png(tmp_path / "figure.png")
+    source.write_text(
+        "> **Math** $n!$\n> ![First\n> caption](figure.png)\n> $a \\\\ b$\n\n"
+        "- Text with `![fake](missing.png)` and ![Second](figure.png).\n\n"
+        '<div class="original"><img src="figure.png" alt="Third">$n!$</div>\n\n'
+        'Inline <code><img src="missing.png"></code> untouched.\n'
+    )
+    source.write_bytes(source.read_text().replace("\n", ending).encode())
+    manifest = prepare(source, tmp_path / "bundles")
+    prepared = (tmp_path / "bundles" / manifest["key"] / manifest["input_path"]).read_text()
+    assert "> **Math** $n!$\n> [Figure]\n> $a \\\\ b$" in prepared
+    assert "- Text with `&#33;[fake](missing.png)` and [Figure]." in prepared
+    assert '<div class="original">[Figure]$n!$</div>' in prepared
+    assert 'Inline <code><img src="missing.png"></code> untouched.' in prepared
+    assert len(manifest["assets"]) == 3

@@ -44,9 +44,14 @@ false. Issue #14 consumes derivative path/hash plus source locator for inspectio
 this module makes no claim about equation transcription or interpretation.
 
 OpenKB 0.4.5's native Markdown image copier uses a regex even inside code/comments.
-The derived input therefore renders CommonMark to HTML with raw HTML escaped,
-retains captions and text, and emits only canonical validated Markdown images in
-a mapped figure gallery. Original Markdown remains byte-exact in snapshots, and
+The derived input replaces only parsed image references and visual HTML tags with
+figure markers, then emits canonical validated images in a mapped figure gallery.
+The same adapter HTML policy identifies active tags; source positions map edits
+back through list/quote prefixes without rendering the document. Image-shaped
+examples have only their leading exclamation mark entity-escaped to defeat the
+native regex. All other text, math, tables, fences, raw HTML and line endings stay
+unchanged. Gallery captions use literal fenced blocks so LaTeX and operators remain
+exact while decoded HTML attributes cannot introduce new active tags. Documents without references or image-shaped examples stay byte-exact. Original Markdown remains byte-exact in snapshots, and
 its existing text representation remains authoritative for evidence grounding.
 Prepared input filenames use the scoped bundle identity; native source/summary
 names are carried through the workflow's note mapping. Inputs are passed to native
