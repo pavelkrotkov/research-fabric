@@ -287,7 +287,16 @@ def test_workflow_preparation_uses_record_without_changing_sources(tmp_path, rep
     spec_path = tmp_path / "visual.json"
     spec_path.write_text(json.dumps(original))
     root = pathlib.Path(__file__).resolve().parents[1]
-    nodes = ast.parse((root / "workflows/research.py").read_text()).body
+    module = ast.parse((root / "workflows/research.py").read_text())
+    lifecycle = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.With)
+        and isinstance(node.items[0].context_expr, ast.Call)
+        and isinstance(node.items[0].context_expr.func, ast.Name)
+        and node.items[0].context_expr.func.id == "run_lifecycle"
+    )
+    nodes = lifecycle.body
     start = next(
         i
         for i, n in enumerate(nodes)
