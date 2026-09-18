@@ -11,14 +11,15 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import litellm
-import openkb.config as config
-from click.testing import CliRunner
-from openkb.cli import add_single_file, cli
-
 with tempfile.TemporaryDirectory(prefix="markdown-native-") as directory:
     root = Path(directory)
     os.chdir(root)
+    # Keep import-time native library artifacts inside the disposable directory.
+    import litellm
+    import openkb.config as config
+    from click.testing import CliRunner
+    from openkb.cli import add_single_file, cli
+
     config.GLOBAL_CONFIG_DIR = root / "global"
     config.GLOBAL_CONFIG_PATH = root / "global/global.yaml"
     config.GLOBAL_CONFIG_LOCK_PATH = root / "global/global.lock"
