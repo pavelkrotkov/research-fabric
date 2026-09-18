@@ -449,3 +449,31 @@ def test_real_aeneid_stage_grounding_and_fallback(tmp_path, transport, monkeypat
     assert len(calls) == (5 if case == "json-retry" else 4)
     if case == "json-retry":
         assert packet["execution"][0]["outcome"] == "invalid_output"
+
+
+@pytest.mark.parametrize(
+    "allowed", ["not-allowed-model", {"allowed": True}, 0, False, [None], [""], ["  "], [["allowed"]]]
+)
+@pytest.mark.parametrize("project_name", ["other", "aeneid"])
+def test_malformed_model_restriction_rejects_profiles_and_historical_artifacts(allowed, project_name):
+    project = {"project": project_name, "allowed_models": allowed}
+    row = {"role": "extraction", "outcome": "accepted", "profile": {"model": "allowed"}, "actual_model": "allowed"}
+    with pytest.raises(ex.ExecutionError, match="allowed_models_requires_list|invalid_identity"):
+        ex.resolve(project, {"roles": {"extraction": {"model": "allowed"}, "repair": {"model": "allowed"}}}, environ={})
+    with pytest.raises(ex.ExecutionError, match="allowed_models_requires_list|invalid_identity"):
+        ex.packet_policy_defects({"execution": [row]}, project)
+
+
+@pytest.mark.parametrize(
+    "allowed,accepted", [(None, True), ([], False), (["allowed"], True), (["not-allowed-model"], False)]
+)
+def test_model_restriction_exact_membership_and_empty_semantics(allowed, accepted):
+    project = {"allowed_models": allowed}
+    override = {"roles": {"extraction": {"model": "allowed"}, "repair": {"model": "allowed"}}}
+    row = {"role": "extraction", "outcome": "accepted", "profile": {"model": "allowed"}, "actual_model": "allowed"}
+    if accepted:
+        ex.resolve(project, override, environ={})
+    else:
+        with pytest.raises(ex.ExecutionError, match="project_model_restriction"):
+            ex.resolve(project, override, environ={})
+    assert bool(ex.packet_policy_defects({"execution": [row]}, project)) is not accepted

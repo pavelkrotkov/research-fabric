@@ -95,8 +95,9 @@ def _merge(base, override):
 
 
 def resolve(project=None, override=None, environ=None, native_model=None, previous=None):
-    """Defaults < project < environment < explicit run/resume JSON.
+    """Defaults < project < previous revision < environment < explicit JSON.
 
+    Resume inherits the previous effective profile until explicitly overridden.
     Restrictions belong to the project and are never overridden by a run.
     Fallback profiles are complete explicit routes, not credential discovery.
     """
@@ -157,8 +158,16 @@ def allowed_models(project):
     An absent restriction permits any otherwise qualified model; an explicit
     empty collection permits none. Aeneid's binding constraints intersect the
     project list, so an empty intersection must never become unrestricted.
+    Entries use the same identity contract as requested model routes; mappings
+    and scalar strings are not collections of authorized identities. Validate
+    before intersection so malformed policies cannot disappear into an empty set.
     """
     allowed = project.get("allowed_models")
+    if allowed is not None:
+        if not isinstance(allowed, list):
+            raise ExecutionError("allowed_models_requires_list")
+        for model in allowed:
+            _identity(model)
     if project.get("project") == "aeneid":
         allowed = AENEID_MODELS if allowed is None else set(allowed) & AENEID_MODELS
     return allowed
