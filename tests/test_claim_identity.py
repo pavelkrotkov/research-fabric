@@ -12,6 +12,7 @@ import sys
 
 import pytest
 
+from research_fabric import claim_store, claim_validation
 from research_fabric.claims import (
     ClaimIdentityError,
     accept_packet,
@@ -19,6 +20,7 @@ from research_fabric.claims import (
     migrate_legacy_packet,
     packet_state_revision,
     source_revision,
+    stable_revision,
     transition_claim,
 )
 
@@ -137,7 +139,7 @@ def _bound_report(packet, source_dir, failures):
         },
         "failures": rows,
     }
-    metadata["report_id"] = repair_claims.stable_revision(metadata)
+    metadata["report_id"] = stable_revision(metadata)
     return "REPORT-META: " + json.dumps(metadata, sort_keys=True) + "\n"
 
 
@@ -147,16 +149,9 @@ def test_repair_uses_ids_and_replay_is_idempotent(tmp_path):
     packet_dir = run_root / "evidence"
     packet_dir.mkdir(parents=True)
     packet_input = _packet()
-    packet_input["source_provenance"] = [
-        {
-            "source_file": "source.html",
-            "sha256": hashlib.sha256((source_dir / "source.html").read_bytes()).hexdigest(),
-            "adapter": "html",
-            "adapter_version": "1",
-            "representation_encoding": "utf-8",
-            "representation_sha256": "representation-digest",
-        }
-    ]
+    from research_fabric.sources import source_provenance
+
+    packet_input["source_provenance"] = source_provenance([source_dir / "source.html"])
     attestation = packet_input["source_provenance"]
     packet = accept_packet(packet_input, "book-1", source_dir=source_dir, attempt_id="attempt-1")
     packet_path = packet_dir / "worker-book-1.json"
@@ -223,7 +218,7 @@ def test_unknown_or_stale_report_fails_before_packet_mutation(tmp_path):
         },
         "failures": [{"claim_id": "c-book-1-99", "worker": "book-1", "old_excerpt": "missing", "reason": "stale"}],
     }
-    unknown_metadata["report_id"] = repair_claims.stable_revision(unknown_metadata)
+    unknown_metadata["report_id"] = stable_revision(unknown_metadata)
     unknown.write_text("REPORT-META: " + json.dumps(unknown_metadata) + "\n")
     with pytest.raises(ClaimIdentityError, match="unknown"):
         repair_claims.repair_claims(run_root, source_dir, unknown, model=lambda _: "{}")
@@ -321,12 +316,12 @@ def test_model_supplied_claim_id_is_not_accepted_as_host_identity(tmp_path):
         accept_packet(packet, "book-1", source_dir=_source(tmp_path))
 
 
-def test_repair_rejects_non_html_source_representation(tmp_path):
+def test_repair_rejects_unsupported_source_representation(tmp_path):
     source_dir = tmp_path / "sources"
     source_dir.mkdir()
-    (source_dir / "source.md").write_text("a source passage", encoding="utf-8")
-    claim = {"claim_id": "c-book-1-1", "source_file": "source.md"}
-    with pytest.raises(ClaimIdentityError, match="unsupported source representation"):
+    (source_dir / "source.pdf").write_text("a source passage", encoding="utf-8")
+    claim = {"claim_id": "c-book-1-1", "source_file": "source.pdf"}
+    with pytest.raises(ClaimIdentityError, match="unsupported source format"):
         repair_claims._source_body(source_dir, claim)
 
 
@@ -426,7 +421,7 @@ def test_sidecar_history_recovers_after_packet_write_before_sidecar(tmp_path, mo
         ),
         encoding="utf-8",
     )
-    original_append = repair_claims.append_history
+    original_append = claim_store.append_history
     state = {"entries": 0}
 
     def fail_once(path, entries):
@@ -436,7 +431,7 @@ def test_sidecar_history_recovers_after_packet_write_before_sidecar(tmp_path, mo
             raise OSError("interrupted sidecar write")
         return original_append(path, entries)
 
-    monkeypatch.setattr(repair_claims, "append_history", fail_once)
+    monkeypatch.setattr(claim_store, "append_history", fail_once)
     with pytest.raises(OSError, match="interrupted"):
         repair_claims.repair_claims(
             run_root,
@@ -444,7 +439,7 @@ def test_sidecar_history_recovers_after_packet_write_before_sidecar(tmp_path, mo
             report,
             model=lambda prompt: '{"excerpt":"good B","found":true}' if ids[1] in prompt else '{"found":false}',
         )
-    monkeypatch.setattr(repair_claims, "append_history", original_append)
+    monkeypatch.setattr(claim_store, "append_history", original_append)
     replay = repair_claims.repair_claims(
         run_root,
         source_dir,
@@ -622,7 +617,7 @@ def test_actual_grounding_report_binds_repair_and_ledger_ids(tmp_path, fault):
 def test_atomic_write_preserves_previous_json_on_replace_error(tmp_path, monkeypatch):
     path = tmp_path / "packet.json"
     atomic_write_json(path, {"valid": 1})
-    monkeypatch.setattr("research_fabric.claims.os.replace", lambda *_args: (_ for _ in ()).throw(OSError("stop")))
+    monkeypatch.setattr("research_fabric.claim_store.os.replace", lambda *_args: (_ for _ in ()).throw(OSError("stop")))
     with pytest.raises(OSError, match="stop"):
         atomic_write_json(path, {"valid": 2})
     assert json.loads(path.read_text(encoding="utf-8")) == {"valid": 1}
@@ -736,6 +731,7 @@ def _workflow_reuse(source_dir, reuse_dir, destination):
     scope = {
         "json": json,
         "packet_source_defects": packet_source_defects,
+        "ADAPTERS": __import__("research_fabric.sources", fromlist=["ADAPTERS"]).ADAPTERS,
         "accept_packet": accept_packet,
         "atomic_write_json": atomic_write_json,
         "ClaimIdentityError": ClaimIdentityError,
@@ -771,7 +767,7 @@ def test_unrecorded_claim_loss_fails_before_materialization(tmp_path, seam, reco
             return _workflow_reuse(source_dir, reuse_dir, destination)
         if seam == "rehearsal":
             return dryrun_publication.accept_and_persist_packet(source_path, "book-1", source_dir, destination)
-        return repair_claims._sync_ledger_rows(original_rows, {"book-1": packet})
+        return claim_validation.sync_ledger_rows(original_rows, {"book-1": packet})
 
     if record_drop:
         result = action()
@@ -812,5 +808,102 @@ def test_drop_history_must_bind_packet_source_and_transition(tmp_path, field, va
     with pytest.raises(ClaimIdentityError):
         accept_packet(packet, "book-1", source_dir=source_dir)
     with pytest.raises(ClaimIdentityError):
-        repair_claims._sync_ledger_rows(rows, {"book-1": packet})
+        claim_validation.sync_ledger_rows(rows, {"book-1": packet})
     assert json.dumps(packet) == before
+
+
+@pytest.mark.parametrize("corruption", ["adapter_version", "representation_sha256", "missing", "duplicate"])
+def test_present_adapter_attestation_drift_rejects_before_model_or_write(tmp_path, corruption):
+    from research_fabric.sources import source_provenance
+
+    source_dir = _source(tmp_path)
+    packet = _packet()
+    packet["source_provenance"] = source_provenance([source_dir / "source.html"])
+    packet = accept_packet(packet, "book-1", source_dir=source_dir)
+    report = tmp_path / "report"
+    report.write_text(
+        _bound_report(
+            packet, source_dir, [{"claim_id": "c-book-1-1", "old_excerpt": "bad A", "reason": "excerpt not found"}]
+        )
+    )
+    if corruption == "missing":
+        packet["source_provenance"] = []
+    elif corruption == "duplicate":
+        packet["source_provenance"] *= 2
+    else:
+        packet["source_provenance"][0][corruption] = "stale"
+    path = tmp_path / "run" / "evidence" / "worker-book-1.json"
+    atomic_write_json(path, packet)
+    before = path.read_bytes()
+    with pytest.raises(ClaimIdentityError, match="source provenance"):
+        repair_claims.repair_claims(
+            tmp_path / "run",
+            source_dir,
+            report,
+            model=lambda _: pytest.fail("called model before validating attestation"),
+        )
+    assert path.read_bytes() == before
+    assert not (path.parent / "claim-history.json").exists()
+
+
+def test_shared_adapter_controls_repair_representation_and_attestation(tmp_path):
+    from research_fabric._source_adapter import HTMLAdapter
+    from research_fabric.sources import source_provenance
+
+    class LocalText(HTMLAdapter):
+        name = "test-text"
+        version = "1"
+        suffixes = (".txt",)
+
+        def extract_text(self, source):
+            return source
+
+    adapters = (LocalText(),)
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    (source_dir / "source.txt").write_text("good A good B good C", encoding="utf-8")
+    packet = _packet()
+    for claim in packet["parsed"]["claims"]:
+        claim["source_file"] = "source.txt"
+    packet["source_provenance"] = source_provenance([source_dir / "source.txt"], adapters)
+    packet = accept_packet(packet, "book-1", source_dir=source_dir, adapters=adapters)
+    path = tmp_path / "run" / "evidence" / "worker-book-1.json"
+    atomic_write_json(path, packet)
+    from research_fabric.claim_report import grounding_report_metadata
+
+    rows = [
+        dict(
+            claim,
+            worker="book-1",
+            packet_revision=packet["packet_revision"],
+            packet_state_revision=packet["packet_state_revision"],
+        )
+        for claim in packet["parsed"]["claims"]
+    ]
+    metadata = grounding_report_metadata(
+        rows, packet["source_provenance"], [("c-book-1-1", "excerpt"), ("c-book-1-2", "excerpt")]
+    )
+    report = tmp_path / "report"
+    report.write_text("REPORT-META: " + json.dumps(metadata))
+    result = repair_claims.repair_claims(
+        tmp_path / "run",
+        source_dir,
+        report,
+        adapters=adapters,
+        model=lambda prompt: json.dumps({"found": True, "excerpt": "good A" if "c-book-1-1" in prompt else "good B"}),
+    )
+    assert result["repaired"] == 2
+    assert json.loads(path.read_text())["source_provenance"] == packet["source_provenance"]
+
+
+def test_ledger_projection_preserves_historical_metadata_and_original_order(tmp_path):
+    packet = accept_packet(_packet(), "book-1", source_dir=_source(tmp_path))
+    originals = [
+        dict(claim, accepted_attempt_id="historical-attempt", publication_extra={"retained": True})
+        for claim in packet["parsed"]["claims"]
+    ]
+    packet["parsed"]["claims"].reverse()
+    rows = claim_validation.sync_ledger_rows(originals, {"book-1": packet})
+    assert [row["claim_id"] for row in rows] == [row["claim_id"] for row in originals]
+    assert all(row["accepted_attempt_id"] == "historical-attempt" for row in rows)
+    assert all(row["publication_extra"] == {"retained": True} for row in rows)

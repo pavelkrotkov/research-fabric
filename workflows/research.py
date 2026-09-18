@@ -142,7 +142,7 @@ def _dir_sha(d: pathlib.Path) -> str | None:
     return h.hexdigest()
 
 
-def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator, source_dir):
+def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator, source_dir, adapters=ADAPTERS):
     reused_sids = []
     for sid, _ in specs:
         src_packet = reuse_dir / f"worker-{sid}.json"
@@ -157,7 +157,7 @@ def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance
             continue
         dst = destination_dir / src_packet.name
         try:
-            accepted = accept_packet(src_data, sid, source_dir=source_dir)
+            accepted = accept_packet(src_data, sid, source_dir=source_dir, adapters=adapters)
         except ClaimIdentityError as exc:
             raise RuntimeError(f"reused packet {sid} failed claim identity validation: {exc}") from exc
         atomic_write_json(dst, accepted)
@@ -342,7 +342,8 @@ with run_lifecycle(run_root):
                 defects = _packet_defects(packet_data, sid)
                 attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
                 if not defects:
-                    accepted = accept_packet(packet_data, sid, source_dir=source_dir, attempt_id=attempt_id)
+                    accepted = accept_packet(packet_data, sid, source_dir=source_dir, attempt_id=attempt_id,
+                                             adapters=SOURCE_ADAPTERS)
                     atomic_write_json(packet, accepted)
                     return sid, proc.stdout.strip(), None
             except ClaimIdentityError as exc:
@@ -368,6 +369,7 @@ with run_lifecycle(run_root):
             WORKER_PROVENANCE,
             lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
             source_dir,
+            SOURCE_ADAPTERS,
         )
         pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
         results = [(sid, "reused", None) for sid in reused_sids]

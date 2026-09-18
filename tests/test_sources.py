@@ -125,6 +125,7 @@ def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path
         "json": json,
         "shutil": shutil,
         "packet_source_defects": packet_source_defects,
+        "ADAPTERS": __import__("research_fabric.sources", fromlist=["ADAPTERS"]).ADAPTERS,
         "accept_packet": accept_packet,
         "atomic_write_json": atomic_write_json,
         "ClaimIdentityError": ClaimIdentityError,

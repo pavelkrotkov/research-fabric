@@ -34,7 +34,7 @@ import unicodedata
 from collections import Counter
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.claims import source_revision, stable_revision
+from research_fabric.claim_report import grounding_report_metadata
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.sources import representation_for  # noqa: E402
@@ -165,45 +165,6 @@ def check(claims, snapshot_text_by_source_id):
         if not grounded(claim.get("excerpt", ""), text):
             failures.append((claim.get("claim_id"), "excerpt not found in snapshot"))
     return failures
-
-
-def _failure_records(claims, failures):
-    by_id = {claim.get("claim_id"): claim for claim in claims}
-    return [
-        {
-            "claim_id": cid,
-            "worker": by_id.get(cid, {}).get("worker"),
-            "reason": why,
-            "old_excerpt": by_id.get(cid, {}).get("excerpt"),
-            "source_ids": by_id.get(cid, {}).get("source_ids", []),
-        }
-        for cid, why in failures
-    ]
-
-
-def _packet_bindings(claims):
-    packets = {}
-    for claim in claims:
-        worker = claim.get("worker")
-        revision = claim.get("packet_revision")
-        state = claim.get("packet_state_revision")
-        if worker and revision and state:
-            packet = packets.setdefault(worker, {"packet_revision": revision, "packet_state_revision": state})
-            if packet["packet_revision"] != revision or packet["packet_state_revision"] != state:
-                packet["incompatible"] = True
-    return packets
-
-
-def grounding_report_metadata(claims, sources, failures):
-    """Build the machine-readable binding carried with a grounding report."""
-    metadata = {
-        "version": 1,
-        "source_revision": source_revision(sources),
-        "packets": _packet_bindings(claims),
-        "failures": _failure_records(claims, failures),
-    }
-    metadata["report_id"] = stable_revision(metadata)
-    return metadata
 
 
 # --------------------------------------------------------------------------

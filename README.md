@@ -128,8 +128,10 @@ atomic_write_json(packet_path, accepted)
 
 If the original correspondence cannot be established, generate a new revision-bound
 report after host acceptance instead of applying an old positional report.
-Repair currently supports UTF-8 HTML; other formats fail closed until the
-source-adapter stack supplies its shared representation loader. A library call
+Repair uses the shared source-adapter representation and re-verifies every
+present source attestation before any model call or packet write. Unsupported
+formats fail closed. Library callers can supply the same adapter registry used
+for extraction; pre-adapter packets retain their explicit compatibility path. A library call
 without `field_root` is packet-only and returns `fully_validated=False`; the CLI
 requires both the field root and project spec for full deterministic re-gating.
 
