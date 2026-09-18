@@ -30,14 +30,13 @@ witness is dropped rather than published with synthesized English.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import re
 import sys
-import time
 from html.parser import HTMLParser
 
-from openai import OpenAI
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.execution import InvalidOutput, worker_session
 
 RUN = pathlib.Path(sys.argv[1])
 SRC = pathlib.Path(sys.argv[2])
@@ -54,45 +53,9 @@ while i < len(sys.argv):
     else:
         i += 1
 
-# --- Provider/model selection (user-binding constraint) ---
-# Allowed worker models, in order of preference:
-#   1. NVIDIA hosted deepseek-v4-flash (provider: nvidia)
-#   2. deepseek/deepseek-v4-flash-0731 via OpenRouter
-#   3. z-ai/glm-5.3-flash via OpenRouter
-# Never any other model (explicitly banned: glm-4.5-air, stealth/ox-alpha).
-NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY")
-if not NVIDIA_KEY and (
-    envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-):
-    fallback = pathlib.Path(envfile)
-    if fallback.is_file():
-        for line in fallback.read_text(errors="replace").splitlines():
-            if line.startswith("NVIDIA_API_KEY="):
-                NVIDIA_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-
-MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "deepseek-ai/deepseek-v4-flash-0731")
-PROVIDER = os.environ.get("RESEARCH_FABRIC_WORKER_PROVIDER", "")  # nvidia | openrouter | ""
-if not PROVIDER:
-    PROVIDER = "nvidia" if NVIDIA_KEY else "openrouter"
-if PROVIDER == "nvidia":
-    BASE_URL = "https://integrate.api.nvidia.com/v1"
-    API_KEY = NVIDIA_KEY
-else:
-    BASE_URL = "https://openrouter.ai/api/v1"
-    API_KEY = os.environ.get("OPENROUTER_API_KEY")
-    if not API_KEY and (
-        envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-    ):
-        fallback = pathlib.Path(envfile)
-        if fallback.is_file():
-            for line in fallback.read_text(errors="replace").splitlines():
-                if line.startswith("OPENROUTER_API_KEY="):
-                    API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-if not API_KEY:
-    raise RuntimeError(f"no API key for provider {PROVIDER}: set NVIDIA_API_KEY or OPENROUTER_API_KEY")
-CLIENT = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=300)
+SESSION = worker_session(
+    RUN, "extraction", f"book-{BOOK}", [SRC / CANONICAL_FILE, *(SRC / w["file"] for w in WITNESSES)]
+)
 CLAIM_TYPES = [
     "textual",
     "linguistic",
@@ -124,24 +87,15 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip().lower()
 
 
-def call_model(messages, max_tokens=32000):
-    for a in range(1, 16):
-        try:
-            r = CLIENT.chat.completions.create(model=MODEL, messages=messages, temperature=0, max_tokens=max_tokens)
-            text = r.choices[0].message.content
-            if text and text.strip():
-                return text
-            # content=None / empty: reasoning burned the budget -> retry (bigger budget callers can pass it)
-            print(f"[worker] empty content (attempt {a})", flush=True)
-            continue
-        except Exception as e:
-            s = str(e)
-            transient = "429" in s or "50" in s[:3] or "Provider returned error" in s
-            if not transient:
-                raise
-            print(f"[worker] transient {s[:40]!r} (attempt {a}); backoff", flush=True)
-            time.sleep(min(60, 6 * a))
-    raise RuntimeError("model call returned no content after 15 attempts")
+def call_model(messages, key="selections"):
+    def validate(text):
+        parsed = extract_json(text)
+        rows = (parsed or {}).get(key)
+        if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
+            raise InvalidOutput()
+        return parsed
+
+    return SESSION.call(messages, validate=validate)
 
 
 def extract_json(text):
@@ -226,17 +180,8 @@ def main():
         witness_texts.append({**w, "text": html_to_text(raw_w), "hay": norm(raw_w)})
 
     # ---- Stage 1: Latin-only claims ----
-    claims, last_err = None, None
-    for _attempt in range(1, 4):
-        text = call_model([{"role": "user", "content": build_latin_prompt(latin_body, CANONICAL_FILE)}])
-        p = extract_json(text)
-        cs = (p or {}).get("claims")
-        if isinstance(cs, list) and cs and all(isinstance(c, dict) and c.get("excerpt") for c in cs):
-            claims = cs
-            break
-        last_err = "stage1 no claims"
-    if claims is None:
-        raise RuntimeError(f"stage 1 failed after 3 attempts: {last_err}")
+    packet = call_model([{"role": "user", "content": build_latin_prompt(latin_body, CANONICAL_FILE)}], key="claims")
+    claims = packet["claims"]
 
     # Drop claims whose Latin excerpt is NOT verbatim in the Latin snapshot.
     kept = []
@@ -257,7 +202,7 @@ def main():
         text = call_model(
             [{"role": "user", "content": build_witness_prompt(items, w["label"], w["source_id"], w["text"])}]
         )
-        sel = extract_json(text)
+        sel = text
         sel_list = (sel or {}).get("selections") or []
         by_i = {}
         for s in sel_list:
@@ -287,7 +232,7 @@ def main():
     selection_map = {}
     if selectable:
         text = call_model([{"role": "user", "content": build_select_prompt(selectable)}])
-        sel = extract_json(text)
+        sel = text
         for s in (sel or {}).get("selections") or []:
             try:
                 selection_map[int(s.get("i"))] = s
@@ -352,7 +297,8 @@ def main():
         json.dumps(
             {
                 "worker": f"book-{BOOK}",
-                "attempts": [{"attempt": 1, "stages": 3, "ok": True, "claims_kept": len(final)}],
+                "attempts": SESSION.records(),
+                "execution": SESSION.records(),
                 "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
             },
             indent=2,

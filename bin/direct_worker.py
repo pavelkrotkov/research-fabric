@@ -12,38 +12,20 @@ Writes <run_root>/evidence/worker-book-<N>.json
 
 import html
 import json
-import os
 import pathlib
 import re
 import sys
-import time
 from html.parser import HTMLParser
 
-from openai import OpenAI
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.execution import InvalidOutput, worker_session
 
 BOOK = int(sys.argv[3])
 RUN = pathlib.Path(sys.argv[1])
 SRC = pathlib.Path(sys.argv[2])
 SOURCE_FILE = sys.argv[4] if len(sys.argv) > 4 else f"odyssey-book-{BOOK}.html"
 THEME = sys.argv[5] if len(sys.argv) > 5 else None
-KEY = os.environ.get("OPENROUTER_API_KEY")
-if not KEY and (envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")):
-    # Authoritative: OPENROUTER_API_KEY env var. Fallback file is the Hermes
-    # home .env, or a user-configured RESEARCH_FABRIC_ENV_FILE. Never printed
-    # or persisted. Missing file -> clean key-unavailable error, no traceback.
-    fallback = pathlib.Path(envfile)
-    if fallback.is_file():
-        for line in fallback.read_text(errors="replace").splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-if not KEY:
-    raise RuntimeError(
-        "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
-    )
-MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "z-ai/glm-4.5-air")
-BASE = "https://openrouter.ai/api/v1"
-CLIENT = OpenAI(base_url=BASE, api_key=KEY)
+SESSION = worker_session(RUN, "extraction", f"book-{BOOK}", [SRC / SOURCE_FILE])
 
 
 class Text(HTMLParser):
@@ -109,22 +91,11 @@ def defects(parsed):
     return out
 
 
-def call_model(prompt):
-    for a in range(1, 16):
-        try:
-            r = CLIENT.chat.completions.create(
-                model=MODEL, messages=[{"role": "user", "content": prompt}], temperature=0, max_tokens=20000
-            )
-            return r.choices[0].message.content
-        except Exception as e:
-            s = str(e)
-            transient = (
-                "429" in s or "500" in s or "502" in s or "503" in s or "504" in s or "Provider returned error" in s
-            )
-            if not transient:
-                raise
-            time.sleep(min(60, 6 * a))
-    raise RuntimeError("model call failed after 15 attempts")
+def validated_packet(text):
+    parsed = extract_json(text)
+    if defects(parsed):
+        raise InvalidOutput()
+    return parsed
 
 
 def main():
@@ -143,31 +114,14 @@ def main():
         "excerpts, no rewording). locator = book + line/section reference. stance = the claim's stance "
         "toward the epic's themes (supports/qualifies/contradicts). Do not use code fences.\n\nBOOK TEXT:\n" + body
     )
-    parsed = None
-    last_err = None
-    for attempt in range(1, 4):
-        text = call_model(
-            prompt
-            + (
-                f"\n\nNOTE: previous reply was invalid ({last_err}). Return only the JSON object."
-                if attempt > 1
-                else ""
-            )
-        )
-        try:
-            parsed = extract_json(text)
-            d = defects(parsed)
-            if not d:
-                break
-            last_err = "; ".join(d)
-        except Exception as e:
-            last_err = f"unparseable: {str(e)[:80]}"
-    if parsed is None or defects(parsed):
-        raise RuntimeError(f"no valid packet after 3 model attempts: {last_err}")
+    parsed = SESSION.call([{"role": "user", "content": prompt}], validate=validated_packet)
     pkt_dir = RUN / "evidence"
     pkt_dir.mkdir(parents=True, exist_ok=True)
     (pkt_dir / f"worker-book-{BOOK}.json").write_text(
-        json.dumps({"worker": f"book-{BOOK}", "attempts": [{"attempt": 1, "ok": True}], "parsed": parsed}, indent=2)
+        json.dumps(
+            {"worker": f"book-{BOOK}", "attempts": SESSION.records(), "execution": SESSION.records(), "parsed": parsed},
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )

@@ -6,52 +6,30 @@ Usage: repair_claims.py <run_root> <source_dir> <grounding_report.txt>
 """
 
 import json
-import os
 import pathlib
 import re
 import sys
-import time
 
-from openai import OpenAI
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.execution import ExecutionError, InvalidOutput, worker_session
 
 RUN = pathlib.Path(sys.argv[1])
 SRC = pathlib.Path(sys.argv[2])
 REPORT = pathlib.Path(sys.argv[3])
 
-_key = os.environ.get("OPENROUTER_API_KEY")
-if not _key and (
-    envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-):
-    fallback = pathlib.Path(envfile)
-    if fallback.is_file():
-        for line in fallback.read_text(errors="replace").splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                _key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-if not _key:
-    raise RuntimeError(
-        "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
-    )
-CLIENT = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_key)
+SESSION = None
 
 
 def call_model(prompt):
-    for a in range(1, 16):
-        try:
-            r = CLIENT.chat.completions.create(
-                model="stealth/ox-alpha",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=20000,
-            )
-            return r.choices[0].message.content
-        except Exception as e:
-            s = str(e)
-            if "429" in s or "Provider returned error" in s or any(f"5{x}" in s[:4] for x in "01234"):
-                time.sleep(min(60, 6 * a))
-            else:
-                raise
-    raise RuntimeError("model call failed after 15 attempts")
+    def validate(text):
+        value = extract_json(text)
+        if not isinstance(value, dict) or not isinstance(value.get("found"), bool):
+            raise InvalidOutput()
+        if value["found"] and not isinstance(value.get("excerpt"), str):
+            raise InvalidOutput()
+        return text
+
+    return SESSION.call([{"role": "user", "content": prompt}], validate=validate)
 
 
 def extract_json(text):
@@ -120,7 +98,10 @@ for b, cids in sorted(by_book.items()):
     pkt_path = RUN / "evidence" / f"worker-book-{b}.json"
     pkt = json.loads(pkt_path.read_text())
     claims = pkt["parsed"]["claims"]
-    body = html_to_text_local((SRC / f"odyssey-book-{b}.html").read_text(encoding="utf-8", errors="replace"))
+    source = SRC / f"odyssey-book-{b}.html"
+    SESSION = worker_session(RUN, "repair", f"book-{b}", [source])
+    body = html_to_text_local(source.read_text(encoding="utf-8", errors="replace"))
+    first_call = len(SESSION.ids)
     for cid in cids:
         idx = int(cid.rsplit("-", 1)[1]) - 1
         if idx >= len(claims):
@@ -137,8 +118,11 @@ for b, cids in sorted(by_book.items()):
             'shorter span). If the passage does not exist in BOOK TEXT, reply {"found": false}.\n\n'
             f"BOOK TEXT:\n{body}"
         )
+        SESSION.task = cid
         try:
             out = extract_json(call_model(prompt))
+        except ExecutionError:
+            raise
         except Exception as e:
             print(f"{cid}: model error {e}")
             continue
@@ -157,7 +141,9 @@ for b, cids in sorted(by_book.items()):
             claims.remove(c)
             dropped += 1
             print(f"{cid}: dropped (model excerpt still not verbatim)")
-    pkt["attempts"].append({"attempt": "excerpt-repair", "repaired": True})
+    records = SESSION.records()[first_call:]
+    pkt["attempts"].extend(records)
+    pkt.setdefault("execution", []).extend(records)
     pkt_path.write_text(json.dumps(pkt, indent=2) + "\n", encoding="utf-8")
 
 print(f"\ndone: repaired={repaired}, dropped={dropped}")

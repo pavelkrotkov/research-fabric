@@ -20,7 +20,7 @@ import hashlib
 import importlib.metadata
 import inspect
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 POLICY = "native-045-complete-v1"
@@ -188,7 +188,7 @@ def strict_native(compiler, cli):
         cli._run_compile_with_retry = original_retry
 
 
-def native_compile(kb, sources):
+def native_compile(kb, sources, execution_root=None, profile_index=0):
     """Aggregate single-file native results; directory CLI ignores failures.
 
     Each file must add exactly one completed native compile report. A native
@@ -199,8 +199,13 @@ def native_compile(kb, sources):
     cli, compiler, versions = _native_modules()
     from openkb.state import HashRegistry
 
+    from research_fabric.execution_native import native_execution
+
+    execution = (
+        native_execution(execution_root, sources, compiler, cli, profile_index) if execution_root else nullcontext()
+    )
     outcomes = []
-    with strict_native(compiler, cli) as reports:
+    with execution, strict_native(compiler, cli) as reports:
         for source in sources:
             # No native registry entry is an acceptance record. The outer seam
             # alone can skip a byte-identical, previously accepted candidate.

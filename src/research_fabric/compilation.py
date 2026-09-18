@@ -78,7 +78,7 @@ def assert_run_branch(kb):
         raise CompilationError("Compilation/publication requires an isolated non-main branch")
 
 
-def _identity(kb, sources, command):
+def _identity(kb, sources, command, execution_root=None):
     """Bind both policy modules and the execution environment to baseline bytes.
 
     Environment values may include credentials, so persist only one digest of
@@ -88,6 +88,7 @@ def _identity(kb, sources, command):
     # Full baseline binds native registry, policy/config, existing pages and
     # assets. Command must use an explicit interpreter; child verifies versions.
     return {
+        "execution": _execution_identity(execution_root),
         "policy": POLICY,
         "base_commit": _git(kb, "rev-parse", "HEAD"),
         "branch": _git(kb, "branch", "--show-current"),
@@ -99,6 +100,22 @@ def _identity(kb, sources, command):
         "environment_sha256": hashlib.sha256(json.dumps(dict(os.environ), sort_keys=True).encode()).hexdigest(),
         "executable_sha256": digest(shutil.which(command[0]) or command[0]),
         "entrypoint_sha256": digest(command[1]) if len(command) > 1 and Path(command[1]).is_file() else None,
+    }
+
+
+def _execution_identity(root):
+    if root is None:
+        return None
+    from research_fabric.execution import configured
+
+    revision, config = configured(root)
+    return {
+        "revision": revision,
+        "config": config,
+        "code": {
+            name: digest(Path(__file__).with_name(name))
+            for name in ("execution.py", "execution_native.py", "_execution_profiles.py", "_execution_journal.py")
+        },
     }
 
 
@@ -120,7 +137,7 @@ def _apply_candidate(candidate, kb, baseline):
         shutil.copy2(candidate / name, destination)
 
 
-def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2):
+def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2, execution_root=None):
     """Compile all inputs from an unchanged baseline; retain failed diagnostics.
 
     command is a controlled executable implementing --kb/--sources/--result.
@@ -130,14 +147,17 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2)
     kb, diagnostics = Path(kb).resolve(), Path(diagnostics).resolve()
     sources = tuple(Path(p).resolve() for p in sources)
     command = tuple(command or (sys.executable, str(Path(__file__).resolve())))
-    identity, session, baseline = _prepare_attempts(kb, sources, diagnostics, command, attempts)
+    attempts = _attempt_limit(execution_root, attempts)
+    identity, session, baseline = _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_root)
     for attempt in range(1, attempts + 1):
-        if _identity(kb, sources, command) != identity:
+        if _identity(kb, sources, command, execution_root) != identity:
             raise CompilationError("Input, policy or worktree identity changed; start a new compile attempt")
         candidate = session / f"candidate-{attempt}"
         shutil.copytree(baseline, candidate)
         result_file = session / f"result-{attempt}.json"
         argv = [*command, "--kb", str(candidate), "--result", str(result_file), "--sources", *map(str, sources)]
+        argv.extend(_execution_arguments(execution_root, attempt))
+        checkpoint = _compile_checkpoint(execution_root)
         try:
             with (session / f"attempt-{attempt}.log").open("w") as log:
                 result = subprocess.run(
@@ -145,23 +165,57 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2)
                 )
             report = json.loads(result_file.read_text())
             _validate_result(candidate, report, sources, result.returncode)
-            if _identity(kb, sources, command) != identity:
+            if _identity(kb, sources, command, execution_root) != identity:
                 raise CompilationError("Input/policy changed while compiler was running")
             _apply_candidate(candidate, kb, identity["baseline"])
             write_json(session / "completed.json", {"report": report, "outputs": _tree(kb)})
             return report
         except (OSError, ValueError, KeyError, CompilationError, subprocess.TimeoutExpired) as exc:
             write_json(session / f"failure-{attempt}.json", {"state": "FAILED", "reason": str(exc)})
+            _check_retry_allowed(execution_root, checkpoint)
     raise CompilationError(f"Compilation failed after {attempts} attempt(s); diagnostics and baseline: {session}")
 
 
-def _prepare_attempts(kb, sources, diagnostics, command, attempts):
+def _attempt_limit(root, attempts):
+    if root is None:
+        return attempts
+    from research_fabric.execution import configured
+
+    return min(attempts, configured(root)[1]["budget"]["attempts"])
+
+
+def _execution_arguments(root, attempt):
+    if root is None:
+        return []
+    return ["--execution-root", str(Path(root).resolve()), "--profile-index", str(attempt - 1)]
+
+
+def _compile_checkpoint(root):
+    if root is None:
+        return 0
+    from research_fabric.execution import history
+
+    return max((r["id"] for r in history(root)["attempts"]), default=0)
+
+
+def _check_retry_allowed(root, checkpoint):
+    if root is None:
+        return
+    from research_fabric.execution import history
+
+    rows = [r for r in history(root)["attempts"] if r["id"] > checkpoint and r["role"] == "compile"]
+    terminal = {None, "authentication", "credential_unavailable", "configuration_or_transport"}
+    if any(r["outcome"] in terminal for r in rows):
+        raise CompilationError("Native execution requires operator configuration/cancellation before retry")
+
+
+def _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_root=None):
     if not sources or not 1 <= attempts <= 3:
         raise CompilationError("Supply sources and 1–3 bounded attempts")
     if diagnostics.is_relative_to(kb):
         raise CompilationError("Compile diagnostics must be outside the candidate worktree")
     assert_run_branch(kb)
-    identity = _identity(kb, sources, command)
+    identity = _identity(kb, sources, command, execution_root)
     diagnostics.mkdir(parents=True, exist_ok=True)
     session = Path(tempfile.mkdtemp(prefix="compile-", dir=diagnostics))
     write_json(session / "identity.json", identity)
@@ -213,12 +267,14 @@ def main():
     parser.add_argument("--kb", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--sources", type=Path, nargs="+", required=True)
+    parser.add_argument("--execution-root", type=Path)
+    parser.add_argument("--profile-index", type=int, default=0)
     args = parser.parse_args()
     try:
         # Native errors can echo provider bodies/source excerpts; retain only
         # normalized outcomes, never raw native logs in persisted diagnostics.
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            report = native_compile(args.kb, args.sources)
+            report = native_compile(args.kb, args.sources, args.execution_root, args.profile_index)
         normalize_generated_log(args.kb)
         report.update(state="COMPLETE", outputs=_tree(args.kb))
         write_json(args.result, report)

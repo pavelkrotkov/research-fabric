@@ -42,6 +42,8 @@ p.add_argument('--kb', type=Path)
 p.add_argument('--result', type=Path)
 p.add_argument('--sources', nargs='+', type=Path)
 p.add_argument('--mode')
+p.add_argument('--execution-root')
+p.add_argument('--profile-index')
 a = p.parse_args()
 page = a.kb / 'wiki/concepts/one.md'
 page.parent.mkdir(parents=True, exist_ok=True)
@@ -180,3 +182,29 @@ def test_clean_commit_hook_rewrite_is_not_accepted(repo, tmp_path):
         finalize_run(repo, run, "proposal", 1, lambda: {"fixture": True})
     assert git(repo, "status", "--porcelain") == ""
     assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+
+
+def test_compile_profile_switch_during_candidate_never_accepts_stale_result(repo, tmp_path, executable, monkeypatch):
+    from research_fabric.execution import configure, resolve
+
+    source = tmp_path / "source.md"
+    source.write_text("immutable source")
+    run = tmp_path / "run"
+    configure(run, resolve(native_model="openai/B", environ={}))
+    original = subprocess.run
+
+    def switch_after_child(command, *args, **kwargs):
+        result = original(command, *args, **kwargs)
+        if str(executable) in command:
+            configure(run, resolve(native_model="openai/C", environ={}))
+        return result
+
+    monkeypatch.setattr(subprocess, "run", switch_after_child)
+    with pytest.raises(CompilationError):
+        compile_with_recovery(
+            repo, [source], run / "compile", command=[sys.executable, str(executable)], execution_root=run, attempts=1
+        )
+    assert not (repo / "wiki/concepts/one.md").exists()
+    assert git(repo, "status", "--porcelain") == ""
+    failure = json.loads(next((run / "compile").glob("*/failure-1.json")).read_text())
+    assert "Input/policy changed" in failure["reason"]

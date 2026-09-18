@@ -17,6 +17,7 @@ from cao_workflow import ShimError, emit_output, get_inputs, run_step
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.compilation import assert_run_branch, compile_with_recovery, normalize_generated_log
 from research_fabric.run_state import finalize_run, run_lifecycle
+from research_fabric.execution import configure, configured, resolve, history
 from research_fabric.core import (
     book_task_from_project,
     extract_json,
@@ -36,10 +37,6 @@ from research_fabric.core import (
 RESEARCH_ROOT = pathlib.Path(os.environ.get("RESEARCH_FABRIC_ROOT", "/home/pavel/research-fabric"))
 PROJECTS_DIR = pathlib.Path(os.environ.get("RESEARCH_FABRIC_PROJECTS", str(RESEARCH_ROOT / "projects")))
 DEFAULT_PROJECT = "odyssey"
-# The direct-API worker's model/provider (mirrors bin/direct_worker.py). Kept in
-# sync so run.json records the exact model that produced the claims.
-MODEL_REF = "z-ai/glm-5.3-flash"
-PROVIDER_REF = "openrouter"
 
 INPUTS = {
     "field_root": {"type": "path", "required": True},
@@ -48,6 +45,7 @@ INPUTS = {
     "question": {"type": "string", "required": True},
     "reuse_evidence_dir": {"type": "path", "required": False},
     "project": {"type": "string", "required": False},
+    "execution": {"type": "string", "required": False},
 }
 
 
@@ -85,8 +83,10 @@ def collect_provenance() -> dict:
     proj_path = PROJECTS_DIR / f"{project_name}.yaml"
     corpus_manifest = manifest_path
     return {
-        "model": MODEL_REF,
-        "provider": PROVIDER_REF,
+        "execution": history(run_root),
+        "advisory_execution": {"provider": "claude_code", "actual_model": None, "usage": None,
+                               "reason": "CAO does not expose effective model or usage at this seam"},
+        "native_lint_execution": {"actual_model": None, "usage": None, "budgeted": False},
         "engine_sha": _git_sha(RESEARCH_ROOT),
         "engine_tag": _git_tag(RESEARCH_ROOT),
         "project": project_name,
@@ -150,6 +150,12 @@ with run_lifecycle(run_root):
     project_name = inputs.get("project") or DEFAULT_PROJECT
     project = load_project_spec(PROJECTS_DIR, project_name)
     ACCEPTANCE = project.get("acceptance") or {}
+    from openkb.config import load_config
+    native_config = load_config(field_root / ".openkb/config.yaml")
+    previous_execution = configured(run_root)[1] if (run_root / "execution.sqlite3").exists() else None
+    execution = resolve(project, json.loads(inputs.get("execution") or "{}"),
+                        native_model=native_config["model"], previous=previous_execution)
+    configure(run_root, execution)
     # Immutable provenance root of trust. Runs that do not carry their own
     # source-manifest.jsonl fall back to the canonical copy derived from the
     # project spec; digests are re-verified against the run's actual source bytes
@@ -214,7 +220,7 @@ with run_lifecycle(run_root):
     DIRECT_WORKER = str(RESEARCH_ROOT / "bin" / "direct_worker.py")
     AENEID_WORKER = str(RESEARCH_ROOT / "bin" / "aeneid_worker.py")
     DIRECT_WORKER_PY = os.environ.get(
-        "RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
+        "RESEARCH_FABRIC_WORKER_PYTHON", sys.executable)
 
 
     def collect(spec):
@@ -241,7 +247,7 @@ with run_lifecycle(run_root):
             )
         validator = VALIDATOR
         attempts = []
-        for attempt in range(1, 3):
+        for attempt in range(1, 2):
             try:
                 if IS_MULTI:
                     # Canonical Latin label + witness labels/source-ids → aeneid worker.
@@ -475,7 +481,7 @@ with run_lifecycle(run_root):
             dest.chmod(0o644)
         shutil.copy2(src, dest)
         dest.chmod(0o444)
-    compile_report = compile_with_recovery(field_root, source_files, run_root / "verification" / "compile")
+    compile_report = compile_with_recovery(field_root, source_files, run_root / "verification" / "compile", execution_root=run_root)
     subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
     normalize_generated_log(field_root)
 
@@ -516,6 +522,7 @@ with run_lifecycle(run_root):
                     "confidence": claim.get("confidence", 0.0),
                     "independence_group": claim.get("independence_group", sid),
                     "verified_at": "pilot-verifier-pass",
+                    "execution": packet.get("execution"),
                 }
             )
             if IS_MULTI:
