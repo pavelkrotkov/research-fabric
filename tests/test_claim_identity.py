@@ -959,3 +959,22 @@ def test_cross_packet_duplicate_original_id_rejects_before_any_mutation(tmp_path
         )
     assert [path.read_bytes() for path in paths] == before
     assert not (paths[0].parent / "claim-history.json").exists()
+
+
+def test_explicit_legacy_migration_preserves_existing_audit_without_rewriting_artifact(tmp_path):
+    source_dir = _source(tmp_path)
+    original = _packet()
+    audit = {"event": "legacy-repair", "detail": "retained original audit", "attempt_id": "old-attempt"}
+    original["claim_history"] = [audit]
+    artifact = tmp_path / "original-packet.json"
+    artifact.write_text(json.dumps(original), encoding="utf-8")
+    before = artifact.read_bytes()
+    digest = hashlib.sha256((source_dir / "source.html").read_bytes()).hexdigest()
+    ledger = [
+        dict(claim, claim_id=f"c-book-1-{index}", source_revision=digest)
+        for index, claim in enumerate(original["parsed"]["claims"], 1)
+    ]
+    migrated = migrate_legacy_packet(json.loads(artifact.read_text()), "book-1", ledger, source_dir=source_dir)
+    assert migrated["claim_history"][0] == audit
+    assert [row["event"] for row in migrated["claim_history"][1:]] == ["accepted"] * 3
+    assert artifact.read_bytes() == before

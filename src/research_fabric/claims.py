@@ -297,7 +297,7 @@ def accept_packet(packet, worker, *, source_dir, attempt_id=None, adapters=ADAPT
         packet["packet_revision"] = stable_revision({"worker": worker, "claims": claims})
         packet["claim_identity"] = {"version": 1, "worker": worker, "claim_ids": [c["claim_id"] for c in claims]}
         packet["legacy_claim_id_map"] = {}
-        packet["claim_history"] = [
+        packet.setdefault("claim_history", []).extend(
             _event(
                 packet,
                 c,
@@ -309,7 +309,7 @@ def accept_packet(packet, worker, *, source_dir, attempt_id=None, adapters=ADAPT
                 c.get("accepted_attempt_id"),
             )
             for c in claims
-        ]
+        )
     packet["source_revision"] = source_revision(source_dir)
     return packet
 
