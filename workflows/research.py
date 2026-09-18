@@ -15,6 +15,7 @@ import sys
 from cao_workflow import ShimError, emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.claims import ClaimIdentityError, accept_packet, atomic_write_json
 from research_fabric.core import (
     book_task_from_project,
     extract_json,
@@ -150,28 +151,38 @@ BOOK_RE = re.compile(project["snapshot_pattern"])
 WITNESSES = list((project.get("witnesses") or {}).keys())
 CANONICAL = project.get("canonical_variant", "latin")
 IS_MULTI = bool(WITNESSES)
+
+
 def _validator(parsed, acceptance=None):
     if IS_MULTI:
         return multisource_packet_defects(parsed, project, acceptance)
     return packet_defects(parsed, acceptance)
+
+
 VALIDATOR = _validator
 
 source_files = sorted(source_dir.glob("*.html"))
 if not source_files:
     raise RuntimeError("no source snapshots found in source_dir")
+
+
 # Every snapshot must match the pattern. Books are enumerated from the
 # canonical variant only (so 12 books, not 4×12); witness files ride along as
 # non-authoritative interpretive sources.
 def _book_of(p):
     m = BOOK_RE.search(p.name)
     return int(m.group(1)) if m else None
+
+
 matched = [(p, _book_of(p)) for p in source_files]
 if any(b is None for _, b in matched):
     raise RuntimeError(f"all snapshots must match {BOOK_RE.pattern}")
 if IS_MULTI:
+
     def _variant_of(p):
         m = BOOK_RE.search(p.name)
         return m.group(2) if m and m.lastindex and m.lastindex >= 2 else None
+
     BOOKS = sorted(b for p, b in matched if _variant_of(p) == CANONICAL)
 else:
     BOOKS = sorted({b for _, b in matched})
@@ -204,8 +215,7 @@ set_state(run_root, "RESEARCHING")
 
 DIRECT_WORKER = str(RESEARCH_ROOT / "bin" / "direct_worker.py")
 AENEID_WORKER = str(RESEARCH_ROOT / "bin" / "aeneid_worker.py")
-DIRECT_WORKER_PY = os.environ.get(
-    "RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
+DIRECT_WORKER_PY = os.environ.get("RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
 
 
 def collect(spec):
@@ -233,6 +243,7 @@ def collect(spec):
     validator = VALIDATOR
     attempts = []
     for attempt in range(1, 3):
+        attempt_id = f"{sid}:attempt-{attempt}"
         try:
             if IS_MULTI:
                 # Canonical Latin label + witness labels/source-ids → aeneid worker.
@@ -242,13 +253,22 @@ def collect(spec):
                     wfile = project["book_label_template"].format(n=b, w=w)
                     wid = project["source_id_template"].format(n=b, w=w)
                     witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
-                cmd = [DIRECT_WORKER_PY, AENEID_WORKER, str(run_root), str(source_dir),
-                       str(b), canon_label, theme or ""] + witness_args
+                cmd = [
+                    DIRECT_WORKER_PY,
+                    AENEID_WORKER,
+                    str(run_root),
+                    str(source_dir),
+                    str(b),
+                    canon_label,
+                    theme or "",
+                ] + witness_args
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
             else:
                 proc = subprocess.run(
                     [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
-                    capture_output=True, text=True, timeout=1500,
+                    capture_output=True,
+                    text=True,
+                    timeout=1500,
                 )
             packet = packet_dir / f"worker-{sid}.json"
             if proc.returncode != 0 or not packet.exists():
@@ -257,9 +277,21 @@ def collect(spec):
                 )
             parsed = json.loads(packet.read_text(encoding="utf-8")).get("parsed")
             defects = VALIDATOR(parsed, ACCEPTANCE)
-            attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
+            attempts.append(
+                {"attempt": attempt, "attempt_id": attempt_id, "stdout": proc.stdout.strip()[-200:], "defects": defects}
+            )
             if not defects:
+                accepted = accept_packet(
+                    json.loads(packet.read_text(encoding="utf-8")),
+                    sid,
+                    source_dir=source_dir,
+                    attempt_id=attempt_id,
+                )
+                atomic_write_json(packet, accepted)
                 return sid, proc.stdout.strip(), None
+        except ClaimIdentityError as exc:
+            attempts.append({"attempt": attempt, "attempt_id": attempt_id, "error": str(exc)})
+            break
         except ShimError as exc:
             attempts.append({"attempt": attempt, "error": str(exc)})
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
@@ -292,7 +324,11 @@ if reuse_evidence_dir:
         if VALIDATOR(src_data.get("parsed"), ACCEPTANCE):
             continue  # invalid packet — re-collect instead of propagating it
         dst = packet_dir / src_packet.name
-        shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
+        try:
+            accepted = accept_packet(src_data, sid, source_dir=source_dir)
+        except ClaimIdentityError as exc:
+            raise RuntimeError(f"reused packet {sid} failed claim identity validation: {exc}") from exc
+        atomic_write_json(dst, accepted)
         reused_sids.append(sid)
     # Only the non-reused workers are collected now.
     pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
@@ -494,20 +530,30 @@ for sid, _, _ in results:
         if not (field_root / note).is_file():
             set_state(run_root, "FAILED", failure="claim note target missing")
             raise RuntimeError(f"claim note target does not exist: {note}")
-        claims.append(
-            {
-                "claim_id": f"c-{sid}-{idx}",
+        claim_id = claim.get("claim_id")
+        if not isinstance(claim_id, str) or not claim_id:
+            dropped.append({"worker": sid, "index": idx, "source_file": claim.get("source_file", "")})
+            continue
+        ledger_claim = {
+                "claim_id": claim_id,
+                "worker": sid,
                 "claim": claim.get("claim", ""),
                 "note": note,
                 "source_ids": [source_id],
+                "source_file": claim.get("source_file", ""),
                 "locator": claim.get("locator", ""),
                 "excerpt": claim.get("excerpt", ""),
                 "stance": claim.get("stance", "supports"),
                 "confidence": claim.get("confidence", 0.0),
                 "independence_group": claim.get("independence_group", sid),
                 "verified_at": "pilot-verifier-pass",
+                "packet_revision": packet.get("packet_revision"),
+                "packet_state_revision": packet.get("packet_state_revision"),
+                "source_revision": claim.get("source_revision"),
             }
-        )
+        if claim.get("accepted_attempt_id"):
+            ledger_claim["accepted_attempt_id"] = claim["accepted_attempt_id"]
+        claims.append(ledger_claim)
         if IS_MULTI:
             # Extend backwards-compatible with the multi-witness fields. The
             # Latin excerpt/locator above stay authoritative (source_ids is
@@ -529,6 +575,13 @@ if not claims:
 (field_root / "evidence" / "claims.jsonl").write_text(
     "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n", encoding="utf-8"
 )
+history = []
+for sid, _, _ in results:
+    packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
+    history.extend(packet.get("claim_history") or [])
+if history:
+    write_json(field_root / "evidence" / "claim-history.json", history)
+    write_json(run_root / "verification" / "claim-history.json", history)
 manifest_out = []
 present_names = {p.name for p in source_files}
 for row in manifest_rows:
@@ -585,8 +638,7 @@ if IS_MULTI and any(c.get("english_witness") for c in claims):
         if proj_al.exists():
             shutil.copy2(proj_al, alignment_copy)
     tgate = subprocess.run(
-        [sys.executable, str(RESEARCH_ROOT / "bin" / "translation_grounding.py"),
-         str(field_root), str(alignment_copy)],
+        [sys.executable, str(RESEARCH_ROOT / "bin" / "translation_grounding.py"), str(field_root), str(alignment_copy)],
         text=True,
         capture_output=True,
     )

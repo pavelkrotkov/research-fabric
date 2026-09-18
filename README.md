@@ -62,7 +62,7 @@ reason at any point).
 ```
 workflows/research.py      the full pipeline (CAO workflow script)
 bin/direct_worker.py       evidence worker: HTML → text → one ox-alpha call → validated packet
-bin/repair_claims.py       claim-level repair: re-ground only failed claims against the source
+bin/repair_claims.py       claim-level repair: re-ground failed claims, then re-run all acceptance gates
 bin/excerpt_grounding.py   gate: every excerpt must be a verbatim substring of its snapshot
 bin/provenance_validate.py gate: claims ledger ↔ source ledger ↔ snapshot bytes
 bin/negative_controls.py   gate test-suite: known-bad packets must be rejected
@@ -95,6 +95,43 @@ cao workflow run research \
 and carry a `source-manifest.jsonl` (sha256 per snapshot) in the run root.
 The canonical manifest, derived from the project spec, lives at
 `corpora/<project>/source-manifest.jsonl` and is re-verified at publish.
+
+Claim repair also requires the run's isolated field root and project spec so
+the packet transition can be rechecked against the existing provenance,
+grounding, and acceptance gates:
+
+```bash
+python bin/repair_claims.py <run_root> <source_dir> <grounding_report.txt> \
+  --field-root <isolated-field-root> --project <projects/project.yaml>
+```
+
+Stable claim IDs are persisted at host acceptance, before any repair or ledger
+materialization. Repair reports bind packet state and source bytes; stale or
+unknown targets fail before mutation. Packet history is authoritative and its
+separate audit file is recoverable after interruption. Repair validates a
+disposable evidence copy; rerun the publication workflow to materialize the
+repaired packet into the isolated proposed branch.
+
+Legacy positional reports require the **retained original published ledger**.
+Do not reconstruct that ledger from a packet that may have been filtered or
+reordered. Migrate and persist the packet before passing its old report to repair:
+
+```python
+from research_fabric.claims import atomic_write_json, migrate_legacy_packet
+
+# original_ledger rows must include source_file and source_revision from the
+# retained source ledger, joined by their original source_ids (never current bytes).
+# Missing original source correspondence is an error, not an inferred mapping.
+accepted = migrate_legacy_packet(packet, "book-1", original_ledger, source_dir=source_dir)
+atomic_write_json(packet_path, accepted)
+```
+
+If the original correspondence cannot be established, generate a new revision-bound
+report after host acceptance instead of applying an old positional report.
+Repair currently supports UTF-8 HTML; other formats fail closed until the
+source-adapter stack supplies its shared representation loader. A library call
+without `field_root` is packet-only and returns `fully_validated=False`; the CLI
+requires both the field root and project spec for full deterministic re-gating.
 
 ## Reproducibility chain
 

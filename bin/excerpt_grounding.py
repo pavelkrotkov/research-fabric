@@ -32,6 +32,10 @@ import pathlib
 import re
 import sys
 import unicodedata
+from collections import Counter
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.claims import source_revision, stable_revision
 
 # Punctuation folding table: typographic variants -> ASCII equivalents.
 _PUNCT = {
@@ -164,6 +168,45 @@ def check(claims, snapshot_text_by_source_id):
     return failures
 
 
+def _failure_records(claims, failures):
+    by_id = {claim.get("claim_id"): claim for claim in claims}
+    return [
+        {
+            "claim_id": cid,
+            "worker": by_id.get(cid, {}).get("worker"),
+            "reason": why,
+            "old_excerpt": by_id.get(cid, {}).get("excerpt"),
+            "source_ids": by_id.get(cid, {}).get("source_ids", []),
+        }
+        for cid, why in failures
+    ]
+
+
+def _packet_bindings(claims):
+    packets = {}
+    for claim in claims:
+        worker = claim.get("worker")
+        revision = claim.get("packet_revision")
+        state = claim.get("packet_state_revision")
+        if worker and revision and state:
+            packet = packets.setdefault(worker, {"packet_revision": revision, "packet_state_revision": state})
+            if packet["packet_revision"] != revision or packet["packet_state_revision"] != state:
+                packet["incompatible"] = True
+    return packets
+
+
+def grounding_report_metadata(claims, sources, failures):
+    """Build the machine-readable binding carried with a grounding report."""
+    metadata = {
+        "version": 1,
+        "source_revision": source_revision(sources),
+        "packets": _packet_bindings(claims),
+        "failures": _failure_records(claims, failures),
+    }
+    metadata["report_id"] = stable_revision(metadata)
+    return metadata
+
+
 # --------------------------------------------------------------------------
 # Self-test: the gate must accept faithful transcription variants and reject
 # fabrications. Run automatically before any real verification.
@@ -264,6 +307,12 @@ def main() -> int:
         snap = field_root / row["snapshot"]
         texts[row["source_id"]] = snap.read_text(encoding="utf-8", errors="replace")
     failures = check(claims, texts)
+    claim_ids = [claim.get("claim_id") for claim in claims]
+    duplicate_ids = {cid for cid, count in Counter(claim_ids).items() if count > 1}
+    if duplicate_ids:
+        failures.extend((cid, "duplicate claim_id") for cid in sorted(duplicate_ids))
+    metadata = grounding_report_metadata(claims, sources, failures)
+    print(f"REPORT-META: {json.dumps(metadata, ensure_ascii=False, sort_keys=True)}")
     if failures:
         for cid, why in failures:
             print(f"{cid}: {why}", file=sys.stderr)
