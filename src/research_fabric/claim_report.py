@@ -1,6 +1,6 @@
 """Grounding report v1: one binding protocol for production, repair and replay.
 
-The deterministic gate signs the complete envelope with a canonical digest,
+The deterministic gate hashes the complete envelope with a canonical digest,
 including its failure records and every ledger packet's original/current
 revision pair. Repair validates that envelope and resolves all targets before
 any model call or write. A report may resume only through its own recorded
@@ -37,7 +37,12 @@ def _packet_bindings(claims):
 
 
 def grounding_report_metadata(claims, sources, failures):
-    """Bind gate failures to the exact ledger packet states and source bytes."""
+    """Produce the v1 envelope from ledger rows and deterministic gate failures.
+
+    Bind all represented packets, including those without failures. Conflicting
+    revisions remain explicitly incompatible; the producer must not choose
+    whichever row happens to occur last. Sources are original manifest rows.
+    """
     packets = _packet_bindings(claims)
     by_id = {claim.get("claim_id"): claim for claim in claims}
     rows = [
@@ -109,6 +114,11 @@ class Report:
 
     @classmethod
     def read(cls, path, packets, source_dir):
+        """Read and normalize report syntax without writing packets or calling a model.
+
+        Envelope integrity/source checks happen here. ``targets`` must then
+        validate packet bindings and the entire replay chain before use.
+        """
         raw = path.read_text(encoding="utf-8")
         envelopes = [line[len(META_PREFIX) :] for line in raw.splitlines() if line.startswith(META_PREFIX)]
         if not envelopes:
@@ -125,7 +135,13 @@ class Report:
         return cls(report_id, metadata.get("packets"), metadata.get("failures"))
 
     def targets(self, packets):
-        """Resolve the whole report, including non-target packet bindings, without mutation."""
+        """Resolve all targets and non-target packet bindings before mutation.
+
+        Returned targets retain references to the loaded packet/claim objects.
+        They are a validated execution snapshot, not independent copies or a
+        lock: use them serially with the same loaded packets. Applied targets
+        are replay no-ops; no current list offset participates in resolution.
+        """
         require(isinstance(self.bindings, dict), "grounding report is missing packet bindings")
         require(isinstance(self.failures, list), "grounding report failures are not a list")
         index = _identity_index(packets, self.report_id)

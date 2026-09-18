@@ -907,3 +907,55 @@ def test_ledger_projection_preserves_historical_metadata_and_original_order(tmp_
     assert [row["claim_id"] for row in rows] == [row["claim_id"] for row in originals]
     assert all(row["accepted_attempt_id"] == "historical-attempt" for row in rows)
     assert all(row["publication_extra"] == {"retained": True} for row in rows)
+
+
+@pytest.mark.parametrize("second_dropped", [False, True])
+def test_cross_packet_duplicate_original_id_rejects_before_any_mutation(tmp_path, second_dropped):
+    from research_fabric.claim_report import grounding_report_metadata
+
+    source_dir = _source(tmp_path)
+    paths, packets = [], []
+    for worker in ("book-1", "book-2"):
+        packet = _packet()
+        packet["worker"] = worker
+        packet["parsed"]["claims"] = packet["parsed"]["claims"][:1]
+        packet = accept_packet(packet, worker, source_dir=source_dir)
+        paths.append(tmp_path / "run" / "evidence" / f"worker-{worker}.json")
+        packets.append(packet)
+    first_id = packets[0]["claim_identity"]["claim_ids"][0]
+    second_id = packets[1]["claim_identity"]["claim_ids"][0]
+    # Corrupt the second persisted packet consistently enough to pass its local checks.
+    packets[1]["parsed"]["claims"][0]["claim_id"] = first_id
+    packets[1]["claim_identity"]["claim_ids"] = [first_id]
+    packets[1]["claim_source_bindings"][first_id] = packets[1]["claim_source_bindings"].pop(second_id)
+    packets[1]["claim_history"][0]["claim_id"] = first_id
+    packets[1] = accept_packet(packets[1], "book-2", source_dir=source_dir)
+    if second_dropped:
+        transition_claim(packets[1], first_id, action="drop", reason="ungrounded", attempt_id="prior-attempt")
+    rows = []
+    for path, packet in zip(paths, packets):
+        atomic_write_json(path, packet)
+        rows.extend(
+            dict(
+                claim,
+                worker=packet["worker"],
+                packet_revision=packet["packet_revision"],
+                packet_state_revision=packet["packet_state_revision"],
+            )
+            for claim in packet["parsed"]["claims"]
+        )
+    metadata = grounding_report_metadata(
+        rows, [{"sha256": packets[0]["parsed"]["claims"][0]["source_revision"]}], [(first_id, "excerpt not found")]
+    )
+    metadata["failures"][0]["worker"] = "book-1"
+    metadata.pop("report_id")
+    metadata["report_id"] = stable_revision(metadata)
+    report = tmp_path / "report"
+    report.write_text("REPORT-META: " + json.dumps(metadata))
+    before = [path.read_bytes() for path in paths]
+    with pytest.raises(ClaimIdentityError, match="duplicate claim_id"):
+        repair_claims.repair_claims(
+            tmp_path / "run", source_dir, report, model=lambda _: pytest.fail("duplicate reached model")
+        )
+    assert [path.read_bytes() for path in paths] == before
+    assert not (paths[0].parent / "claim-history.json").exists()

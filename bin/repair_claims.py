@@ -117,6 +117,11 @@ def _repair_target(target, source_dir, model, grounded, adapters):
 
 
 def _process_targets(targets, store, source_dir, report_id, model, grounded, adapters):
+    """Commit each completed target before continuing; aggregate model errors afterward.
+
+    Persistence failures propagate immediately. Treating them like provider
+    failures could hide an interrupted audit mirror that must be recovered.
+    """
     counts = {"repair": 0, "drop": 0}
     errors = []
     for number, target in enumerate(targets, 1):
@@ -154,7 +159,19 @@ def repair_claims(
     alignment_path: pathlib.Path | None = None,
     adapters=ADAPTERS,
 ):
-    """Repair one report, then revalidate the surviving packet/ledger evidence."""
+    """Repair one bound report with the supplied provider callback, then re-gate.
+
+    A library call without ``field_root`` validates packets only and returns
+    ``fully_validated=False``. The CLI requires a field root and project spec
+    so provenance, excerpt and applicable translation gates also run. Neither
+    mode materializes the repaired publication ledger; the workflow does that.
+
+    Report/identity errors fail before calls or writes. Once repair starts,
+    successful earlier targets remain durable if a later model call or gate
+    fails. Their audit permits resume without repeating or retargeting them.
+    The callback receives a prompt and returns response text; execution policy
+    and provider provenance remain the configurable-execution boundary.
+    """
     from excerpt_grounding import grounded
 
     run_root = pathlib.Path(run_root)

@@ -79,7 +79,7 @@ class PacketStore:
     """Load verified packet identities and publish each transition packet before its mirror."""
 
     def __init__(self, directory, source_dir, adapters=ADAPTERS):
-        from .claims import ClaimIdentityError, accept_packet
+        from .claims import ClaimIdentityError, accept_packet, validate_claim_ids
 
         self.packets, self.paths = {}, {}
         self.history_path = directory / "claim-history.json"
@@ -92,6 +92,9 @@ class PacketStore:
                 raise ClaimIdentityError(f"duplicate packet worker: {worker}")
             self.packets[worker] = accept_packet(packet, worker, source_dir=source_dir, adapters=adapters)
             self.paths[worker] = path
+        validate_claim_ids(
+            [{"claim_id": cid} for packet in self.packets.values() for cid in packet["claim_identity"]["claim_ids"]]
+        )
 
     def recover(self):
         # Called only after the entire report passes validation. No untrusted report
