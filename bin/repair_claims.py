@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import defaultdict
 
 from openai import OpenAI
 
@@ -30,11 +31,11 @@ from research_fabric.claims import (
     append_history,
     atomic_write_json,
     atomic_write_text,
-    resolve_claim_id,
     source_file_revision,
     source_revision,
     stable_revision,
     transition_claim,
+    validated_drop_ids,
 )
 
 META_PREFIX = "REPORT-META:"
@@ -140,18 +141,7 @@ def _packet_worker(path: pathlib.Path, packet: dict) -> str:
     return str(packet.get("worker") or path.stem.removeprefix("worker-"))
 
 
-def _claim(packet: dict, cid: str) -> dict | None:
-    parsed = packet.get("parsed") or {}
-    return next((claim for claim in parsed.get("claims", []) if claim.get("claim_id") == cid), None)
-
-
-def _history_applied(packet: dict, cid: str, report_id: str) -> bool:
-    return any(
-        row.get("report_id") == report_id and row.get("claim_id") == cid for row in packet.get("claim_history", [])
-    )
-
-
-def _validate_report_header(metadata, report_id, current_source_revision):
+def _validate_report_header(metadata, current_source_revision, packets):
     if metadata is None:
         return {}
     if metadata.get("version") != 1:
@@ -165,6 +155,8 @@ def _validate_report_header(metadata, report_id, current_source_revision):
     bindings = metadata.get("packets")
     if not isinstance(bindings, dict):
         raise ClaimIdentityError("grounding report is missing packet bindings")
+    for worker, binding in bindings.items():
+        _validate_packet_binding(worker, binding, packets)
     return bindings
 
 
@@ -182,11 +174,6 @@ def _validate_packet_binding(worker, binding, packets):
         raise ClaimIdentityError(f"grounding report packet revision is stale: {worker}")
 
 
-def _validate_packet_bindings(bindings, packets):
-    for worker, binding in bindings.items():
-        _validate_packet_binding(worker, binding, packets)
-
-
 def _validate_failure_shape(failure, versioned):
     if not isinstance(failure, dict) or not isinstance(failure.get("claim_id"), str):
         raise ClaimIdentityError("grounding report contains an invalid claim ID")
@@ -198,20 +185,19 @@ def _validate_failure_shape(failure, versioned):
         raise ClaimIdentityError("grounding report failure is missing identity fields")
 
 
-def _matching_targets(packets, reported, worker_hint):
-    matches = []
+def _report_identity_index(packets, report_id):
+    """Resolve aliases, live claims, and completed report transitions once."""
+    index = defaultdict(dict)
     for worker, packet in packets.items():
-        if worker_hint and worker_hint != worker:
-            continue
-        resolved = resolve_claim_id(packet, reported)
-        if resolved:
-            matches.append((worker, packet, resolved))
-    return matches
-
-
-def _validate_target_binding(worker, bindings, versioned):
-    if versioned and worker not in bindings:
-        raise ClaimIdentityError(f"grounding report is missing packet binding: {worker}")
+        claims = {claim["claim_id"]: claim for claim in packet["parsed"]["claims"]}
+        applied = {
+            event["claim_id"] for event in packet.get("claim_history", []) if event.get("report_id") == report_id
+        }
+        aliases = {cid: cid for cid in packet["claim_identity"]["claim_ids"]}
+        aliases.update(packet.get("legacy_claim_id_map", {}))
+        for reported, cid in aliases.items():
+            index[reported][worker] = (packet, cid, claims.get(cid), cid in applied)
+    return index
 
 
 def _validate_target_excerpt(failure, claim, already, reported):
@@ -222,61 +208,31 @@ def _validate_target_excerpt(failure, claim, already, reported):
         raise ClaimIdentityError(f"grounding report claim excerpt is stale: {reported}")
 
 
-def _target_from_failure(failure, report_id, bindings, packets, versioned):
+def _target_from_failure(failure, bindings, index, versioned):
     _validate_failure_shape(failure, versioned)
     reported = failure["claim_id"]
-    matches = _matching_targets(packets, reported, failure.get("worker"))
+    matches = index.get(reported, {})
+    if failure.get("worker"):
+        matches = {worker: value for worker, value in matches.items() if worker == failure["worker"]}
     if len(matches) != 1:
         raise ClaimIdentityError(f"grounding report claim ID is unknown or ambiguous: {reported}")
-    worker, packet, cid = matches[0]
-    _validate_target_binding(worker, bindings, versioned)
-    claim = _claim(packet, cid)
-    already = _history_applied(packet, cid, report_id)
+    worker, (packet, cid, claim, already) = next(iter(matches.items()))
+    if versioned and worker not in bindings:
+        raise ClaimIdentityError(f"grounding report is missing packet binding: {worker}")
     _validate_target_excerpt(failure, claim, already, reported)
-    return worker, packet, cid, already
+    return worker, packet, cid, already, claim
 
 
-def _validate_event(event, report_id, target_ids, state, worker):
-    if (
-        event.get("report_id") != report_id
-        or event.get("claim_id") not in target_ids
-        or event.get("packet_state_before") != state
-    ):
-        raise ClaimIdentityError(f"grounding report packet state is stale: {worker}")
-    return event.get("packet_state_after")
-
-
-def _report_events(packet, report_id, target_ids):
-    return [
-        event
-        for event in packet.get("claim_history", [])
-        if event.get("report_id") == report_id and event.get("claim_id") in target_ids
-    ]
-
-
-def _replay_state(events, expected, report_id, target_ids, worker):
-    if not events:
-        raise ClaimIdentityError(f"grounding report packet state is stale: {worker}")
-    state = expected
+def _validate_packet_state(worker, binding, packet, target_ids, report_id):
+    """Replay only this report's transitions from its original packet state."""
+    state = binding["packet_state_revision"]
+    events = [event for event in packet.get("claim_history", []) if event.get("report_id") == report_id]
     for event in events:
-        state = _validate_event(event, report_id, target_ids, state, worker)
-    return state
-
-
-def _validate_packet_state(worker, binding, packet, targets, report_id):
-    expected = binding["packet_state_revision"]
-    if packet.get("packet_state_revision") == expected:
-        return
-    target_ids = {cid for _failure, target_worker, _packet, cid, _already in targets if target_worker == worker}
-    events = _report_events(packet, report_id, target_ids)
-    state = _replay_state(events, expected, report_id, target_ids, worker)
+        if event.get("claim_id") not in target_ids or event.get("packet_state_before") != state:
+            raise ClaimIdentityError(f"grounding report packet state is stale: {worker}")
+        state = event.get("packet_state_after")
     if state != packet.get("packet_state_revision"):
         raise ClaimIdentityError(f"grounding report packet state is stale: {worker}")
-
-
-def _validate_packet_states(bindings, packets, targets, report_id):
-    for worker, binding in bindings.items():
-        _validate_packet_state(worker, binding, packets[worker], targets, report_id)
 
 
 def _legacy_report_bindings(packets, targets):
@@ -292,19 +248,22 @@ def _legacy_report_bindings(packets, targets):
 
 
 def _validate_targets(metadata, failures, report_id, packets, current_source_revision):
-    bindings = _validate_report_header(metadata, report_id, current_source_revision)
-    _validate_packet_bindings(bindings, packets)
+    bindings = _validate_report_header(metadata, current_source_revision, packets)
+    index = _report_identity_index(packets, report_id)
+    grouped = defaultdict(set)
     targets = []
     seen = set()
     for failure in failures:
-        worker, packet, cid, already = _target_from_failure(failure, report_id, bindings, packets, metadata is not None)
+        worker, packet, cid, already, claim = _target_from_failure(failure, bindings, index, metadata is not None)
         if cid in seen:
             raise ClaimIdentityError(f"grounding report repeats claim ID: {failure['claim_id']}")
         seen.add(cid)
-        targets.append((failure, worker, packet, cid, already))
+        grouped[worker].add(cid)
+        targets.append((failure, worker, packet, cid, already, claim))
     if metadata is None:
         bindings = _legacy_report_bindings(packets, targets)
-    _validate_packet_states(bindings, packets, targets, report_id)
+    for worker, binding in bindings.items():
+        _validate_packet_state(worker, binding, packets[worker], grouped[worker], report_id)
     return targets
 
 
@@ -380,21 +339,13 @@ def _index_packet_claims(worker, packet, current):
         current[cid] = (worker, packet, claim)
 
 
-def _packet_history_ids(packet):
-    return {
-        event["claim_id"]
-        for event in packet.get("claim_history", [])
-        if isinstance(event, dict) and isinstance(event.get("claim_id"), str)
-    }
-
-
 def _packet_claim_index(packets):
     current = {}
-    history_ids = set()
+    drop_ids = set()
     for worker, packet in packets.items():
         _index_packet_claims(worker, packet, current)
-        history_ids.update(_packet_history_ids(packet))
-    return current, history_ids
+        drop_ids.update(validated_drop_ids(packet))
+    return current, drop_ids
 
 
 def _validate_ledger_identity(row, claim):
@@ -422,7 +373,7 @@ def _update_ledger_row(row, claim, packet):
     return updated
 
 
-def _sync_ledger_row(row, current, history_ids, seen):
+def _sync_ledger_row(row, current, drop_ids, seen):
     cid = row.get("claim_id")
     if not isinstance(cid, str) or not cid:
         raise ClaimIdentityError("ledger contains a missing claim_id")
@@ -431,7 +382,7 @@ def _sync_ledger_row(row, current, history_ids, seen):
     seen.add(cid)
     record = current.get(cid)
     if record is None:
-        if cid in history_ids:
+        if cid in drop_ids:
             return None
         raise ClaimIdentityError(f"ledger claim is outside accepted packet history: {cid}")
     _worker, packet, claim = record
@@ -439,11 +390,11 @@ def _sync_ledger_row(row, current, history_ids, seen):
 
 
 def _sync_ledger_rows(rows, packets):
-    current, history_ids = _packet_claim_index(packets)
+    current, drop_ids = _packet_claim_index(packets)
     seen = set()
     synced = []
     for row in rows:
-        updated = _sync_ledger_row(row, current, history_ids, seen)
+        updated = _sync_ledger_row(row, current, drop_ids, seen)
         if updated is not None:
             synced.append(updated)
     missing = set(current) - seen
@@ -590,10 +541,9 @@ def _transition_from_result(packet, cid, report_id, attempt_id, result, body, gr
 
 
 def _apply_target(target, source_dir, packet_path, history_path, report_id, number, model, grounded):
-    _failure, _worker, packet, cid, already = target
+    _failure, _worker, packet, cid, already, claim = target
     if already:
         return None, None
-    claim = _claim(packet, cid)
     body = _source_body(source_dir, claim)
     prompt = (
         f"You are repairing evidence claim {cid}. Its excerpt was rejected because it is not a verbatim "
@@ -650,7 +600,7 @@ def _process_targets(targets, source_dir, paths, history_path, report_id, model,
     repaired = dropped = 0
     errors = []
     for number, target in enumerate(targets, 1):
-        _failure, worker, _packet, cid, _already = target
+        _failure, worker, _packet, cid, _already, _claim = target
         event, error = _apply_target(
             target, source_dir, paths[worker], history_path, report_id, number, model, grounded
         )

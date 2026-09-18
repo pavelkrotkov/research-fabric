@@ -722,3 +722,97 @@ def test_persisted_identity_rejects_corrupt_mapping_or_missing_binding(tmp_path,
         packet["claim_source_bindings"].pop("c-book-1-1")
     with pytest.raises(ClaimIdentityError):
         accept_packet(packet, "book-1", source_dir=source_dir)
+
+
+def _workflow_reuse(source_dir, reuse_dir, destination):
+    """Run the actual production reuse loop, including its acceptance/write seam."""
+    tree = ast.parse((ROOT / "workflows" / "research.py").read_text())
+    loop = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "worker_specs"
+        and any(isinstance(child, ast.Name) and child.id == "reused_sids" for child in ast.walk(node))
+    )
+    scope = {
+        "json": json,
+        "worker_specs": [("book-1", "")],
+        "reuse_evidence_dir": reuse_dir,
+        "packet_dir": destination,
+        "source_dir": source_dir,
+        "VALIDATOR": lambda *_: [],
+        "ACCEPTANCE": {},
+        "accept_packet": accept_packet,
+        "atomic_write_json": atomic_write_json,
+        "ClaimIdentityError": ClaimIdentityError,
+        "reused_sids": [],
+    }
+    exec(compile(ast.Module(body=[loop], type_ignores=[]), "workflow reuse", "exec"), scope)
+
+
+@pytest.mark.parametrize("seam", ["reuse", "rehearsal", "ledger"])
+@pytest.mark.parametrize("record_drop", [False, True])
+def test_unrecorded_claim_loss_fails_before_materialization(tmp_path, seam, record_drop):
+    source_dir = _source(tmp_path)
+    packet = accept_packet(_packet(), "book-1", source_dir=source_dir, attempt_id="accept-1")
+    original_rows = json.loads(json.dumps(packet["parsed"]["claims"]))
+    cid = original_rows[0]["claim_id"]
+    if record_drop:
+        transition_claim(packet, cid, action="drop", reason="ungrounded", attempt_id="repair-1", report_id="report-1")
+    else:
+        packet["parsed"]["claims"].pop(0)
+    reuse_dir = tmp_path / "reuse"
+    source_path = reuse_dir / "worker-book-1.json"
+    atomic_write_json(source_path, packet)
+    before = source_path.read_bytes()
+    destination = tmp_path / "accepted"
+
+    def action():
+        if seam == "reuse":
+            return _workflow_reuse(source_dir, reuse_dir, destination)
+        if seam == "rehearsal":
+            return dryrun_publication.accept_and_persist_packet(source_path, "book-1", source_dir, destination)
+        return repair_claims._sync_ledger_rows(original_rows, {"book-1": packet})
+
+    if record_drop:
+        result = action()
+        action()  # replay must retain the same IDs and audit row
+        if seam == "ledger":
+            assert [row["claim_id"] for row in result] == [row["claim_id"] for row in original_rows[1:]]
+        else:
+            persisted = json.loads((destination / source_path.name).read_text())
+            assert persisted["parsed"]["claims"] == packet["parsed"]["claims"]
+            assert persisted["claim_history"] == packet["claim_history"]
+        assert len([event for event in packet["claim_history"] if event["event"] == "drop"]) == 1
+    else:
+        with pytest.raises((ClaimIdentityError, RuntimeError)):
+            action()
+        assert not destination.exists()
+    assert source_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("packet_revision", "other"),
+        ("source_revision", "other"),
+        ("reason", ""),
+        ("attempt_id", None),
+        ("old_excerpt", None),
+        ("packet_state_before", None),
+        ("new_excerpt", "fabricated"),
+    ],
+)
+def test_drop_history_must_bind_packet_source_and_transition(tmp_path, field, value):
+    source_dir = _source(tmp_path)
+    packet = accept_packet(_packet(), "book-1", source_dir=source_dir)
+    rows = json.loads(json.dumps(packet["parsed"]["claims"]))
+    transition_claim(packet, rows[0]["claim_id"], action="drop", reason="ungrounded", attempt_id="repair-1")
+    packet["claim_history"][-1][field] = value
+    before = json.dumps(packet)
+    with pytest.raises(ClaimIdentityError):
+        accept_packet(packet, "book-1", source_dir=source_dir)
+    with pytest.raises(ClaimIdentityError):
+        repair_claims._sync_ledger_rows(rows, {"book-1": packet})
+    assert json.dumps(packet) == before

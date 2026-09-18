@@ -151,6 +151,9 @@ def _claim_ids(claims: list[dict]) -> set[str | None]:
 
 
 def _validate_identity_bindings(packet, original_ids):
+    if not isinstance(original_ids, list):
+        raise ClaimIdentityError("packet claim identity has no immutable original claim order")
+    validate_claim_ids([{"claim_id": cid} for cid in original_ids])
     legacy_map = packet.get("legacy_claim_id_map", {})
     targets = list(legacy_map.values())
     if len(targets) != len(set(targets)) or not set(targets).issubset(original_ids):
@@ -160,6 +163,38 @@ def _validate_identity_bindings(packet, original_ids):
         raise ClaimIdentityError("accepted packet is missing original source bindings")
 
 
+def validated_drop_ids(packet: dict) -> set[str]:
+    """Return only explicit drops bound to this packet and its accepted sources."""
+    dropped = set()
+    bindings = packet.get("claim_source_bindings", {})
+    for event in packet.get("claim_history", []):
+        if event.get("event") != "drop":
+            continue
+        cid = event.get("claim_id")
+        binding = bindings.get(cid, {})
+        expected = {
+            "packet_revision": packet.get("packet_revision"),
+            "source_file": binding.get("source_file"),
+            "source_revision": binding.get("source_revision"),
+            "new_excerpt": None,
+        }
+        if not binding or any(event.get(key) != value for key, value in expected.items()):
+            raise ClaimIdentityError(f"drop event has incompatible packet/source identity: {cid}")
+        _validate_drop_details(event)
+        dropped.add(cid)
+    return dropped
+
+
+def _validate_drop_details(event):
+    fields = ("reason", "attempt_id", "packet_state_before", "packet_state_after")
+    if any(not isinstance(event.get(key), str) or not event[key].strip() for key in fields):
+        raise ClaimIdentityError("drop event lacks reason, attempt, or state revisions")
+    if not isinstance(event.get("old_excerpt"), str):
+        raise ClaimIdentityError("drop event lacks the original excerpt")
+    if event["packet_state_before"] == event["packet_state_after"]:
+        raise ClaimIdentityError("drop event did not change packet state")
+
+
 def _validate_persisted_identity(packet: dict, worker: str, claims: list[dict]) -> None:
     identity = packet.get("claim_identity")
     if not isinstance(identity, dict):
@@ -167,13 +202,15 @@ def _validate_persisted_identity(packet: dict, worker: str, claims: list[dict]) 
     if identity.get("version") != 1 or identity.get("worker") != worker:
         raise ClaimIdentityError("packet claim identity metadata is invalid")
     original_ids = identity.get("claim_ids")
-    if not isinstance(original_ids, list):
-        raise ClaimIdentityError("packet claim identity has no immutable original claim order")
-    validate_claim_ids([{"claim_id": cid} for cid in original_ids])
     _validate_identity_bindings(packet, original_ids)
+    validate_claim_ids(claims)
     current_ids = _claim_ids(claims)
     if not current_ids.issubset(set(original_ids)):
         raise ClaimIdentityError("packet contains a claim outside its accepted identity")
+    missing = set(original_ids) - current_ids
+    dropped = validated_drop_ids(packet)
+    if missing != dropped:
+        raise ClaimIdentityError("packet lost or restored claims without a valid explicit drop history")
 
 
 def accept_packet(
