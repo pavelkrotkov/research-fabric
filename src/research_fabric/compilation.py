@@ -79,7 +79,12 @@ def assert_run_branch(kb):
 
 
 def _identity(kb, sources, command):
-    """Bind both policy modules and the execution environment to baseline bytes."""
+    """Bind both policy modules and the execution environment to baseline bytes.
+
+    Environment values may include credentials, so persist only one digest of
+    the mapping. A changed credential or provider override invalidates retry
+    identity without putting either value into the diagnostic receipt.
+    """
     # Full baseline binds native registry, policy/config, existing pages and
     # assets. Command must use an explicit interpreter; child verifies versions.
     return {

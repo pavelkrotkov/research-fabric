@@ -475,7 +475,7 @@ with run_lifecycle(run_root):
             dest.chmod(0o644)
         shutil.copy2(src, dest)
         dest.chmod(0o444)
-    compile_with_recovery(field_root, source_files, run_root / "verification" / "compile")
+    compile_report = compile_with_recovery(field_root, source_files, run_root / "verification" / "compile")
     subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
     normalize_generated_log(field_root)
 
@@ -667,5 +667,5 @@ with run_lifecycle(run_root):
         books="-".join(map(str, (BOOKS[0], BOOKS[-1]))),
         run=run_root.name,
     )
-    completion = finalize_run(field_root, run_root, commit_msg, len(claims), collect_provenance)
+    completion = finalize_run(field_root, run_root, commit_msg, len(claims), collect_provenance, compiled=compile_report)
     emit_output(completion)

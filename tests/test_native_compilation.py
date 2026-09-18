@@ -164,7 +164,8 @@ def test_production_native_retry_starts_from_baseline(kb, model, tmp_path):
     assert json.loads((failed / ".openkb/hashes.json").read_text()) == {}
 
 
-def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(kb, tmp_path, monkeypatch):
+@pytest.mark.parametrize("ignored", [None, "wiki/concepts/", "evidence/snapshots/"])
+def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(kb, tmp_path, monkeypatch, ignored):
     """CAO transport and provider are synthetic; workflow, compiler and gates are real."""
     import hashlib
     import os
@@ -176,6 +177,8 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(kb, tmp_
     from research_fabric import compilation
 
     root = Path(__file__).resolve().parents[1]
+    if ignored:
+        (kb / ".gitignore").write_text(ignored + "\n")
     for args in (
         ("init", "-b", "agent/workflow"),
         ("config", "user.email", "test@example.invalid"),
@@ -252,6 +255,13 @@ cli.cli()
     monkeypatch.setattr(
         compilation, "compile_with_recovery", lambda kb, src, diag: production_compile(kb, src, diag, command=command)
     )
+    if ignored:
+        with pytest.raises(CompilationError, match="ignored/untracked"):
+            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+        assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+        assert outputs == []
+        assert subprocess.check_output(["git", "-C", str(kb), "rev-list", "--count", "HEAD"]).strip() == b"1"
+        return
     runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
     result = json.loads((run / "run.json").read_text())
     assert result["state"] == "READY_FOR_REVIEW"

@@ -90,7 +90,11 @@ The workflow clears stale success at entry, requires an initially clean non-main
 branch, and records escaping exceptions as `FAILED` through `run_lifecycle`.
 A hard crash leaves a non-ready state. It records `READY_FOR_REVIEW` atomically
 only after provenance collection, staged whitespace validation, proposed commit
-and clean-tree verification. Native-generated log EOF padding is normalized
+and clean-tree verification. Required compiled pages must retain their attested
+bytes through later phases. All wiki/evidence outputs must be tracked (ignored
+publication files fail rather than being force-added), and their actual proposed
+commit blobs must match the final gated bytes, even if a Git hook rewrites them.
+Private native state is excluded from that publication-file check. Native-generated log EOF padding is normalized
 before compilation hashing and after lint, before deterministic gates and diff
 review; immutable snapshots and page bodies are untouched. Human merge is still
 required. Later compile-output audit/publication consolidation belongs to #13/#18.

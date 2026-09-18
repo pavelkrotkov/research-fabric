@@ -166,3 +166,17 @@ def test_input_drift_is_rejected_before_candidate_application(repo, tmp_path, ex
             repo, [source], tmp_path / "run", attempts=1, command=[sys.executable, str(executable), "--mode", "success"]
         )
     assert git(repo, "status", "--porcelain") == ""
+
+
+def test_clean_commit_hook_rewrite_is_not_accepted(repo, tmp_path):
+    page = repo / "wiki/page.md"
+    page.parent.mkdir()
+    page.write_text("gated bytes\n")
+    hook = repo / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\nprintf 'changed after gates\\n' > wiki/page.md\ngit add wiki/page.md\n")
+    hook.chmod(0o755)
+    run = tmp_path / "run"
+    with pytest.raises(CompilationError, match="changed publication"), run_lifecycle(run):
+        finalize_run(repo, run, "proposal", 1, lambda: {"fixture": True})
+    assert git(repo, "status", "--porcelain") == ""
+    assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
