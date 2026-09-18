@@ -46,6 +46,8 @@ INPUTS = {
     "question": {"type": "string", "required": True},
     "reuse_evidence_dir": {"type": "path", "required": False},
     "project": {"type": "string", "required": False},
+    "visual_preflight_spec": {"type": "path", "required": False},
+    "visual_python": {"type": "path", "required": False},
 }
 
 
@@ -182,6 +184,17 @@ worker_specs = [(f"book-{b}", book_task_from_project(b, project, project_name)) 
 
 
 set_state(run_root, "PLANNING")
+visual_preparation = ""
+if inputs.get("visual_preflight_spec"):
+    from research_fabric.visual_preflight import preparation_note
+    visual_record = run_root / "verification" / "visual-inspection.json"
+    subprocess.run([
+        inputs.get("visual_python") or sys.executable,
+        str(RESEARCH_ROOT / "bin" / "visual_preflight.py"),
+        "--source-root", str(source_dir), "--spec", inputs["visual_preflight_spec"],
+        "--output", str(visual_record),
+    ], check=True, text=True)
+    visual_preparation = preparation_note(json.loads(visual_record.read_text()))
 if reuse_evidence_dir:
     write_json(run_root / "plan.json", {"reused": True, "source": str(reuse_evidence_dir)})
 else:
@@ -189,7 +202,7 @@ else:
         provider="claude_code",
         agent="research-supervisor",
         prompt=(
-            f"Question: {question}\nSource snapshots: {', '.join(map(str, source_files))}\n"
+            f"{visual_preparation}\nQuestion: {question}\nSource snapshots: {', '.join(map(str, source_files))}\n"
             "Return JSON only with keys research_questions, worker_assignments, allowed_source_types, "
             "source_budget, acceptance_criteria, ambiguities, stop_conditions. Keep assignments bounded and non-overlapping. "
             "Do not modify files."
