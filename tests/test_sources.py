@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -14,6 +16,7 @@ from research_fabric.sources import (
     adapter_for,
     bind_manifest,
     discover_sources,
+    packet_source_defects,
     representation_for,
     source_provenance,
     source_provenance_errors,
@@ -106,6 +109,45 @@ def test_reused_packet_requires_current_input_attestation(tmp_path):
     source.write_text("<p>changed</p>", encoding="utf-8")
     assert source_provenance_errors(packet["source_provenance"], source_provenance([source]))
     assert source_provenance_errors(None, source_provenance([source])) == ["packet source provenance missing"]
+
+
+def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    expected = source_provenance([source])
+
+    workflow = ast.parse((ROOT / "workflows" / "research.py").read_text(encoding="utf-8"))
+    reuse_function = next(
+        node for node in workflow.body if isinstance(node, ast.FunctionDef) and node.name == "_reuse_evidence_packets"
+    )
+    namespace = {"json": json, "shutil": shutil, "packet_source_defects": packet_source_defects}
+    exec(compile(ast.Module(body=[reuse_function], type_ignores=[]), "workflows/research.py", "exec"), namespace)
+
+    valid = {"parsed": {"claims": ["ok"]}, "source_provenance": expected}
+    stale = {"parsed": {"claims": ["ok"]}, "source_provenance": [dict(expected[0], sha256="0" * 64)]}
+    unattested = {"parsed": {"claims": ["ok"]}}
+
+    def validator(parsed):
+        return [] if parsed and parsed.get("claims") else ["invalid"]
+
+    reuse_dir = tmp_path / "reuse"
+    destination_dir = tmp_path / "destination"
+    reuse_dir.mkdir()
+    destination_dir.mkdir()
+    (reuse_dir / "worker-book-1.json").write_text(json.dumps(valid), encoding="utf-8")
+    (reuse_dir / "worker-book-2.json").write_text(json.dumps(stale), encoding="utf-8")
+    (reuse_dir / "worker-book-3.json").write_text(json.dumps(unattested), encoding="utf-8")
+    specs = [("book-1", ""), ("book-2", ""), ("book-3", ""), ("book-4", "")]
+    reused = namespace["_reuse_evidence_packets"](
+        reuse_dir,
+        destination_dir,
+        specs,
+        {sid: expected for sid, _ in specs},
+        validator,
+    )
+    assert reused == ["book-1"]
+    assert [sid for sid, _ in specs if sid not in reused] == ["book-2", "book-3", "book-4"]
+    assert (destination_dir / "worker-book-1.json").is_file()
+    assert not (destination_dir / "worker-book-2.json").exists()
 
 
 @pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])

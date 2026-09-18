@@ -26,7 +26,13 @@ from research_fabric.core import (
 from research_fabric.core import (
     load_project as load_project_spec,
 )
-from research_fabric.sources import ADAPTERS, bind_manifest, discover_sources, source_provenance, source_provenance_errors
+from research_fabric.sources import (
+    ADAPTERS,
+    bind_manifest,
+    discover_sources,
+    packet_source_defects,
+    source_provenance,
+)
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
 # into claims + notes (snapshot regex, themes, source-id/note templates,
@@ -211,6 +217,14 @@ WORKER_PROVENANCE = {
     sid: source_provenance(paths, SOURCE_ADAPTERS) for sid, paths in WORKER_SOURCE_FILES.items()
 }
 
+
+def _packet_defects(packet: dict, sid: str) -> list[str]:
+    return packet_source_defects(
+        packet,
+        WORKER_PROVENANCE[sid],
+        lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+    )
+
 set_state(run_root, "PLANNING")
 if reuse_evidence_dir:
     write_json(run_root / "plan.json", {"reused": True, "source": str(reuse_evidence_dir)})
@@ -278,9 +292,7 @@ def collect(spec):
                     f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
                 )
             packet_data = json.loads(packet.read_text(encoding="utf-8"))
-            parsed = packet_data.get("parsed")
-            defects = VALIDATOR(parsed, ACCEPTANCE)
-            defects.extend(source_provenance_errors(packet_data.get("source_provenance"), WORKER_PROVENANCE[sid]))
+            defects = _packet_defects(packet_data, sid)
             attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
             if not defects:
                 return sid, proc.stdout.strip(), None
@@ -296,23 +308,33 @@ def collect(spec):
     return sid, "", f"direct worker returned no valid evidence packet after attempts ({reason})"
 
 
-if reuse_evidence_dir:
+def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator):
     reused_sids = []
-    for sid, _ in worker_specs:
-        src_packet = reuse_evidence_dir / f"worker-{sid}.json"
+    for sid, _ in specs:
+        src_packet = reuse_dir / f"worker-{sid}.json"
         if not src_packet.exists():
             continue
         try:
             src_data = json.loads(src_packet.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        defects = VALIDATOR(src_data.get("parsed"), ACCEPTANCE)
-        defects.extend(source_provenance_errors(src_data.get("source_provenance"), WORKER_PROVENANCE[sid]))
+        defects = packet_source_defects(src_data, worker_provenance[sid], validator)
         if defects:
             continue
-        dst = packet_dir / src_packet.name
+        dst = destination_dir / src_packet.name
         shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
         reused_sids.append(sid)
+    return reused_sids
+
+
+if reuse_evidence_dir:
+    reused_sids = _reuse_evidence_packets(
+        reuse_evidence_dir,
+        packet_dir,
+        worker_specs,
+        WORKER_PROVENANCE,
+        lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+    )
     pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
     results = [(sid, "reused", None) for sid in reused_sids]
 else:
@@ -327,8 +349,7 @@ if any(err for _, _, err in results):
 if reuse_evidence_dir:
     for sid, _ in worker_specs:
         packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-        defects = VALIDATOR(packet.get("parsed"), ACCEPTANCE)
-        defects.extend(source_provenance_errors(packet.get("source_provenance"), WORKER_PROVENANCE[sid]))
+        defects = _packet_defects(packet, sid)
         if defects:
             set_state(run_root, "FAILED", failure=f"reused packet invalid: {sid}")
             raise RuntimeError(f"reused packet {sid} failed validation: {'; '.join(defects)}")

@@ -85,6 +85,14 @@ def source_provenance_errors(actual, expected: list[dict[str, str]]) -> list[str
     return []
 
 
+def packet_source_defects(packet: dict, expected: list[dict[str, str]], validator) -> list[str]:
+    """Combine packet-shape and source-attestation checks at the worker boundary."""
+    defects = list(validator(packet.get("parsed"))) if isinstance(packet, dict) else ["packet is not an object"]
+    if isinstance(packet, dict):
+        defects.extend(source_provenance_errors(packet.get("source_provenance"), expected))
+    return defects
+
+
 def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> list[pathlib.Path]:
     """Return supported sources deterministically; reject same-stem ambiguity."""
     found = []
