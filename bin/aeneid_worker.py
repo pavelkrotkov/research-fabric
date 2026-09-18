@@ -36,7 +36,7 @@ import sys
 from html.parser import HTMLParser
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.execution import InvalidOutput, worker_session
+from research_fabric.execution import ExecutionError, InvalidOutput, packet_policy_defects, worker_session
 
 RUN = pathlib.Path(sys.argv[1])
 SRC = pathlib.Path(sys.argv[2])
@@ -54,7 +54,11 @@ while i < len(sys.argv):
         i += 1
 
 SESSION = worker_session(
-    RUN, "extraction", f"book-{BOOK}", [SRC / CANONICAL_FILE, *(SRC / w["file"] for w in WITNESSES)]
+    RUN,
+    "extraction",
+    f"book-{BOOK}",
+    [SRC / CANONICAL_FILE, *(SRC / w["file"] for w in WITNESSES)],
+    project={"project": "aeneid"},
 )
 CLAIM_TYPES = [
     "textual",
@@ -293,19 +297,15 @@ def main():
 
     pkt = RUN / "evidence" / f"worker-book-{BOOK}.json"
     pkt.parent.mkdir(parents=True, exist_ok=True)
-    pkt.write_text(
-        json.dumps(
-            {
-                "worker": f"book-{BOOK}",
-                "attempts": SESSION.records(),
-                "execution": SESSION.records(),
-                "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    packet = {
+        "worker": f"book-{BOOK}",
+        "attempts": SESSION.records(),
+        "execution": SESSION.records(),
+        "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
+    }
+    if packet_policy_defects(packet, {"project": "aeneid"}):
+        raise ExecutionError("artifact_model_policy")
+    pkt.write_text(json.dumps(packet, indent=2) + "\n", encoding="utf-8")
     print(f"OK aeneid-book-{BOOK}: {len(final)} claims")
 
 

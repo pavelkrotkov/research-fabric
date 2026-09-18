@@ -179,7 +179,7 @@ def test_real_multistage_worker_shares_profile_and_records_each_call(tmp_path, t
     }
     selection = {"i": 1, "translator": "Kline", "source_id": "s-english", "excerpt": "Arms and the man I sing"}
     replies.extend(
-        (200, json.dumps(value), "actual-model", None)
+        (200, json.dumps(value), "z-ai/glm-5.3-flash", None)
         for value in ({"claims": [claim]}, {"selections": [selection]}, {"selections": [selection]})
     )
     monkeypatch.setattr(
@@ -199,7 +199,7 @@ def test_real_multistage_worker_shares_profile_and_records_each_call(tmp_path, t
     runpy.run_path(str(ROOT / "bin/aeneid_worker.py"), run_name="__main__")
     packet = json.loads((run / "evidence/worker-book-1.json").read_text())
     assert len(calls) == len(packet["execution"]) == 3
-    assert all(row["actual_model"] == "actual-model" for row in packet["execution"])
+    assert all(row["actual_model"] == "z-ai/glm-5.3-flash" for row in packet["execution"])
 
 
 def test_real_repair_uses_role_profile_and_shared_history(tmp_path, source, transport, monkeypatch):
@@ -333,3 +333,39 @@ def test_unqualified_astra_effort_is_explicit_error():
         ex.resolve(
             override={"roles": {"compile": {"effort": "medium"}}}, native_model="chatgpt/gpt-6-astra", environ={}
         )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_standalone_aeneid_rejects_banned_profile_before_calls(tmp_path, source, transport, monkeypatch, existing):
+    calls, _ = transport
+    run = tmp_path / "run"
+    if existing:
+        ex.configure(run, configuration(roles={"extraction": {"model": "stealth/ox-alpha"}}))
+    monkeypatch.setenv("RESEARCH_FABRIC_WORKER_MODEL", "stealth/ox-alpha")
+    monkeypatch.setattr(sys, "argv", ["aeneid_worker.py", str(run), str(source.parent), "1", source.name])
+    with pytest.raises(ex.ExecutionError, match="project_model_restriction"):
+        runpy.run_path(str(ROOT / "bin/aeneid_worker.py"), run_name="__main__")
+    assert calls == []
+    assert not (run / "evidence/worker-book-1.json").exists()
+
+
+@pytest.mark.parametrize("actual,valid", [(None, True), ("allowed", True), ("forbidden", False)])
+def test_artifact_policy_keeps_unknown_returned_identity_honest(actual, valid):
+    row = {"role": "extraction", "outcome": "accepted", "profile": {"model": "allowed"}, "actual_model": actual}
+    packet = {
+        "execution": [
+            row,
+            {"role": "advisory", "outcome": "accepted", "actual_model": "other"},
+            {"role": "extraction", "outcome": "transient", "profile": {"model": "other"}},
+        ]
+    }
+    assert bool(ex.packet_policy_defects(packet, {"allowed_models": ["allowed"]})) is not valid
+
+
+def test_restricted_artifact_requires_original_extraction_history():
+    policy = {"allowed_models": ["allowed"]}
+    assert ex.packet_policy_defects({}, policy)
+    assert ex.packet_policy_defects(
+        {"execution": [{"role": "repair", "outcome": "accepted", "profile": {"model": "allowed"}}]}, policy
+    )
+    assert ex.packet_policy_defects({}, {}) == []

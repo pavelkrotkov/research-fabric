@@ -21,6 +21,12 @@ SESSION = None
 
 
 def call_model(prompt):
+    """Validate repair JSON through the recorded repair role and shared budget.
+
+    This transport wrapper does not decide claim identity, repair or dropping;
+    those remain the caller's deterministic responsibilities.
+    """
+
     def validate(text):
         value = extract_json(text)
         if not isinstance(value, dict) or not isinstance(value.get("found"), bool):

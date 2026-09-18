@@ -17,7 +17,7 @@ from cao_workflow import ShimError, emit_output, get_inputs, run_step
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.compilation import assert_run_branch, compile_with_recovery, normalize_generated_log
 from research_fabric.run_state import finalize_run, run_lifecycle
-from research_fabric.execution import configure, configured, resolve, history
+from research_fabric.execution import configure, configured, resolve, history, packet_policy_defects
 from research_fabric.core import (
     book_task_from_project,
     extract_json,
@@ -270,8 +270,9 @@ with run_lifecycle(run_root):
                     raise RuntimeError(
                         f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
                     )
-                parsed = json.loads(packet.read_text(encoding="utf-8")).get("parsed")
-                defects = VALIDATOR(parsed, ACCEPTANCE)
+                packet_data = json.loads(packet.read_text(encoding="utf-8"))
+                parsed = packet_data.get("parsed")
+                defects = VALIDATOR(parsed, ACCEPTANCE) + packet_policy_defects(packet_data, project)
                 attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
                 if not defects:
                     return sid, proc.stdout.strip(), None
@@ -304,7 +305,7 @@ with run_lifecycle(run_root):
                 src_data = json.loads(src_packet.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 continue
-            if VALIDATOR(src_data.get("parsed"), ACCEPTANCE):
+            if VALIDATOR(src_data.get("parsed"), ACCEPTANCE) or packet_policy_defects(src_data, project):
                 continue  # invalid packet — re-collect instead of propagating it
             dst = packet_dir / src_packet.name
             shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
@@ -324,7 +325,7 @@ with run_lifecycle(run_root):
     if reuse_evidence_dir:
         for sid, _ in worker_specs:
             packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-            defects = VALIDATOR(packet.get("parsed"), ACCEPTANCE)
+            defects = VALIDATOR(packet.get("parsed"), ACCEPTANCE) + packet_policy_defects(packet, project)
             if defects:
                 set_state(run_root, "FAILED", failure=f"reused packet invalid: {sid}")
                 raise RuntimeError(f"reused packet {sid} failed structural validation: {'; '.join(defects)}")

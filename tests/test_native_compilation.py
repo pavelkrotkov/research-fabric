@@ -167,10 +167,20 @@ def test_production_native_retry_starts_from_baseline(kb, model, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "ignored,collect_new", [(None, False), ("wiki/concepts/", False), ("evidence/snapshots/", False), (None, True)]
+    "ignored,collect_new,policy",
+    [
+        (None, False, None),
+        ("wiki/concepts/", False, None),
+        ("evidence/snapshots/", False, None),
+        (None, True, None),
+        (None, False, "restricted-reuse"),
+        (None, True, "restricted-fresh"),
+        (None, False, "compatible-reuse"),
+        (None, False, "legacy-restricted"),
+    ],
 )
 def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
-    kb, tmp_path, monkeypatch, ignored, collect_new
+    kb, tmp_path, monkeypatch, ignored, collect_new, policy
 ):
     """CAO transport and provider are synthetic; workflow, compiler and gates are real."""
     import hashlib
@@ -230,7 +240,32 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         "conflicts": [],
         "coverage_notes": [],
     }
-    (reused / "worker-book-1.json").write_text(json.dumps({"parsed": packet}))
+    from research_fabric import execution as ex
+
+    reused_packet = {"parsed": packet}
+    if policy in ("restricted-reuse", "compatible-reuse"):
+        prior = tmp_path / "prior-run"
+        ex.configure(prior, ex.resolve(override={"roles": {"extraction": {"model": "forbidden-B"}}}, environ={}))
+        session = ex.Session(prior, "extraction", "book-1", [src])
+        attempt, _ = session.begin(session.profiles()[0])
+        session.finish(attempt, SimpleNamespace(model="forbidden-B"), "accepted", 0.01)
+        reused_packet["execution"] = session.records()
+    if policy:
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        restriction = "" if policy == "compatible-reuse" else "allowed_models: [allowed-C]\n"
+        (projects / "odyssey.yaml").write_text(
+            (root / "projects/odyssey.yaml").read_text()
+            + "\n"
+            + restriction
+            + "execution:\n  roles:\n    extraction: {model: allowed-C}\n    repair: {model: allowed-C}\n"
+        )
+        monkeypatch.setenv("RESEARCH_FABRIC_PROJECTS", str(projects))
+    (reused / "worker-book-1.json").write_text(json.dumps(reused_packet))
+    collected = collect_new or policy in ("restricted-reuse", "legacy-restricted")
+    returned_model = (
+        "forbidden-B" if policy == "restricted-fresh" else "allowed-C" if policy else "actual-evidence-model"
+    )
     shim = types.ModuleType("cao_workflow")
     shim.ShimError = RuntimeError
     shim.get_inputs = lambda: {
@@ -245,7 +280,7 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
     shim.run_step = lambda **kwargs: SimpleNamespace(output="VERDICT: FAIL - advisory fixture")
     monkeypatch.setitem(sys.modules, "cao_workflow", shim)
     monkeypatch.setenv("RESEARCH_FABRIC_ROOT", str(root))
-    if collect_new:
+    if collected:
         wrapper = tmp_path / "worker-python"
         wrapper.write_text(
             f"#!{sys.executable}\n"
@@ -255,11 +290,11 @@ import httpx
 import openai
 Original = openai.OpenAI
 """
-            + f"packet = {packet!r}\n"
+            + f"packet = {packet!r}\nreturned_model = {returned_model!r}\n"
             + """
 def respond(request):
     return httpx.Response(200, json={"id":"fixture", "object":"chat.completion", "created":1,
-        "model":"actual-evidence-model", "choices":[{"index":0,"finish_reason":"stop",
+        "model":returned_model, "choices":[{"index":0,"finish_reason":"stop",
         "message":{"role":"assistant","content":json.dumps(packet)}}],
         "usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}})
 def client(**kwargs):
@@ -293,6 +328,13 @@ cli.cli()
         "compile_with_recovery",
         lambda kb, src, diag, **kwargs: production_compile(kb, src, diag, command=command, **kwargs),
     )
+    if policy == "restricted-fresh":
+        with pytest.raises(RuntimeError, match="evidence workers failed"):
+            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+        assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+        assert ex.history(run)["attempts"][0]["actual_model"] == "forbidden-B"
+        assert not (tmp_path / "calls.json").exists()
+        return
     if ignored:
         with pytest.raises(CompilationError, match="ignored/untracked"):
             runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
@@ -310,16 +352,20 @@ cli.cli()
     assert result["claims"] == 5
     execution = result["provenance"]["execution"]
     assert execution["attempts"]
-    assert {row["role"] for row in execution["attempts"]} == ({"compile", "extraction"} if collect_new else {"compile"})
+    assert {row["role"] for row in execution["attempts"]} == ({"compile", "extraction"} if collected else {"compile"})
     if collect_new:
         from openkb.config import DEFAULT_CONFIG
 
         native_rows = [row for row in execution["attempts"] if row["role"] == "compile"]
         assert {row["profile"]["model"] for row in native_rows} == {DEFAULT_CONFIG["model"]}
+    if collected:
         packet_execution = json.loads((run / "evidence/worker-book-1.json").read_text())["execution"]
-        assert packet_execution[0]["actual_model"] == "actual-evidence-model"
+        assert packet_execution[0]["actual_model"] == returned_model
         ledger = json.loads((kb / "evidence/claims.jsonl").read_text().splitlines()[0])
         assert ledger["execution"] == packet_execution
+    if policy == "compatible-reuse":
+        ledger = json.loads((kb / "evidence/claims.jsonl").read_text().splitlines()[0])
+        assert ledger["execution"] == reused_packet["execution"]
     assert result["provenance"]["advisory_execution"]["actual_model"] is None
     assert outputs[-1]["commit"] == result["commit"]
     assert (run / "verification/provenance.txt").exists()

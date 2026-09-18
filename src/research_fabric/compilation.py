@@ -36,6 +36,13 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from research_fabric._openkb045 import POLICY, CompilationError, native_compile
+from research_fabric.execution_native import (
+    _attempt_limit,
+    _check_retry_allowed,
+    _compile_checkpoint,
+    _execution_arguments,
+    _execution_identity,
+)
 
 
 def digest(path):
@@ -103,22 +110,6 @@ def _identity(kb, sources, command, execution_root=None):
     }
 
 
-def _execution_identity(root):
-    if root is None:
-        return None
-    from research_fabric.execution import configured
-
-    revision, config = configured(root)
-    return {
-        "revision": revision,
-        "config": config,
-        "code": {
-            name: digest(Path(__file__).with_name(name))
-            for name in ("execution.py", "execution_native.py", "_execution_profiles.py", "_execution_journal.py")
-        },
-    }
-
-
 def _apply_candidate(candidate, kb, baseline):
     if _tree(kb) != baseline:
         raise CompilationError("Run worktree changed during compilation; candidate quarantined")
@@ -143,6 +134,10 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
     command is a controlled executable implementing --kb/--sources/--result.
     The default invokes this exact module under the current interpreter, which
     must have the qualified OpenKB dependencies installed.
+
+    execution_root binds the configured revision and execution-policy bytes to
+    candidate acceptance. Its journal remains outside the disposable candidate,
+    so discarded native work still consumes the shared run budget.
     """
     kb, diagnostics = Path(kb).resolve(), Path(diagnostics).resolve()
     sources = tuple(Path(p).resolve() for p in sources)
@@ -174,39 +169,6 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
             write_json(session / f"failure-{attempt}.json", {"state": "FAILED", "reason": str(exc)})
             _check_retry_allowed(execution_root, checkpoint)
     raise CompilationError(f"Compilation failed after {attempts} attempt(s); diagnostics and baseline: {session}")
-
-
-def _attempt_limit(root, attempts):
-    if root is None:
-        return attempts
-    from research_fabric.execution import configured
-
-    return min(attempts, configured(root)[1]["budget"]["attempts"])
-
-
-def _execution_arguments(root, attempt):
-    if root is None:
-        return []
-    return ["--execution-root", str(Path(root).resolve()), "--profile-index", str(attempt - 1)]
-
-
-def _compile_checkpoint(root):
-    if root is None:
-        return 0
-    from research_fabric.execution import history
-
-    return max((r["id"] for r in history(root)["attempts"]), default=0)
-
-
-def _check_retry_allowed(root, checkpoint):
-    if root is None:
-        return
-    from research_fabric.execution import history
-
-    rows = [r for r in history(root)["attempts"] if r["id"] > checkpoint and r["role"] == "compile"]
-    terminal = {None, "authentication", "credential_unavailable", "configuration_or_transport"}
-    if any(r["outcome"] in terminal for r in rows):
-        raise CompilationError("Native execution requires operator configuration/cancellation before retry")
 
 
 def _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_root=None):

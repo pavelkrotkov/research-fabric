@@ -44,6 +44,17 @@ After a completed failure, use the same run root, a clean isolated worktree, and
 for example `{"roles":{"extraction":{"model":"replacement-model"}}}`. This
 appends a configuration revision; accepted packets keep their original execution
 records. Their structural, source, provenance and grounding gates still run.
+Active model restrictions also apply to fresh and reused artifacts. Restricted
+projects require recorded original extraction lineage; unknown legacy lineage
+is recollected. Accepted extraction/repair requested models and any known returned
+models must each appear in `allowed_models`. List returned version/provider aliases
+explicitly; the engine never guesses equivalence or strips qualifiers. An absent
+provider-reported model remains unknown and does not invalidate an otherwise
+allowed recorded request. Failed and advisory attempts do not define evidence
+model provenance. Merely changing the selected model, without imposing a new
+restriction, preserves compatible historical artifacts and their original records.
+Standalone Aeneid entry revalidates both new and previously configured profiles.
+
 The existing source-adapter stack adds representation attestation independently;
 this change neither invents replacement source identities nor removes envelopes.
 

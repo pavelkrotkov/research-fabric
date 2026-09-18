@@ -128,9 +128,7 @@ def _native_route(model):
     provider, slash, name = model.partition("/")
     if slash:
         return provider, name
-    if not slash:
-        return "openai", model
-    raise ExecutionError("invalid_native_model")
+    return "openai", model
 
 
 def _validate_config(config, project):
@@ -143,9 +141,7 @@ def _validate_config(config, project):
         raise ExecutionError("unknown_execution_setting")
     if set(config["roles"]) - {"extraction", "repair", "compile"}:
         raise ExecutionError("unknown_execution_role")
-    allowed = project.get("allowed_models")
-    if project.get("project") == "aeneid":
-        allowed = AENEID_MODELS if allowed is None else set(allowed) & AENEID_MODELS
+    allowed = allowed_models(project)
     config["roles"] = {
         role: _profile(p, allowed if role != "compile" else None, native=role == "compile")
         for role, p in config["roles"].items()
@@ -153,6 +149,19 @@ def _validate_config(config, project):
     _fallbacks(config, allowed)
     _validate_budget(config["budget"])
     return config
+
+
+def allowed_models(project):
+    """One project policy for proposed calls and historical evidence alike.
+
+    An absent restriction permits any otherwise qualified model; an explicit
+    empty collection permits none. Aeneid's binding constraints intersect the
+    project list, so an empty intersection must never become unrestricted.
+    """
+    allowed = project.get("allowed_models")
+    if project.get("project") == "aeneid":
+        allowed = AENEID_MODELS if allowed is None else set(allowed) & AENEID_MODELS
+    return allowed
 
 
 def _fallbacks(config, allowed):

@@ -16,7 +16,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from research_fabric._execution_journal import complete, configure, configured, history, reserve
-from research_fabric._execution_profiles import PROVIDERS, ExecutionError, _encode, _identity, resolve
+from research_fabric._execution_profiles import PROVIDERS, ExecutionError, _encode, _identity, allowed_models, resolve
 
 
 class InvalidOutput(ExecutionError):
@@ -25,9 +25,17 @@ class InvalidOutput(ExecutionError):
 
 
 def worker_session(root, role, task, sources, project=None):
+    """Validate the caller's project even when the run was configured earlier.
+
+    Existing settings are checked, not relabeled or replaced. Only workflow
+    configuration creates revisions; worker entry cannot bypass restrictions
+    by inheriting a database created for another task.
+    """
     if not (Path(root) / "execution.sqlite3").exists():
         configure(root, resolve(project))
-    return Session(root, role, task, sources)
+    session = Session(root, role, task, sources)
+    resolve(project, previous=session.config, environ={})
+    return session
 
 
 def classify(exc):
@@ -54,6 +62,11 @@ def _connection_failure(exc):
 
 
 def _usage(response):
+    """Missing or malformed usage is unknown, never zero-cost evidence.
+
+    Derive a total only when both components are known. Failed/invalid responses
+    retain reported usage too; the journal charges it before another call.
+    """
     usage = getattr(response, "usage", None)
     result = {
         key: _token_count(getattr(usage, key, None)) for key in ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -68,6 +81,11 @@ def _token_count(value):
 
 
 def _key(provider):
+    """Read the operator-selected provider secret without discovering a route.
+
+    The environment file is local operator configuration, never source/model
+    input; loading a different provider's key cannot create a fallback profile.
+    """
     name = PROVIDERS[provider][1]
     key = os.environ.get(name)
     path = Path(os.environ.get("RESEARCH_FABRIC_ENV_FILE", str(Path.home() / ".hermes/.env")))
@@ -116,6 +134,11 @@ class Session:
         return attempt, timeout
 
     def finish(self, attempt, response, outcome, elapsed):
+        """Commit observed usage before any pending call result can escape.
+
+        The journal can reject acceptance here, including from a finally block;
+        that error intentionally overrides the proposed return value.
+        """
         actual = getattr(response, "model", None)
         if actual is not None and not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,180}", str(actual)):
             actual = None
@@ -180,3 +203,51 @@ def _validated(response, validate):
         return validate(choice.message.content)
     except (ValueError, TypeError, KeyError, IndexError, InvalidOutput):
         raise InvalidOutput() from None
+
+
+def packet_policy_defects(packet, project):
+    """Keep historical identities; only the active restriction changes reuse.
+
+    Missing returned identity is permitted, but a restricted project needs a
+    recorded requested route for original extraction. Known returned aliases
+    must be explicitly allowed; no guessed provider/version normalization.
+    Failed/advisory attempts do not establish evidence-model provenance.
+    """
+    allowed = allowed_models(project)
+    if allowed is None:
+        return []
+    accepted = _accepted_attempts(packet.get("execution"))
+    if accepted is None:
+        return ["execution lineage missing under model restriction"]
+    if not any(row.get("role") == "extraction" for row in accepted):
+        return ["original extraction route unknown under model restriction"]
+    return [error for row in accepted for error in _record_policy_defects(row, allowed)]
+
+
+def _record_policy_defects(row, allowed):
+    if row.get("role") not in ("extraction", "repair"):
+        return []
+    profile = row.get("profile")
+    if not isinstance(profile, dict) or profile.get("model") not in allowed:
+        return ["recorded requested model violates project restriction"]
+    actual = row.get("actual_model")
+    if actual is not None and actual not in allowed:
+        return ["recorded returned model violates project restriction"]
+    return []
+
+
+def _accepted_attempts(records):
+    """Distinguish malformed lineage (None) from no accepted responses ([]).
+
+    Failed calls stay in immutable history but did not generate accepted claims;
+    including them in compatibility checks would invalidate successful fallback.
+    """
+    if not isinstance(records, list):
+        return None
+    accepted = []
+    for row in records:
+        if not isinstance(row, dict):
+            return None
+        if row.get("outcome") == "accepted":
+            accepted.append(row)
+    return accepted
