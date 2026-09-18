@@ -164,8 +164,19 @@ def test_production_native_retry_starts_from_baseline(kb, model, tmp_path):
     assert json.loads((failed / ".openkb/hashes.json").read_text()) == {}
 
 
-@pytest.mark.parametrize("ignored", [None, "wiki/concepts/", "evidence/snapshots/"])
-def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(kb, tmp_path, monkeypatch, ignored):
+@pytest.mark.parametrize(
+    "ignored,attestation",
+    [
+        (None, "valid"),
+        ("wiki/concepts/", "valid"),
+        ("evidence/snapshots/", "valid"),
+        (None, "missing"),
+        (None, "stale"),
+    ],
+)
+def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
+    kb, tmp_path, monkeypatch, ignored, attestation
+):
     """CAO transport and provider are synthetic; workflow, compiler and gates are real."""
     import hashlib
     import os
@@ -222,7 +233,14 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(kb, tmp_
         "conflicts": [],
         "coverage_notes": [],
     }
-    (reused / "worker-book-1.json").write_text(json.dumps({"parsed": packet}))
+    from research_fabric.sources import source_provenance
+
+    envelope = {"parsed": packet, "source_provenance": source_provenance([src])}
+    if attestation == "missing":
+        del envelope["source_provenance"]
+    elif attestation == "stale":
+        envelope["source_provenance"][0]["sha256"] = "0" * 64
+    (reused / "worker-book-1.json").write_text(json.dumps(envelope))
     shim = types.ModuleType("cao_workflow")
     shim.ShimError = RuntimeError
     shim.get_inputs = lambda: {
@@ -255,6 +273,17 @@ cli.cli()
     monkeypatch.setattr(
         compilation, "compile_with_recovery", lambda kb, src, diag: production_compile(kb, src, diag, command=command)
     )
+    if attestation != "valid":
+        # An invalid reused packet must trigger collection, never compilation.
+        # The unavailable executable makes that required collection fail offline.
+        monkeypatch.setenv("RESEARCH_FABRIC_WORKER_PYTHON", str(tmp_path / "missing-worker"))
+        with pytest.raises(RuntimeError, match="one or more evidence workers failed"):
+            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+        assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+        assert outputs == []
+        assert not (tmp_path / "calls.json").exists()
+        assert subprocess.check_output(["git", "-C", str(kb), "rev-list", "--count", "HEAD"]).strip() == b"1"
+        return
     if ignored:
         with pytest.raises(CompilationError, match="ignored/untracked"):
             runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
@@ -269,6 +298,7 @@ cli.cli()
         result["provenance"]["corpus_manifest_sha"]
         == hashlib.sha256((run / "source-manifest.jsonl").read_bytes()).hexdigest()
     )
+    assert result["provenance"]["source_adapters"] == ["html@1"]
     assert result["claims"] == 5
     assert outputs[-1]["commit"] == result["commit"]
     assert (run / "verification/provenance.txt").exists()

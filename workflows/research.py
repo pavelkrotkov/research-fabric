@@ -28,6 +28,13 @@ from research_fabric.core import (
 from research_fabric.core import (
     load_project as load_project_spec,
 )
+from research_fabric.sources import (
+    ADAPTERS,
+    bind_manifest,
+    discover_sources,
+    packet_source_defects,
+    source_provenance,
+)
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
 # into claims + notes (snapshot regex, themes, source-id/note templates,
@@ -40,6 +47,7 @@ DEFAULT_PROJECT = "odyssey"
 # sync so run.json records the exact model that produced the claims.
 MODEL_REF = "z-ai/glm-5.3-flash"
 PROVIDER_REF = "openrouter"
+SOURCE_ADAPTERS = ADAPTERS
 
 INPUTS = {
     "field_root": {"type": "path", "required": True},
@@ -71,9 +79,8 @@ def sha256_of(path: pathlib.Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def collect_provenance() -> dict:
-    """Record the exact toolchain + inputs that produced this run, so a KB
-    commit is reproducible (and auditable) without the original session."""
+def collect_provenance(manifest_rows: list[dict]) -> dict:
+    """Record the exact toolchain + inputs that produced this run."""
 
     def _toolver(cmd):
         try:
@@ -93,6 +100,7 @@ def collect_provenance() -> dict:
         "project_spec_sha": sha256_of(proj_path) if proj_path.exists() else None,
         "corpus_manifest_sha": sha256_of(corpus_manifest) if corpus_manifest.exists() else None,
         "corpus_sources_sha": _dir_sha(source_dir),
+        "source_adapters": sorted({f"{row['adapter']}@{row['adapter_version']}" for row in manifest_rows}),
         "openkb": _toolver(["openkb", "--version"]),
         "toolchain": {"cao": _toolver(["cao", "--version"]), "python": _toolver([sys.executable, "--version"])},
     }
@@ -131,6 +139,25 @@ def _dir_sha(d: pathlib.Path) -> str | None:
     return h.hexdigest()
 
 
+def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator):
+    reused_sids = []
+    for sid, _ in specs:
+        src_packet = reuse_dir / f"worker-{sid}.json"
+        if not src_packet.exists():
+            continue
+        try:
+            src_data = json.loads(src_packet.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        defects = packet_source_defects(src_data, worker_provenance[sid], validator)
+        if defects:
+            continue
+        dst = destination_dir / src_packet.name
+        shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
+        reused_sids.append(sid)
+    return reused_sids
+
+
 inputs = get_inputs()
 field_root = pathlib.Path(inputs["field_root"]).resolve()
 run_root = pathlib.Path(inputs["run_root"]).resolve()
@@ -150,37 +177,40 @@ with run_lifecycle(run_root):
     project_name = inputs.get("project") or DEFAULT_PROJECT
     project = load_project_spec(PROJECTS_DIR, project_name)
     ACCEPTANCE = project.get("acceptance") or {}
-    # Immutable provenance root of trust. Runs that do not carry their own
-    # source-manifest.jsonl fall back to the canonical copy derived from the
-    # project spec; digests are re-verified against the run's actual source bytes
-    # before anything is published.
     CANONICAL_SOURCE_MANIFEST = (RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]).resolve()
     BOOK_RE = re.compile(project["snapshot_pattern"])
     WITNESSES = list((project.get("witnesses") or {}).keys())
     CANONICAL = project.get("canonical_variant", "latin")
     IS_MULTI = bool(WITNESSES)
+
+
     def _validator(parsed, acceptance=None):
         if IS_MULTI:
             return multisource_packet_defects(parsed, project, acceptance)
         return packet_defects(parsed, acceptance)
+
+
     VALIDATOR = _validator
 
-    source_files = sorted(source_dir.glob("*.html"))
+    source_files = discover_sources(source_dir, SOURCE_ADAPTERS)
     if not source_files:
-        raise RuntimeError("no source snapshots found in source_dir")
-    # Every snapshot must match the pattern. Books are enumerated from the
-    # canonical variant only (so 12 books, not 4×12); witness files ride along as
-    # non-authoritative interpretive sources.
+        raise RuntimeError("no supported source snapshots found in source_dir")
+
+
     def _book_of(p):
         m = BOOK_RE.search(p.name)
         return int(m.group(1)) if m else None
+
+
     matched = [(p, _book_of(p)) for p in source_files]
     if any(b is None for _, b in matched):
         raise RuntimeError(f"all snapshots must match {BOOK_RE.pattern}")
     if IS_MULTI:
+
         def _variant_of(p):
             m = BOOK_RE.search(p.name)
             return m.group(2) if m and m.lastindex and m.lastindex >= 2 else None
+
         BOOKS = sorted(b for p, b in matched if _variant_of(p) == CANONICAL)
     else:
         BOOKS = sorted({b for _, b in matched})
@@ -189,6 +219,39 @@ with run_lifecycle(run_root):
 
     worker_specs = [(f"book-{b}", book_task_from_project(b, project, project_name)) for b in BOOKS]
 
+
+    def _worker_source_files(book: int) -> list[pathlib.Path]:
+        if IS_MULTI:
+            labels = [project["book_label_template"].format(n=book, w=CANONICAL)] + [
+                project["book_label_template"].format(n=book, w=w) for w in WITNESSES
+            ]
+            paths = [source_dir / label for label in labels]
+        else:
+            label = project.get("book_label_template", "{n}.html").format(n=book)
+            path = source_dir / label
+            if not path.is_file():
+                path = next(
+                    (p for p in source_files if (match := BOOK_RE.search(p.name)) and int(match.group(1)) == book), path
+                )
+            paths = [path]
+        missing = [path.name for path in paths if not path.is_file()]
+        if missing:
+            raise RuntimeError(f"worker source input missing: {missing}")
+        return paths
+
+
+    WORKER_SOURCE_FILES = {sid: _worker_source_files(int(sid.split("-")[1])) for sid, _ in worker_specs}
+    WORKER_PROVENANCE = {
+        sid: source_provenance(paths, SOURCE_ADAPTERS) for sid, paths in WORKER_SOURCE_FILES.items()
+    }
+
+
+    def _packet_defects(packet: dict, sid: str) -> list[str]:
+        return packet_source_defects(
+            packet,
+            WORKER_PROVENANCE[sid],
+            lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+        )
 
     set_state(run_root, "PLANNING")
     if reuse_evidence_dir:
@@ -213,59 +276,51 @@ with run_lifecycle(run_root):
 
     DIRECT_WORKER = str(RESEARCH_ROOT / "bin" / "direct_worker.py")
     AENEID_WORKER = str(RESEARCH_ROOT / "bin" / "aeneid_worker.py")
-    DIRECT_WORKER_PY = os.environ.get(
-        "RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
+    DIRECT_WORKER_PY = os.environ.get("RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
 
 
     def collect(spec):
-        """Collect one book's evidence packet via the direct-API worker (z-ai/glm-5.3-flash).
-
-        Replaces the CAO tmux worker path: the worker reads the book's HTML, calls
-        z-ai/glm-5.3-flash directly through OpenRouter, and writes a structurally
-        validated packet to packet_dir. No terminal UI, no scrollback scraping, no
-        provider quota. The packet is re-validated here (fail-closed) before use.
-        """
+        """Collect one book's evidence packet through the shared source adapter."""
         sid, task = spec
         b = int(sid.split("-")[1])
         theme_match = re.search(r"Extract claim-level evidence about (.+?)\\. Use", task)
         theme = theme_match.group(1) if theme_match else None
-        # Resolve the snapshot filename for this book from the project's label
-        # template so SOURCE_BY_FILE can map the worker's emitted source_file back.
-        if IS_MULTI:
-            book_label = project["book_label_template"].format(n=b, w=CANONICAL)
-        else:
-            book_label = project.get("book_label_template", "{n}.html").format(n=b)
-        if not (source_dir / book_label).is_file():
-            book_label = next(
-                (p.name for p in source_files if (m := BOOK_RE.search(p.name)) and int(m.group(1)) == b), book_label
-            )
-        validator = VALIDATOR
+        worker_sources = WORKER_SOURCE_FILES[sid]
+        book_label = worker_sources[0].name
         attempts = []
         for attempt in range(1, 3):
             try:
                 if IS_MULTI:
-                    # Canonical Latin label + witness labels/source-ids → aeneid worker.
                     canon_label = book_label
                     witness_args = []
                     for w in WITNESSES:
                         wfile = project["book_label_template"].format(n=b, w=w)
                         wid = project["source_id_template"].format(n=b, w=w)
                         witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
-                    cmd = [DIRECT_WORKER_PY, AENEID_WORKER, str(run_root), str(source_dir),
-                           str(b), canon_label, theme or ""] + witness_args
+                    cmd = [
+                        DIRECT_WORKER_PY,
+                        AENEID_WORKER,
+                        str(run_root),
+                        str(source_dir),
+                        str(b),
+                        canon_label,
+                        theme or "",
+                    ] + witness_args
                     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
                 else:
                     proc = subprocess.run(
                         [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
-                        capture_output=True, text=True, timeout=1500,
+                        capture_output=True,
+                        text=True,
+                        timeout=1500,
                     )
                 packet = packet_dir / f"worker-{sid}.json"
                 if proc.returncode != 0 or not packet.exists():
                     raise RuntimeError(
                         f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
                     )
-                parsed = json.loads(packet.read_text(encoding="utf-8")).get("parsed")
-                defects = VALIDATOR(parsed, ACCEPTANCE)
+                packet_data = json.loads(packet.read_text(encoding="utf-8"))
+                defects = _packet_defects(packet_data, sid)
                 attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
                 if not defects:
                     return sid, proc.stdout.strip(), None
@@ -281,29 +336,14 @@ with run_lifecycle(run_root):
         return sid, "", f"direct worker returned no valid evidence packet after attempts ({reason})"
 
 
-    # The host has two very old cores; concurrent Codex tmux shell creation
-    # reliably exceeds CAO's 60s shell-init gate. Keep both independent tasks,
-    # but serialize launch for reliability. A completed evidence directory may be
-    # reused after an interrupted verifier/publication phase; packets are still
-    # structurally rechecked below before any downstream mutation.
     if reuse_evidence_dir:
-        # Partial reuse: only packets that pass structural validation are carried
-        # forward; missing or invalid packets are re-collected below.
-        reused_sids = []
-        for sid, _ in worker_specs:
-            src_packet = reuse_evidence_dir / f"worker-{sid}.json"
-            if not src_packet.exists():
-                continue
-            try:
-                src_data = json.loads(src_packet.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                continue
-            if VALIDATOR(src_data.get("parsed"), ACCEPTANCE):
-                continue  # invalid packet — re-collect instead of propagating it
-            dst = packet_dir / src_packet.name
-            shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
-            reused_sids.append(sid)
-        # Only the non-reused workers are collected now.
+        reused_sids = _reuse_evidence_packets(
+            reuse_evidence_dir,
+            packet_dir,
+            worker_specs,
+            WORKER_PROVENANCE,
+            lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+        )
         pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
         results = [(sid, "reused", None) for sid in reused_sids]
     else:
@@ -318,10 +358,10 @@ with run_lifecycle(run_root):
     if reuse_evidence_dir:
         for sid, _ in worker_specs:
             packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-            defects = VALIDATOR(packet.get("parsed"), ACCEPTANCE)
+            defects = _packet_defects(packet, sid)
             if defects:
                 set_state(run_root, "FAILED", failure=f"reused packet invalid: {sid}")
-                raise RuntimeError(f"reused packet {sid} failed structural validation: {'; '.join(defects)}")
+                raise RuntimeError(f"reused packet {sid} failed validation: {'; '.join(defects)}")
 
     VERDICT_CONTRACT = (
         "Work through the evidence first and write your findings. Then, as the very LAST line of your "
@@ -335,16 +375,7 @@ with run_lifecycle(run_root):
 
 
     def read_verdict(text):
-        """Return ('PASS'|'FAIL'|None, detail) from a verifier reply.
-
-        The verdict is taken from the LAST ``VERDICT:`` line, so an agent that
-        thinks aloud before deciding is judged on its conclusion rather than on a
-        token emitted mid-analysis. A FAIL that enumerates no defect is treated as
-        malformed (None) rather than as a real failure: publication6's verifier
-        printed a bare FAIL and then stated "Verified clean ... all 37 locators
-        resolve" with an empty defect list, which is an unusable verdict in either
-        direction and must be retried, not believed.
-        """
+        """Return ('PASS'|'FAIL'|None, detail) from a verifier reply."""
         matches = list(re.finditer(r"^\s*VERDICT:\s*(PASS|FAIL)\b[ \t]*(.*)$", text or "", flags=re.I | re.M))
         if matches:
             verdict = matches[-1].group(1).upper()
@@ -352,12 +383,6 @@ with run_lifecycle(run_root):
             if verdict == "FAIL" and not detail:
                 return None, "FAIL with no enumerated defect"
             return verdict, detail
-
-        # Claude occasionally omits the requested final marker and emits a short
-        # positive attestation instead. Accept only an unambiguous positive
-        # attestation with no negative/defect language anywhere. This deliberately
-        # does not accept "Verified clean" when a FAIL token is also present (the
-        # publication6 contradiction that motivated the strict contract).
         lowered = (text or "").lower()
         positive = "verified sound" in lowered or "verified clean" in lowered
         negative = re.search(r"\bfail(?:ed|ure)?\b|blocking defect|\bdefect(?:s)?\b|not verified|unable to verify", lowered)
@@ -394,24 +419,16 @@ with run_lifecycle(run_root):
     verification_manifests = []
     for packet_path in sorted(packet_dir.glob("worker-*.json")):
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        manifest_path = verification_dir / f"verification-input-{packet_path.stem}.json"
+        verification_path = verification_dir / f"verification-input-{packet_path.stem}.json"
         write_json(
-            manifest_path,
+            verification_path,
             {
                 "question": question,
                 "source_files": [str(p) for p in source_files],
                 "packet": normalize_packet(packet.get("parsed") or {}),
             },
         )
-        verification_manifests.append(manifest_path)
-    # The LLM verifier is ADVISORY from here on. Its verdict is recorded but does
-    # not gate: across repeated runs it emitted a bare FAIL followed by "Verified
-    # clean", then "Verified sound", then bare "Findings" -- prose that cannot be
-    # parsed into a trustworthy machine verdict without loosening the contract to
-    # the point of rubber-stamping. The GATING pre-ingest check is the deterministic
-    # excerpt-grounding + provenance + manifest trio below, which mechanically
-    # proves every excerpt occurs in the cited snapshot. The verifier's full output
-    # is still captured for human review.
+        verification_manifests.append(verification_path)
     try:
         advisory_verdict, advisory_detail, pre_text = run_verifier(
             "verify-sources",
@@ -425,69 +442,50 @@ with run_lifecycle(run_root):
             run_root,
             "pre-ingest.txt",
         )
+        write_json(run_root / "verification" / "advisory-verifier.json", {"verdict": advisory_verdict, "detail": advisory_detail})
+    except Exception as exc:
         write_json(
             run_root / "verification" / "advisory-verifier.json",
-            {
-                "verdict": advisory_verdict,
-                "detail": advisory_detail,
-            },
-        )
-    except Exception as exc:  # advisory only: record and continue to deterministic gates
-        write_json(
-            run_root / "verification" / "advisory-verifier.json",
-            {
-                "verdict": None,
-                "detail": f"verifier errored: {exc}",
-            },
+            {"verdict": None, "detail": f"verifier errored: {exc}"},
         )
         pre_text = ""
 
-    # Resolve the immutable source manifest and re-verify it against the actual
-    # bytes in this run. The manifest is the provenance root of trust, so a run
-    # that cannot produce a byte-exact manifest must fail closed rather than
-    # publish claims whose sources cannot be attested.
     run_manifest = run_root / "source-manifest.jsonl"
     manifest_path = run_manifest if run_manifest.exists() else CANONICAL_SOURCE_MANIFEST
     if not manifest_path.exists():
         set_state(run_root, "FAILED", failure="missing source manifest")
         raise RuntimeError(f"no source manifest available (looked at {run_manifest} and {CANONICAL_SOURCE_MANIFEST})")
     manifest_rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    by_name = {pathlib.Path(row["snapshot"]).name: row for row in manifest_rows}
-    for src in source_files:
-        row = by_name.get(src.name)
-        if row is None:
-            set_state(run_root, "FAILED", failure="source manifest incomplete")
-            raise RuntimeError(f"source manifest has no entry for {src.name}")
-        digest = hashlib.sha256(src.read_bytes()).hexdigest()
-        if digest != row.get("sha256"):
-            set_state(run_root, "FAILED", failure="source manifest sha256 mismatch")
-            raise RuntimeError(f"sha256 mismatch for {src.name}: manifest={row.get('sha256')} actual={digest}")
-    if run_manifest != manifest_path:
-        shutil.copy2(manifest_path, run_manifest)
+    try:
+        manifest_rows = bind_manifest(source_files, manifest_rows, SOURCE_ADAPTERS)
+    except RuntimeError as exc:
+        set_state(run_root, "FAILED", failure="source manifest validation failed")
+        raise RuntimeError(str(exc)) from exc
+    run_manifest.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in manifest_rows) + "\n", encoding="utf-8"
+    )
 
-    # Copy immutable snapshots into the branch, then compile through the trusted host command.
     set_state(run_root, "COMPILING")
     snap_dest = field_root / "evidence" / "snapshots"
     snap_dest.mkdir(parents=True, exist_ok=True)
+    compiler_dir = run_root / "compiler-sources"
+    if compiler_dir.exists():
+        shutil.rmtree(compiler_dir)
+    compiler_dir.mkdir()
     for src in source_files:
         dest = snap_dest / src.name
         if dest.exists():
             dest.chmod(0o644)
         shutil.copy2(src, dest)
         dest.chmod(0o444)
-    compile_report = compile_with_recovery(field_root, source_files, run_root / "verification" / "compile")
+        shutil.copy2(src, compiler_dir / src.name)
+    compile_report = compile_with_recovery(
+        field_root, [compiler_dir / src.name for src in source_files], run_root / "verification" / "compile"
+    )
     subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
     normalize_generated_log(field_root)
 
-    # Deterministically materialize accepted claims BEFORE the post-compile
-    # verifier runs, so the verifier reviews the complete change set including the
-    # claims ledger it is meant to attest. Materializing afterwards would leave the
-    # ledger permanently unverified.
     set_state(run_root, "MATERIALIZING_LEDGER")
-    # Dynamic mapping: every manifest source id maps to its summary note; every
-    # snapshot filename maps back to its source id. Templates come from the
-    # project spec ({n} = captured book number). The note must already exist in
-    # the field root (created by the ingest step).
     NOTE_BY_SOURCE, SOURCE_BY_FILE = source_mappings(project, BOOKS)
     claims = []
     dropped = []
@@ -519,9 +517,6 @@ with run_lifecycle(run_root):
                 }
             )
             if IS_MULTI:
-                # Extend backwards-compatible with the multi-witness fields. The
-                # Latin excerpt/locator above stay authoritative (source_ids is
-                # exactly the canonical source). Witness fields are supplementary.
                 claims[-1].update(
                     {
                         "claim_type": claim.get("claim_type", ""),
@@ -542,10 +537,6 @@ with run_lifecycle(run_root):
     manifest_out = []
     present_names = {p.name for p in source_files}
     for row in manifest_rows:
-        # Only emit manifest rows for sources actually present in this run. With
-        # the canonical fallback manifest (which may cover more snapshots than a
-        # partial run's source_dir), emitting every row leaves provenance rows for
-        # snapshots that were never copied, and provenance_validate fails closed.
         if pathlib.Path(row["snapshot"]).name not in present_names:
             continue
         row = dict(row)
@@ -553,8 +544,6 @@ with run_lifecycle(run_root):
         manifest_out.append(json.dumps(row, ensure_ascii=False))
     (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n", encoding="utf-8")
 
-    # Deterministic provenance gate: run before any agent judgement so a structural
-    # defect fails closed without spending a verifier step.
     provenance = subprocess.run(
         [sys.executable, str(RESEARCH_ROOT / "bin" / "provenance_validate.py"), str(field_root)],
         text=True,
@@ -567,11 +556,6 @@ with run_lifecycle(run_root):
         set_state(run_root, "FAILED", failure="provenance validation failed")
         raise RuntimeError(f"provenance validation failed: {provenance.stderr.strip()}")
 
-    # Deterministic excerpt-grounding gate: mechanically prove every claim's
-    # excerpt occurs in the snapshot it cites, tolerating only HTML-entity,
-    # punctuation-folding and whitespace-reflow artifacts introduced by reading the
-    # sources through a terminal UI. This runs before the agent verifier so a
-    # fabricated or drifted quotation fails closed regardless of agent judgement.
     grounding = subprocess.run(
         [sys.executable, str(RESEARCH_ROOT / "bin" / "excerpt_grounding.py"), str(field_root)],
         text=True,
@@ -584,10 +568,6 @@ with run_lifecycle(run_root):
         set_state(run_root, "FAILED", failure="excerpt grounding failed")
         raise RuntimeError(f"excerpt grounding failed: {grounding.stderr.strip()}")
 
-    # Deterministic translation-grounding gate (multi-witness projects): prove each
-    # claim's selected English witness is a real translation source whose quoted
-    # English occurs verbatim and overlaps the aligned Latin passage. Runs only for
-    # witness projects; a single-witness (Odyssey) run has no english_witness.
     if IS_MULTI and any(c.get("english_witness") for c in claims):
         alignment_copy = run_root / "alignment.jsonl"
         if not alignment_copy.exists():
@@ -595,8 +575,12 @@ with run_lifecycle(run_root):
             if proj_al.exists():
                 shutil.copy2(proj_al, alignment_copy)
         tgate = subprocess.run(
-            [sys.executable, str(RESEARCH_ROOT / "bin" / "translation_grounding.py"),
-             str(field_root), str(alignment_copy)],
+            [
+                sys.executable,
+                str(RESEARCH_ROOT / "bin" / "translation_grounding.py"),
+                str(field_root),
+                str(alignment_copy),
+            ],
             text=True,
             capture_output=True,
         )
@@ -608,10 +592,6 @@ with run_lifecycle(run_root):
             raise RuntimeError(f"translation grounding failed: {tgate.stderr.strip()}")
 
     set_state(run_root, "VERIFYING_DIFF")
-    # ``git add -N`` registers new files with the index without staging content, so
-    # ``git diff`` renders them as full additions. Without this the generated diff
-    # silently omits every newly created evidence file and the verifier would
-    # attest an empty change set.
     subprocess.run(["git", "-C", str(field_root), "add", "-N", "--", "evidence"], check=True)
     diff = subprocess.run(
         ["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
@@ -624,11 +604,6 @@ with run_lifecycle(run_root):
     if not diff.strip():
         set_state(run_root, "FAILED", failure="empty generated diff")
         raise RuntimeError("generated diff is empty; refusing to attest an empty change set")
-    # Post-compile LLM verifier is also advisory: the claims ledger it would review
-    # has already passed the deterministic excerpt-grounding, provenance and
-    # manifest-sha256 gates, which cover exactly the checks requested here (excerpt
-    # occurs in cited snapshot; source_ids exist in the source ledger). Record its
-    # output for human review without letting unparseable prose block publication.
     try:
         post_verdict, post_detail, post_text = run_verifier(
             "verify-diff",
@@ -643,20 +618,11 @@ with run_lifecycle(run_root):
             run_root,
             "post-compile.txt",
         )
-        write_json(
-            run_root / "verification" / "advisory-post-verifier.json",
-            {
-                "verdict": post_verdict,
-                "detail": post_detail,
-            },
-        )
+        write_json(run_root / "verification" / "advisory-post-verifier.json", {"verdict": post_verdict, "detail": post_detail})
     except Exception as exc:
         write_json(
             run_root / "verification" / "advisory-post-verifier.json",
-            {
-                "verdict": None,
-                "detail": f"verifier errored: {exc}",
-            },
+            {"verdict": None, "detail": f"verifier errored: {exc}"},
         )
         post_text = ""
 
@@ -667,5 +633,7 @@ with run_lifecycle(run_root):
         books="-".join(map(str, (BOOKS[0], BOOKS[-1]))),
         run=run_root.name,
     )
-    completion = finalize_run(field_root, run_root, commit_msg, len(claims), collect_provenance, compiled=compile_report)
+    completion = finalize_run(
+        field_root, run_root, commit_msg, len(claims), lambda: collect_provenance(manifest_rows), compiled=compile_report
+    )
     emit_output(completion)
