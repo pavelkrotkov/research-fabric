@@ -10,7 +10,14 @@ import sys
 
 import pytest
 
-from research_fabric.sources import adapter_for, bind_manifest, discover_sources, representation_for
+from research_fabric.sources import (
+    adapter_for,
+    bind_manifest,
+    discover_sources,
+    representation_for,
+    source_provenance,
+    source_provenance_errors,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROVENANCE = ROOT / "bin" / "provenance_validate.py"
@@ -19,6 +26,27 @@ PROVENANCE = ROOT / "bin" / "provenance_validate.py"
 def _html(path: pathlib.Path, body="<p>Hello <b>world</b></p>") -> pathlib.Path:
     path.write_text(body, encoding="utf-8")
     return path
+
+
+class _TextAdapter:
+    name = "text"
+    version = "7"
+    suffixes = (".txt",)
+
+    def decode(self, raw: bytes) -> str:
+        return raw.decode("utf-8")
+
+    def extract_text(self, decoded: str) -> str:
+        return decoded.strip()
+
+    def map_locator(self, locator: str) -> str:
+        return locator.strip()
+
+    def assets(self, decoded: str) -> tuple[str, ...]:
+        return ()
+
+    def metadata(self, path: pathlib.Path) -> dict[str, str]:
+        return {"content_type": "text/plain", "filename": path.name}
 
 
 def test_invalid_utf8_fails_closed(tmp_path):
@@ -50,6 +78,34 @@ def test_html_path_locator_and_representation_mapping(tmp_path):
     assert rep.text == "Hello world"
     assert rep.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
     assert rep.representation_sha256 == hashlib.sha256(b"Hello world").hexdigest()
+
+
+def test_custom_adapter_flows_from_discovery_to_manifest(tmp_path):
+    source = tmp_path / "book-1.txt"
+    source.write_text("Hello custom", encoding="utf-8")
+    adapters = (_TextAdapter(),)
+    files = discover_sources(tmp_path, adapters)
+    rep = representation_for(source, adapters)
+    assert source_provenance(files, adapters)[0]["adapter"] == "text"
+    bound = bind_manifest(files, [{"snapshot": source.name, "sha256": rep.original_sha256}], adapters)
+    assert bound[0]["adapter"] == "text"
+    assert bound[0]["representation_sha256"] == hashlib.sha256(b"Hello custom").hexdigest()
+
+
+def test_source_provenance_rejects_drift(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    expected = source_provenance([source])
+    actual = [dict(expected[0], representation_sha256="0" * 64)]
+    assert source_provenance_errors(actual, expected) == ["packet source provenance mismatch for book-1.html"]
+
+
+def test_reused_packet_requires_current_input_attestation(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    packet = {"parsed": {"claims": [{"claim": "grounded"}]}, "source_provenance": source_provenance([source])}
+    assert source_provenance_errors(packet["source_provenance"], source_provenance([source])) == []
+    source.write_text("<p>changed</p>", encoding="utf-8")
+    assert source_provenance_errors(packet["source_provenance"], source_provenance([source]))
+    assert source_provenance_errors(None, source_provenance([source])) == ["packet source provenance missing"]
 
 
 @pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])

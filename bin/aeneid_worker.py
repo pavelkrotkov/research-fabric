@@ -39,7 +39,7 @@ import time
 from openai import OpenAI
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.sources import representation_for  # noqa: E402
+from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 RUN = pathlib.Path(sys.argv[1])
 SRC = pathlib.Path(sys.argv[2])
@@ -193,12 +193,14 @@ def build_select_prompt(items):
 
 
 def main():
-    latin_body = representation_for(SRC / CANONICAL_FILE).text
+    canonical_representation = representation_for(SRC / CANONICAL_FILE)
+    latin_body = canonical_representation.text
     latin_hay = norm(latin_body)
     witness_texts = []
     for w in WITNESSES:
-        text = representation_for(SRC / w["file"]).text
-        witness_texts.append({**w, "text": text, "hay": norm(text)})
+        representation = representation_for(SRC / w["file"])
+        text = representation.text
+        witness_texts.append({**w, "text": text, "hay": norm(text), "representation": representation})
 
     claims, last_err = None, None
     for _attempt in range(1, 4):
@@ -318,6 +320,11 @@ def main():
             {
                 "worker": f"book-{BOOK}",
                 "attempts": [{"attempt": 1, "stages": 3, "ok": True, "claims_kept": len(final)}],
+                "source_provenance": sorted(
+                    [source_attestation(canonical_representation)]
+                    + [source_attestation(w["representation"]) for w in witness_texts],
+                    key=lambda row: row["source_file"],
+                ),
                 "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
             },
             indent=2,
