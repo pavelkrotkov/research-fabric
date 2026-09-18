@@ -10,7 +10,6 @@ from ._source_adapter import ADAPTERS, SourceAdapter
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 ASSET_HASH_FIELD = "assets_sha256"
-SOURCE_PROVENANCE_FIELDS = frozenset({"source_file", "sha256", *REPRESENTATION_FIELDS})
 
 
 @dataclass(frozen=True)
@@ -30,10 +29,7 @@ def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
     return {
         "source_file": rep.path.name,
         "sha256": rep.original_sha256,
-        "adapter": rep.adapter,
-        "adapter_version": rep.adapter_version,
-        "representation_encoding": "utf-8",
-        "representation_sha256": rep.representation_sha256,
+        **_representation_metadata(rep),
     }
 
 
@@ -112,7 +108,7 @@ def source_provenance_errors(actual, expected: list[dict[str, str]]) -> list[str
     if len(actual_rows) != len(expected_rows):
         return ["packet source provenance input count mismatch"]
     for actual_row, expected_row in zip(actual_rows, expected_rows):
-        if set(actual_row) != SOURCE_PROVENANCE_FIELDS or actual_row != expected_row:
+        if actual_row != expected_row:
             return [f"packet source provenance mismatch for {expected_row['source_file']}"]
     return []
 
@@ -166,6 +162,8 @@ def _metadata_keys(row: dict, rep: SourceRepresentation) -> set[str]:
 def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.Path) -> dict:
     expected = _representation_metadata(rep)
     present = REPRESENTATION_FIELDS & row.keys()
+    if row.get(ASSET_HASH_FIELD) != rep.assets_sha256:
+        raise RuntimeError(f"source assets_sha256 missing or mismatched for {source.name}")
     if not present:
         return {**row, **expected}
     if present != REPRESENTATION_FIELDS:
