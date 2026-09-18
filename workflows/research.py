@@ -31,9 +31,15 @@ from research_fabric.sources import (
     bind_manifest,
     discover_sources,
     packet_source_defects,
-    source_bundle,
+    copy_source_snapshot,
+    prepare_source_bundle,
+    snapshot_relative,
+    source_attestation,
+    representation_for,
     source_provenance,
 )
+
+from research_fabric._source_assets import publish_bundle
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
 # into claims + notes (snapshot regex, themes, source-id/note templates,
@@ -461,23 +467,25 @@ set_state(run_root, "COMPILING")
 snap_dest = field_root / "evidence" / "snapshots"
 snap_dest.mkdir(parents=True, exist_ok=True)
 compiler_dir = run_root / "compiler-sources"
-if compiler_dir.exists():
-    shutil.rmtree(compiler_dir)
-compiler_dir.mkdir()
+compiler_dir.mkdir(exist_ok=True)
+bundles = {}
 for src in source_files:
-    for original, relative in source_bundle(src):
-        dest = snap_dest / relative
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            dest.chmod(0o644)
-        shutil.copy2(original, dest)
-        dest.chmod(0o444)
-    shutil.copy2(src, compiler_dir / src.name)
-subprocess.run(["openkb", "--kb-dir", str(field_root), "add", str(compiler_dir)], check=True, text=True)
+    copy_source_snapshot(src, snap_dest)
+    attestation = source_attestation(representation_for(src))
+    bundle = prepare_source_bundle(src, compiler_dir, attestation)
+    bundle_root = compiler_dir / bundle["key"]
+    compiler_input = bundle_root / bundle["input_path"]
+    subprocess.run(["openkb", "--kb-dir", str(field_root), "add", str(compiler_input)], check=True, text=True)
+    # Native input names are source-scoped when visual normalization is needed.
+    if bundle["normalized"]:
+        publish_bundle(bundle_root, bundle, field_root / "wiki", compiler_input.stem)
+        bundles[src.name] = compiler_input.stem
 subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
 
 set_state(run_root, "MATERIALIZING_LEDGER")
 NOTE_BY_SOURCE, SOURCE_BY_FILE = source_mappings(project, BOOKS)
+for filename, doc_name in bundles.items():
+    NOTE_BY_SOURCE[SOURCE_BY_FILE[filename]] = f"wiki/summaries/{doc_name}.md"
 claims = []
 dropped = []
 for sid, _, _ in results:
@@ -531,7 +539,7 @@ for row in manifest_rows:
     if pathlib.Path(row["snapshot"]).name not in present_names:
         continue
     row = dict(row)
-    row["snapshot"] = "evidence/snapshots/" + pathlib.Path(row["snapshot"]).name
+    row["snapshot"] = "evidence/snapshots/" + snapshot_relative(source_dir / pathlib.Path(row["snapshot"]).name).as_posix()
     manifest_out.append(json.dumps(row, ensure_ascii=False))
 (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n", encoding="utf-8")
 
