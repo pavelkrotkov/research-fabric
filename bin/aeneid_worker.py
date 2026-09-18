@@ -35,16 +35,18 @@ import pathlib
 import re
 import sys
 import time
-from html.parser import HTMLParser
 
 from openai import OpenAI
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 RUN = pathlib.Path(sys.argv[1])
 SRC = pathlib.Path(sys.argv[2])
 BOOK = int(sys.argv[3])
 CANONICAL_FILE = sys.argv[4]
 THEME = sys.argv[5] if len(sys.argv) > 5 else None
-WITNESSES = []  # [{label, source_id, file}]
+WITNESSES = []
 i = 6
 while i < len(sys.argv):
     if sys.argv[i] == "--witness":
@@ -54,12 +56,6 @@ while i < len(sys.argv):
     else:
         i += 1
 
-# --- Provider/model selection (user-binding constraint) ---
-# Allowed worker models, in order of preference:
-#   1. NVIDIA hosted deepseek-v4-flash (provider: nvidia)
-#   2. deepseek/deepseek-v4-flash-0731 via OpenRouter
-#   3. z-ai/glm-5.3-flash via OpenRouter
-# Never any other model (explicitly banned: glm-4.5-air, stealth/ox-alpha).
 NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY")
 if not NVIDIA_KEY and (
     envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
@@ -72,7 +68,7 @@ if not NVIDIA_KEY and (
                 break
 
 MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "deepseek-ai/deepseek-v4-flash-0731")
-PROVIDER = os.environ.get("RESEARCH_FABRIC_WORKER_PROVIDER", "")  # nvidia | openrouter | ""
+PROVIDER = os.environ.get("RESEARCH_FABRIC_WORKER_PROVIDER", "")
 if not PROVIDER:
     PROVIDER = "nvidia" if NVIDIA_KEY else "openrouter"
 if PROVIDER == "nvidia":
@@ -105,21 +101,6 @@ CLAIM_TYPES = [
 ]
 
 
-class _T(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.out = []
-
-    def handle_data(self, data):
-        self.out.append(data)
-
-
-def html_to_text(raw: str) -> str:
-    p = _T()
-    p.feed(raw)
-    return " ".join("".join(p.out).split())
-
-
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip().lower()
 
@@ -131,7 +112,6 @@ def call_model(messages, max_tokens=32000):
             text = r.choices[0].message.content
             if text and text.strip():
                 return text
-            # content=None / empty: reasoning burned the budget -> retry (bigger budget callers can pass it)
             print(f"[worker] empty content (attempt {a})", flush=True)
             continue
         except Exception as e:
@@ -147,10 +127,6 @@ def call_model(messages, max_tokens=32000):
 def extract_json(text):
     t = (text or "").strip()
     dec = json.JSONDecoder()
-    # Prefer the exact top-level keys we asked for. raw_decode works from a
-    # given offset and handles nested braces correctly, so we do NOT slice to a
-    # boundary; just try each candidate offset and require a dict with the
-    # expected key (a stray leading array must not win).
     for idx in [k for k, ch in enumerate(t) if ch in "{"][:100]:
         try:
             obj, _ = dec.raw_decode(re.sub(r"\n[ \t]+", " ", t[idx:]))
@@ -217,15 +193,15 @@ def build_select_prompt(items):
 
 
 def main():
-    raw_latin = (SRC / CANONICAL_FILE).read_text(encoding="utf-8", errors="replace")
-    latin_body = html_to_text(raw_latin)
-    latin_hay = norm(raw_latin)
+    canonical_representation = representation_for(SRC / CANONICAL_FILE)
+    latin_body = canonical_representation.text
+    latin_hay = norm(latin_body)
     witness_texts = []
     for w in WITNESSES:
-        raw_w = (SRC / w["file"]).read_text(encoding="utf-8", errors="replace")
-        witness_texts.append({**w, "text": html_to_text(raw_w), "hay": norm(raw_w)})
+        representation = representation_for(SRC / w["file"])
+        text = representation.text
+        witness_texts.append({**w, "text": text, "hay": norm(text), "representation": representation})
 
-    # ---- Stage 1: Latin-only claims ----
     claims, last_err = None, None
     for _attempt in range(1, 4):
         text = call_model([{"role": "user", "content": build_latin_prompt(latin_body, CANONICAL_FILE)}])
@@ -238,7 +214,6 @@ def main():
     if claims is None:
         raise RuntimeError(f"stage 1 failed after 3 attempts: {last_err}")
 
-    # Drop claims whose Latin excerpt is NOT verbatim in the Latin snapshot.
     kept = []
     for c in claims:
         if norm(c.get("excerpt")) in latin_hay:
@@ -252,7 +227,6 @@ def main():
         for idx, c in enumerate(claims, 1)
     ]
 
-    # ---- Stage 2: per-witness verbatim English ----
     for w in witness_texts:
         text = call_model(
             [{"role": "user", "content": build_witness_prompt(items, w["label"], w["source_id"], w["text"])}]
@@ -272,7 +246,7 @@ def main():
             ex = s.get("excerpt")
             if not isinstance(ex, str) or not ex.strip():
                 continue
-            if norm(ex) not in w["hay"]:  # verbatim check against THIS witness
+            if norm(ex) not in w["hay"]:
                 continue
             it["candidates"].append(
                 {
@@ -282,7 +256,6 @@ def main():
                 }
             )
 
-    # ---- Stage 3: select best English witness per claim ----
     selectable = [it for it in items if it["candidates"]]
     selection_map = {}
     if selectable:
@@ -294,7 +267,6 @@ def main():
             except (TypeError, ValueError):
                 continue
 
-    # ---- Assemble final packet; drop claims with no verbatim selected English ----
     final = []
     for it in items:
         chosen = selection_map.get(it["i"])
@@ -303,35 +275,30 @@ def main():
             translator = chosen.get("translator")
             cand = next((c for c in it["candidates"] if c["translator"] == translator), None)
             if cand and norm(chosen.get("excerpt", "")) == norm(cand["excerpt"]):
-                # rely on the actual verbatim candidate
                 ew = {
                     "translator": cand["translator"].capitalize(),
                     "source_id": cand["source_id"],
                     "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
                     "excerpt": cand["excerpt"],
                 }
-            else:
-                # reviewer judgement picked a candidate but the transcript didn't match verbatim:
-                # fall back to the first verbatim candidate for this claim
-                if it["candidates"]:
-                    c0 = it["candidates"][0]
-                    ew = {
-                        "translator": c0["translator"].capitalize(),
-                        "source_id": c0["source_id"],
-                        "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}"
-                        if "." in it["locator"]
-                        else it["locator"],
-                        "excerpt": c0["excerpt"],
-                    }
-        else:
-            if it["candidates"]:
+            elif it["candidates"]:
                 c0 = it["candidates"][0]
                 ew = {
                     "translator": c0["translator"].capitalize(),
                     "source_id": c0["source_id"],
-                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
+                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}"
+                    if "." in it["locator"]
+                    else it["locator"],
                     "excerpt": c0["excerpt"],
                 }
+        elif it["candidates"]:
+            c0 = it["candidates"][0]
+            ew = {
+                "translator": c0["translator"].capitalize(),
+                "source_id": c0["source_id"],
+                "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
+                "excerpt": c0["excerpt"],
+            }
         if ew is None:
             continue
         final.append(
@@ -353,6 +320,11 @@ def main():
             {
                 "worker": f"book-{BOOK}",
                 "attempts": [{"attempt": 1, "stages": 3, "ok": True, "claims_kept": len(final)}],
+                "source_provenance": sorted(
+                    [source_attestation(canonical_representation)]
+                    + [source_attestation(w["representation"]) for w in witness_texts],
+                    key=lambda row: row["source_file"],
+                ),
                 "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
             },
             indent=2,
