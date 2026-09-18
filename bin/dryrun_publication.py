@@ -239,6 +239,8 @@ def _published_notes(field_root, source_files, note_by_source, source_by_file):
         receipt = field_root / "wiki" / "assets" / key / "publication.json"
         if receipt.is_file():
             doc_name = json.loads(receipt.read_text())["native_doc_name"]
+            if doc_name != key:
+                raise ValueError("published native source identity drift")
             note_by_source[source_by_file[source.name]] = f"wiki/summaries/{doc_name}.md"
 
 
