@@ -167,20 +167,22 @@ def test_production_native_retry_starts_from_baseline(kb, model, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "ignored,collect_new,policy",
+    "ignored,collect_new,policy,attestation",
     [
-        (None, False, None),
-        ("wiki/concepts/", False, None),
-        ("evidence/snapshots/", False, None),
-        (None, True, None),
-        (None, False, "restricted-reuse"),
-        (None, True, "restricted-fresh"),
-        (None, False, "compatible-reuse"),
-        (None, False, "legacy-restricted"),
+        (None, False, None, "valid"),
+        ("wiki/concepts/", False, None, "valid"),
+        ("evidence/snapshots/", False, None, "valid"),
+        (None, True, None, "valid"),
+        (None, False, "restricted-reuse", "valid"),
+        (None, True, "restricted-fresh", "valid"),
+        (None, False, "compatible-reuse", "valid"),
+        (None, False, "legacy-restricted", "valid"),
+        (None, False, None, "missing"),
+        (None, False, None, "stale"),
     ],
 )
 def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
-    kb, tmp_path, monkeypatch, ignored, collect_new, policy
+    kb, tmp_path, monkeypatch, ignored, collect_new, policy, attestation
 ):
     """CAO transport and provider are synthetic; workflow, compiler and gates are real."""
     import hashlib
@@ -241,8 +243,13 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         "coverage_notes": [],
     }
     from research_fabric import execution as ex
+    from research_fabric.sources import source_provenance
 
-    reused_packet = {"parsed": packet}
+    reused_packet = {"parsed": packet, "source_provenance": source_provenance([src])}
+    if attestation == "missing":
+        del reused_packet["source_provenance"]
+    elif attestation == "stale":
+        reused_packet["source_provenance"][0]["sha256"] = "0" * 64
     if policy in ("restricted-reuse", "compatible-reuse"):
         prior = tmp_path / "prior-run"
         ex.configure(prior, ex.resolve(override={"roles": {"extraction": {"model": "forbidden-B"}}}, environ={}))
@@ -335,6 +342,17 @@ cli.cli()
         assert ex.history(run)["attempts"][0]["actual_model"] == "forbidden-B"
         assert not (tmp_path / "calls.json").exists()
         return
+    if attestation != "valid":
+        # An invalid reused packet must trigger collection, never compilation.
+        # The unavailable executable makes that required collection fail offline.
+        monkeypatch.setenv("RESEARCH_FABRIC_WORKER_PYTHON", str(tmp_path / "missing-worker"))
+        with pytest.raises(RuntimeError, match="one or more evidence workers failed"):
+            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+        assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+        assert outputs == []
+        assert not (tmp_path / "calls.json").exists()
+        assert subprocess.check_output(["git", "-C", str(kb), "rev-list", "--count", "HEAD"]).strip() == b"1"
+        return
     if ignored:
         with pytest.raises(CompilationError, match="ignored/untracked"):
             runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
@@ -349,6 +367,7 @@ cli.cli()
         result["provenance"]["corpus_manifest_sha"]
         == hashlib.sha256((run / "source-manifest.jsonl").read_bytes()).hexdigest()
     )
+    assert result["provenance"]["source_adapters"] == ["html@1"]
     assert result["claims"] == 5
     execution = result["provenance"]["execution"]
     assert execution["attempts"]

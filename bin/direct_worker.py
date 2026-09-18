@@ -1,8 +1,8 @@
 """Direct-API evidence worker (OpenRouter z-ai/glm-5.3-flash) — openai SDK client.
 
-Replaces the CAO tmux worker: reads a book's HTML, strips it to text, makes a
-chat completion with robust 429/5xx backoff + parse retry, and writes a
-validated claim packet. No tmux, no screen scraping, no Codex quota.
+Reads one source through the shared adapter, makes a chat completion with
+robust 429/5xx backoff + parse retry, and writes a validated claim packet. No
+tmux, no screen scraping, no Codex quota.
 
 Run with the hermes venv python (has the openai SDK):
   <hermes-venv>/bin/python direct_worker.py <run_root> <source_dir> \
@@ -10,15 +10,14 @@ Run with the hermes venv python (has the openai SDK):
 Writes <run_root>/evidence/worker-book-<N>.json
 """
 
-import html
 import json
 import pathlib
 import re
 import sys
-from html.parser import HTMLParser
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.execution import InvalidOutput, worker_session
+from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 BOOK = int(sys.argv[3])
 RUN = pathlib.Path(sys.argv[1])
@@ -26,39 +25,6 @@ SRC = pathlib.Path(sys.argv[2])
 SOURCE_FILE = sys.argv[4] if len(sys.argv) > 4 else f"odyssey-book-{BOOK}.html"
 THEME = sys.argv[5] if len(sys.argv) > 5 else None
 SESSION = worker_session(RUN, "extraction", f"book-{BOOK}", [SRC / SOURCE_FILE])
-
-
-class Text(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.parts = []
-        self.skip = 0
-
-    def handle_starttag(self, t, a):
-        if t in ("script", "style"):
-            self.skip += 1
-        if t in ("br", "p", "div", "li"):
-            self.parts.append("\n")
-
-    def handle_endtag(self, t):
-        if t in ("script", "style"):
-            self.skip = max(0, self.skip - 1)
-
-    def handle_data(self, d):
-        if not self.skip:
-            self.parts.append(d)
-
-
-def html_to_text(raw):
-    tp = Text()
-    tp.feed(raw)
-    text = html.unescape("".join(tp.parts))
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    idx = text.find("Homer")
-    if idx > 0:
-        text = text[idx:]
-    return text
 
 
 def extract_json(text):
@@ -86,7 +52,7 @@ def defects(parsed):
             continue
         for f in ("claim", "source_file", "locator", "excerpt"):
             v = c.get(f)
-            if not isinstance(v, str) or not v.strip() or v.strip() in ("...", "\u2026", "TBD"):
+            if not isinstance(v, str) or not v.strip() or v.strip() in ("...", "…", "TBD"):
                 out.append(f"claim {i} field {f} placeholder/missing")
     return out
 
@@ -99,8 +65,9 @@ def validated_packet(text):
 
 
 def main():
-    raw = (SRC / SOURCE_FILE).read_text(encoding="utf-8", errors="replace")
-    body = html_to_text(raw)
+    source = SRC / SOURCE_FILE
+    representation = representation_for(source)
+    body = representation.text
     focus = THEME or "key events, characters, divine actions, and decisions"
     prompt = (
         "You are a research evidence collector. Below is the full text of source '"
@@ -119,7 +86,13 @@ def main():
     pkt_dir.mkdir(parents=True, exist_ok=True)
     (pkt_dir / f"worker-book-{BOOK}.json").write_text(
         json.dumps(
-            {"worker": f"book-{BOOK}", "attempts": SESSION.records(), "execution": SESSION.records(), "parsed": parsed},
+            {
+                "worker": f"book-{BOOK}",
+                "attempts": SESSION.records(),
+                "execution": SESSION.records(),
+                "source_provenance": [source_attestation(representation)],
+                "parsed": parsed,
+            },
             indent=2,
         )
         + "\n",

@@ -369,3 +369,83 @@ def test_restricted_artifact_requires_original_extraction_history():
         {"execution": [{"role": "repair", "outcome": "accepted", "profile": {"model": "allowed"}}]}, policy
     )
     assert ex.packet_policy_defects({}, {}) == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "second-witness",
+        "invented-selection",
+        "missing-selection",
+        "invalid-index",
+        "no-latin",
+        "no-witness",
+        "json-retry",
+    ],
+)
+def test_real_aeneid_stage_grounding_and_fallback(tmp_path, transport, monkeypatch, case):
+    """Only HTTP is scripted: adapters, stage assembly and attempt accounting run."""
+    calls, replies = transport
+    run, sources = tmp_path / "run", tmp_path / "sources"
+    sources.mkdir()
+    latin = sources / "latin.html"
+    latin.write_text("<p>Arma virumque cano</p>")
+    (sources / "kline.html").write_text("<p>Arms and the man I sing</p>")
+    (sources / "mackail.html").write_text("<p>I sing of arms and a man</p>")
+    claim = {
+        "claim": "The poet sings",
+        "excerpt": "wrong Latin" if case == "no-latin" else "Arma virumque cano",
+        "locator": "Aen.1.1",
+        "source_file": latin.name,
+    }
+    values = [{"claims": [claim]}]
+    if case == "json-retry":
+        replies.append((200, "[invalid JSON", "z-ai/glm-5.3-flash", None))
+    if case != "no-latin":
+        for text in ("Arms and the man I sing", "I sing of arms and a man"):
+            values.append({"selections": [] if case == "no-witness" else [{"i": "1", "excerpt": text}]})
+    if case not in ("no-latin", "no-witness"):
+        selection = {
+            "i": "bad" if case == "invalid-index" else 1,
+            "translator": "Mackail",
+            "excerpt": "I sing of arms and a man",
+        }
+        if case == "invented-selection":
+            selection["excerpt"] = "Model invented this rendering"
+        values.append({"selections": [] if case == "missing-selection" else [selection]})
+    replies.extend((200, json.dumps(value), "z-ai/glm-5.3-flash", None) for value in values)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "aeneid_worker.py",
+            str(run),
+            str(sources),
+            "1",
+            "latin.html",
+            "theme",
+            "--witness",
+            "Kline:s-kline:kline.html",
+            "--witness",
+            "Mackail:s-mackail:mackail.html",
+        ],
+    )
+    output = run / "evidence/worker-book-1.json"
+    if case in ("no-latin", "no-witness"):
+        with pytest.raises(RuntimeError, match="no verbatim Latin|no claims with a verbatim English"):
+            runpy.run_path(str(ROOT / "bin/aeneid_worker.py"), run_name="__main__")
+        assert not output.exists()
+        assert len(calls) == (1 if case == "no-latin" else 3)
+        return
+    runpy.run_path(str(ROOT / "bin/aeneid_worker.py"), run_name="__main__")
+    packet = json.loads(output.read_text())
+    row = packet["parsed"]["claims"][0]
+    chosen = "Mackail" if case in ("second-witness", "json-retry") else "Kline"
+    assert row["english_witness"]["translator"] == chosen
+    assert row["english_witness"]["excerpt"] in (sources / f"{chosen.lower()}.html").read_text()
+    assert set(row["witnesses_consulted"]) == {"s-kline", "s-mackail"}
+    assert len(row["witnesses_consulted"]) == 2
+    assert len(packet["source_provenance"]) == 3
+    assert len(calls) == (5 if case == "json-retry" else 4)
+    if case == "json-retry":
+        assert packet["execution"][0]["outcome"] == "invalid_output"

@@ -1,0 +1,26 @@
+name: Native visual preflight
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  offline-native-visual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+      - run: uv venv /tmp/visual-env
+      - run: uv pip install --python /tmp/visual-env/bin/python -r tests/visual-requirements.txt -e . pytest
+      - run: /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py
+        env:
+          LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+          OPENAI_AGENTS_DONT_LOG_MODEL_DATA: '1'
+          OPENAI_AGENTS_DONT_LOG_TOOL_DATA: '1'

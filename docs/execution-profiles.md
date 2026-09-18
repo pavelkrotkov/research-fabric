@@ -55,8 +55,11 @@ model provenance. Merely changing the selected model, without imposing a new
 restriction, preserves compatible historical artifacts and their original records.
 Standalone Aeneid entry revalidates both new and previously configured profiles.
 
-The existing source-adapter stack adds representation attestation independently;
-this change neither invents replacement source identities nor removes envelopes.
+Workers retain the shared source-adapter representation attestations. Reuse checks
+those attestations before execution policy; execution fingerprints never authorize
+source reuse. Aeneid stages accept strict JSON and select only already-grounded
+witness spans; a missing or invented advisory choice uses the first grounded
+candidate in input order.
 
 A failed mutating compile must follow the recovery instructions in
 [compilation-attempts.md](compilation-attempts.md): never retry against the dirty
