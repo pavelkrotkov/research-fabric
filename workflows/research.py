@@ -258,7 +258,6 @@ with run_lifecycle(run_root):
             packet,
             WORKER_PROVENANCE[sid],
             lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
-            source_dir,
         )
 
     set_state(run_root, "PLANNING")
