@@ -161,6 +161,8 @@ portable requirements:
 - A Python venv with the `openai` SDK (the direct-API worker — see ADR-0003).
 - `openkb` (pinned 0.4.5) and `cao` (CAO 2.4.1 + lifecycle patches), plus a
   local CAO server, for the orchestration layer.
+  The compile adapter also pins LiteLLM 1.87.2 and checks native compiler bytes;
+  see [compile qualification and recovery](docs/compilation-attempts.md).
 - An OpenRouter-capable API key for the worker model (set via the
   `OPENROUTER_API_KEY` environment variable; the worker falls back to
   reading it from the host's Hermes env file if unset).
@@ -202,3 +204,7 @@ matters more than certainty and the human stays in the loop on every ingest.
 research-fabric is right for fixed, authoritative corpora (primary texts,
 specs, legal documents) where a single hallucinated quote is poison and the
 corpus must be re-verifiable years later without the original session.
+
+Optional source-image inspection is available through the
+[native OAuth visual preflight](docs/visual-preflight.md). It records derived,
+unreviewed notes and incomplete coverage; text-only runs do not require OAuth.

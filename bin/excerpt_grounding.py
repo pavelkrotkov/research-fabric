@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """Deterministic excerpt-grounding gate for the research evidence ledger.
 
-Every claim asserts an ``excerpt`` copied from a source snapshot. This module
-proves that assertion mechanically instead of delegating it to an agent's
-judgement.
+Every claim asserts an ``excerpt`` copied from a source representation. This
+module proves that assertion mechanically instead of delegating it to an
+agent's judgement.
 
 Why normalization is required
 -----------------------------
-The evidence workers read HTML snapshots through a terminal UI. Three faithful
-transformations happen along that path and none of them change a single content
-word:
+The evidence workers read source text through adapters and terminal/model
+transcription can still introduce three faithful transformations:
 
 1. HTML entities are rendered (``&quot;`` -> ``"``).
 2. Typographic punctuation is folded (``—``/``’``/``”`` vs ``-``/``'``/``"``).
 3. Whitespace is reflowed, including spaces introduced around dashes.
 
 Normalization tolerates exactly those three classes and nothing else. Content
-words, their order, numbers, and negations must match the source byte-for-byte
-after folding. A claim whose words are not in the source still fails.
+words, their order, numbers, and negations must match the source after folding.
+A claim whose words are not in the source still fails.
 
 The accompanying self-test includes negative controls (deleted negation,
 changed number, reordered clause, invented sentence) which MUST be rejected;
@@ -36,6 +35,9 @@ from collections import Counter
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.claims import source_revision, stable_revision
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.sources import representation_for  # noqa: E402
 
 # Punctuation folding table: typographic variants -> ASCII equivalents.
 _PUNCT = {
@@ -72,11 +74,8 @@ def fold(text: str) -> str:
     # altered number, invented words -- survives lowercasing and is still
     # rejected; lowercasing cannot mask those.)
     text = text.lower()
-    # Drop HTML tags entirely, replacing each with whitespace. Markup such as
-    # <BR> (verse/paragraph line breaks) is a rendered whitespace break, not
-    # prose, so a faithful multi-line quotation spanning several <BR>s is a
-    # contiguous quote, not an elision. (Odyssey/Theoi text had no per-line
-    # tags; Aeneid Latin snapshots are <BR>-separated per verse.)
+    # Keep direct ``grounded`` callers backwards-compatible with raw HTML. The
+    # ledger path now supplies adapter-extracted text instead.
     text = re.sub(r"<[^>]*>", " ", text)
     text = "".join(_PUNCT.get(ch, ch) for ch in text)
     # Collapse all whitespace, then remove whitespace adjacent to dashes so
@@ -305,7 +304,9 @@ def main() -> int:
     texts = {}
     for row in sources:
         snap = field_root / row["snapshot"]
-        texts[row["source_id"]] = snap.read_text(encoding="utf-8", errors="replace")
+        texts[row["source_id"]] = (
+            representation_for(snap).text if row.get("adapter") else snap.read_text(encoding="utf-8")
+        )
     failures = check(claims, texts)
     claim_ids = [claim.get("claim_id") for claim in claims]
     duplicate_ids = {cid for cid, count in Counter(claim_ids).items() if count > 1}

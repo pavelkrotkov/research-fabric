@@ -461,7 +461,7 @@ def _workflow_ledger(packet_dir, field_root):
     tree = ast.parse((ROOT / "workflows" / "research.py").read_text())
     loop = next(
         node
-        for node in tree.body
+        for node in ast.walk(tree)
         if isinstance(node, ast.For)
         and isinstance(node.iter, ast.Name)
         and node.iter.id == "results"
@@ -727,28 +727,23 @@ def test_persisted_identity_rejects_corrupt_mapping_or_missing_binding(tmp_path,
 def _workflow_reuse(source_dir, reuse_dir, destination):
     """Run the actual production reuse loop, including its acceptance/write seam."""
     tree = ast.parse((ROOT / "workflows" / "research.py").read_text())
-    loop = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.For)
-        and isinstance(node.iter, ast.Name)
-        and node.iter.id == "worker_specs"
-        and any(isinstance(child, ast.Name) and child.id == "reused_sids" for child in ast.walk(node))
+    from research_fabric.sources import packet_source_defects, source_provenance
+
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_reuse_evidence_packets"
     )
+    expected = source_provenance([source_dir / "source.html"])
     scope = {
         "json": json,
-        "worker_specs": [("book-1", "")],
-        "reuse_evidence_dir": reuse_dir,
-        "packet_dir": destination,
-        "source_dir": source_dir,
-        "VALIDATOR": lambda *_: [],
-        "ACCEPTANCE": {},
+        "packet_source_defects": packet_source_defects,
         "accept_packet": accept_packet,
         "atomic_write_json": atomic_write_json,
         "ClaimIdentityError": ClaimIdentityError,
-        "reused_sids": [],
     }
-    exec(compile(ast.Module(body=[loop], type_ignores=[]), "workflow reuse", "exec"), scope)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "workflow reuse", "exec"), scope)
+    scope["_reuse_evidence_packets"](
+        reuse_dir, destination, [("book-1", "")], {"book-1": expected}, lambda *_: [], source_dir
+    )
 
 
 @pytest.mark.parametrize("seam", ["reuse", "rehearsal", "ledger"])
@@ -756,6 +751,9 @@ def _workflow_reuse(source_dir, reuse_dir, destination):
 def test_unrecorded_claim_loss_fails_before_materialization(tmp_path, seam, record_drop):
     source_dir = _source(tmp_path)
     packet = accept_packet(_packet(), "book-1", source_dir=source_dir, attempt_id="accept-1")
+    from research_fabric.sources import source_provenance
+
+    packet["source_provenance"] = source_provenance([source_dir / "source.html"])
     original_rows = json.loads(json.dumps(packet["parsed"]["claims"]))
     cid = original_rows[0]["claim_id"]
     if record_drop:
