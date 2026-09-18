@@ -42,12 +42,9 @@ def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTE
 
 
 def _asset_path(source: pathlib.Path, relative: str) -> pathlib.Path:
-    path = pathlib.PurePosixPath(relative)
-    root = source.parent.resolve()
-    candidate = root.joinpath(*path.parts).resolve()
-    if path.is_absolute() or ".." in path.parts or candidate == root or root not in candidate.parents:
-        raise ValueError(f"unsafe source asset path in {source.name}: {relative}")
-    return candidate
+    from ._source_assets import safe_path
+
+    return safe_path(source.parent, relative)
 
 
 def _assets_sha256(source: pathlib.Path, assets: tuple[str, ...]) -> str | None:
@@ -204,3 +201,39 @@ def bind_manifest(
             raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
         bound.append(_bind_representation(row, rep, source))
     return bound
+
+
+def prepare_source_bundle(source: pathlib.Path, destination: pathlib.Path, attestation: dict) -> dict:
+    """Extend the existing source attestation with a frozen visual asset closure."""
+    from ._source_assets import prepare_bundle
+
+    if source_attestation(representation_for(source)) != attestation:
+        raise ValueError(f"source bundle attestation drift: {source.name}")
+    return prepare_bundle(source, destination, attestation)
+
+
+def snapshot_relative(source: pathlib.Path) -> pathlib.Path:
+    from ._source_assets import bundle_key
+
+    attestation = source_attestation(representation_for(source))
+    return pathlib.Path(bundle_key(attestation)) / source.name
+
+
+def copy_source_snapshot(source: pathlib.Path, snapshots: pathlib.Path) -> pathlib.Path:
+    """The original document and local assets share one collision-free namespace."""
+    import shutil
+
+    from ._source_assets import safe_path
+
+    relative = snapshot_relative(source)
+    for original, asset_relative in source_bundle(source):
+        destination = safe_path(snapshots, (relative.parent / asset_relative).as_posix())
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if destination.read_bytes() != original.read_bytes():
+                raise ValueError(f"source snapshot drift: {destination}")
+            destination.chmod(0o444)
+            continue
+        shutil.copy2(original, destination)
+        destination.chmod(0o444)
+    return snapshots / relative

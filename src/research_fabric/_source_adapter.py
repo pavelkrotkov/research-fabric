@@ -79,13 +79,62 @@ class HTMLAdapter:
 _MARKDOWN = MarkdownIt("commonmark")
 
 
-def _image_targets(text: str) -> list[str]:
-    targets = []
+class _VisualHTML(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.references = []
+        self.inert = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("pre", "code", "script", "style"):
+            self.inert += 1
+        if self.inert:
+            return
+        attrs = dict(attrs)
+        if tag in ("img", "embed", "object"):
+            target = attrs.get("data" if tag == "object" else "src")
+            if target:
+                self.references.append(
+                    {
+                        "target": target,
+                        "syntax": tag,
+                        "caption": attrs.get("alt", attrs.get("title", "")),
+                        "required": attrs.get("data-optional") != "true",
+                    }
+                )
+            if "srcset" in attrs:
+                self.references.append(
+                    {"target": attrs["srcset"], "syntax": "srcset", "required": attrs.get("data-optional") != "true"}
+                )
+
+    def handle_endtag(self, tag):
+        if tag in ("pre", "code", "script", "style"):
+            self.inert = max(0, self.inert - 1)
+
+
+def _token_visual(child, parser):
+    if child.type in ("html_inline", "html_block"):
+        parser.references = []
+        parser.feed(child.content)
+        return parser.references
+    if child.type == "image" and not parser.inert:
+        return [{"target": child.attrGet("src"), "syntax": "image", "caption": child.content, "required": True}]
+    return []
+
+
+def visual_references(text: str) -> list[dict]:
+    """Discover active images; locators retain one-based, end-exclusive block lines."""
+    result = []
+    parser = _VisualHTML()
     for token in _MARKDOWN.parse(text):
-        for child in token.children or ():
-            if child.type == "image" and isinstance(src := child.attrGet("src"), str):
-                targets.append(src)
-    return targets
+        locator = {"lines": [n + 1 for n in token.map]} if token.map else {}
+        for child in token.children or [token]:
+            result.extend({**row, "locator": locator} for row in _token_visual(child, parser))
+    return result
+
+
+def _image_targets(text: str) -> list[str]:
+    return [row["target"] for row in visual_references(text) if row["syntax"] != "srcset"]
 
 
 def _local_asset(target: str) -> str | None:
@@ -98,7 +147,7 @@ def _local_asset(target: str) -> str | None:
 
 class MarkdownAdapter:
     name = "markdown"
-    version = "1"
+    version = "2"
     suffixes = (".md", ".markdown")
 
     def decode(self, raw: bytes) -> str:

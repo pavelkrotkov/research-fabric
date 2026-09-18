@@ -1,0 +1,38 @@
+name: Native asset bundles
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install bounded renderers
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils ghostscript
+      - name: Install project and pinned native converter
+        run: |
+          uv sync --dev
+          uv pip install openkb==0.4.5 litellm==1.87.2 openai-agents==0.17.3 openai==2.44.0
+      - name: Portable behavior and real renderer regressions
+        run: .venv/bin/python -m pytest
+      - name: Real native conversion and browser export, no model calls
+        run: .venv/bin/python tests/native_asset_smoke.py
+      - name: Lint and deterministic grounding self-test
+        run: |
+          .venv/bin/ruff check src tests tools/wiki bin/dryrun_publication.py
+          .venv/bin/ruff format --check src tests tools/wiki bin/dryrun_publication.py
+          .venv/bin/python bin/excerpt_grounding.py
+          .venv/bin/python -m py_compile workflows/research.py
