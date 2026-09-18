@@ -11,11 +11,12 @@ import re
 import shutil
 import subprocess
 import sys
-from contextlib import nullcontext
 
 from cao_workflow import ShimError, emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.compilation import assert_run_branch, compile_with_recovery, normalize_generated_log
+from research_fabric.run_state import finalize_run, run_lifecycle
 from research_fabric.core import (
     book_task_from_project,
     extract_json,
@@ -32,8 +33,8 @@ from research_fabric.core import (
 # into claims + notes (snapshot regex, themes, source-id/note templates,
 # manifest path, acceptance rules). fields.yaml (field root registry) answers a
 # different question — which broad KB a question belongs to — and is NOT this.
-RESEARCH_ROOT = pathlib.Path("/home/pavel/research-fabric")
-PROJECTS_DIR = RESEARCH_ROOT / "projects"
+RESEARCH_ROOT = pathlib.Path(os.environ.get("RESEARCH_FABRIC_ROOT", "/home/pavel/research-fabric"))
+PROJECTS_DIR = pathlib.Path(os.environ.get("RESEARCH_FABRIC_PROJECTS", str(RESEARCH_ROOT / "projects")))
 DEFAULT_PROJECT = "odyssey"
 # The direct-API worker's model/provider (mirrors bin/direct_worker.py). Kept in
 # sync so run.json records the exact model that produced the claims.
@@ -82,7 +83,7 @@ def collect_provenance() -> dict:
             return None
 
     proj_path = PROJECTS_DIR / f"{project_name}.yaml"
-    corpus_manifest = RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]
+    corpus_manifest = manifest_path
     return {
         "model": MODEL_REF,
         "provider": PROVIDER_REF,
@@ -91,7 +92,7 @@ def collect_provenance() -> dict:
         "project": project_name,
         "project_spec_sha": sha256_of(proj_path) if proj_path.exists() else None,
         "corpus_manifest_sha": sha256_of(corpus_manifest) if corpus_manifest.exists() else None,
-        "corpus_sources_sha": _dir_sha(RESEARCH_ROOT / "corpora" / project["corpus_dir"] / "sources"),
+        "corpus_sources_sha": _dir_sha(source_dir),
         "openkb": _toolver(["openkb", "--version"]),
         "toolchain": {"cao": _toolver(["cao", "--version"]), "python": _toolver([sys.executable, "--version"])},
     }
@@ -133,7 +134,13 @@ def _dir_sha(d: pathlib.Path) -> str | None:
 inputs = get_inputs()
 field_root = pathlib.Path(inputs["field_root"]).resolve()
 run_root = pathlib.Path(inputs["run_root"]).resolve()
-with nullcontext():
+if run_root.is_relative_to(field_root):
+    raise RuntimeError("run artifacts must live outside the KB worktree")
+with run_lifecycle(run_root):
+    assert_run_branch(field_root)
+    if subprocess.run(["git", "-C", str(field_root), "status", "--porcelain"],
+                      capture_output=True, text=True, check=True).stdout.strip():
+        raise RuntimeError("run worktree must start clean; preserve user changes and use a fresh isolated branch")
     source_dir = pathlib.Path(inputs["source_dir"]).resolve()
     question = inputs["question"]
     reuse_evidence_dir = pathlib.Path(inputs["reuse_evidence_dir"]).resolve() if inputs.get("reuse_evidence_dir") else None
@@ -468,8 +475,9 @@ with nullcontext():
             dest.chmod(0o644)
         shutil.copy2(src, dest)
         dest.chmod(0o444)
-    subprocess.run(["openkb", "--kb-dir", str(field_root), "add", str(source_dir)], check=True, text=True)
+    compile_with_recovery(field_root, source_files, run_root / "verification" / "compile")
     subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
+    normalize_generated_log(field_root)
 
     # Deterministically materialize accepted claims BEFORE the post-compile
     # verifier runs, so the verifier reviews the complete change set including the
@@ -652,13 +660,6 @@ with nullcontext():
         )
         post_text = ""
 
-    set_state(run_root, "READY_FOR_REVIEW")
-    # ``openkb add``/``lint`` also touch tracked KB files (wiki/log.md) and emit a
-    # lint report. Those are legitimate products of the compile step, so commit the
-    # whole working tree rather than evidence/ alone -- otherwise the run ends with
-    # a dirty worktree and the next run starts from unexplained local changes.
-    subprocess.run(["git", "-C", str(field_root), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(field_root), "diff", "--cached", "--check"], check=True)
     _cmt = project.get("commit_message") or "{project} evidence run ({claims} claims, Books {books}; run {run})"
     commit_msg = _cmt.format(
         project=project_name.capitalize(),
@@ -666,28 +667,5 @@ with nullcontext():
         books="-".join(map(str, (BOOKS[0], BOOKS[-1]))),
         run=run_root.name,
     )
-    subprocess.run(["git", "-C", str(field_root), "commit", "-m", commit_msg], check=True, text=True)
-    head = subprocess.run(
-        ["git", "-C", str(field_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    branch = subprocess.run(
-        ["git", "-C", str(field_root), "branch", "--show-current"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    residual = subprocess.run(
-        ["git", "-C", str(field_root), "status", "--porcelain"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    if residual:
-        set_state(run_root, "FAILED", failure="worktree dirty after commit")
-        raise RuntimeError(f"worktree not clean after commit:\n{residual}")
-    write_json(
-        run_root / "run.json",
-        {
-            "run_id": run_root.name,
-            "state": "READY_FOR_REVIEW",
-            "branch": branch,
-            "commit": head,
-            "claims": len(claims),
-            "provenance": collect_provenance(),
-        },
-    )
-    emit_output({"state": "READY_FOR_REVIEW", "claims": len(claims), "branch": branch, "commit": head})
+    completion = finalize_run(field_root, run_root, commit_msg, len(claims), collect_provenance)
+    emit_output(completion)
