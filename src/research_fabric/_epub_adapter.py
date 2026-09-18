@@ -7,15 +7,51 @@ import io
 import pathlib
 import posixpath
 import re
-import zipfile
 import xml.etree.ElementTree as ET
 import xml.parsers.expat as expat
+import zipfile
 from urllib.parse import quote, unquote, urlsplit
 
 _BLOCKS = {
-    "address", "article", "aside", "blockquote", "br", "caption", "dd", "details", "div", "dl", "dt",
-    "fieldset", "figcaption", "figure", "footer", "form", "header", "hr", "li", "main", "nav", "ol", "option",
-    "optgroup", "p", "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "dd",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "option",
+    "optgroup",
+    "rp",
+    "rt",
+    "rtc",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
 }
 _HEADINGS = {f"h{i}" for i in range(1, 7)}
 _BREAKS = _BLOCKS | _HEADINGS
@@ -247,15 +283,20 @@ def _svg_assets(node: ET.Element, chapter: str, resources: set[str]) -> str:
     return "".join(_asset(child, chapter, resources) for child in node.iter() if _tag(child) == "image")
 
 
+def _visible_text(text: str | None) -> str:
+    # Escape before joining nodes: visible text cannot forge a structural marker.
+    return (text or "").replace("<", "&lt;")
+
+
 def _render(node: ET.Element, chapter: str, resources: set[str], headings: list[int], ids: set[str]) -> str:
     tag = _tag(node)
     if tag == "svg":
         return _svg_assets(node, chapter, resources)
     if tag in _SKIP:
         return ""
-    out = [_prefix(node, chapter, resources, headings, ids), node.text or ""]
+    out = [_prefix(node, chapter, resources, headings, ids), _visible_text(node.text)]
     for child in node:
-        out.extend((_render(child, chapter, resources, headings, ids), child.tail or ""))
+        out.extend((_render(child, chapter, resources, headings, ids), _visible_text(child.tail)))
     if tag in _BREAKS:
         out.append("\n")
     return "".join(out)
@@ -287,7 +328,7 @@ def _text(raw: bytes) -> str:
 
 class EPUBAdapter:
     name = "epub"
-    version = "1"
+    version = "2"
     suffixes = (".epub",)
 
     def decode(self, raw: bytes) -> bytes:

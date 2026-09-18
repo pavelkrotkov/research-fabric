@@ -27,7 +27,7 @@ FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
-from research_fabric.sources import bind_manifest, discover_sources, representation_for, source_bundle  # noqa: E402
+from research_fabric.sources import bind_manifest, discover_sources, source_bundle  # noqa: E402
 
 
 def _load_project(name):
@@ -193,7 +193,7 @@ def _grounding_misses(snap_dest, source_by_file, claims):
     for name in source_by_file:
         path = snap_dest / name
         if path.is_file():
-            snaps[name] = representation_for(path).text
+            snaps[name] = excerpt_grounding.source_text(path)
     file_by_source = {source_id: name for name, source_id in source_by_file.items()}
     misses = []
     for claim in claims:

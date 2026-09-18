@@ -286,9 +286,7 @@ def main():
                 ew = {
                     "translator": c0["translator"].capitalize(),
                     "source_id": c0["source_id"],
-                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}"
-                    if "." in it["locator"]
-                    else it["locator"],
+                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
                     "excerpt": c0["excerpt"],
                 }
         elif it["candidates"]:

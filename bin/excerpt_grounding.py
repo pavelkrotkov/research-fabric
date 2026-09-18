@@ -33,6 +33,7 @@ import sys
 import unicodedata
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric._source_adapter import HTMLAdapter  # noqa: E402
 from research_fabric.sources import representation_for  # noqa: E402
 
 # Punctuation folding table: typographic variants -> ASCII equivalents.
@@ -61,7 +62,7 @@ _PUNCT = {
 
 
 def fold(text: str) -> str:
-    """Normalize a string for transcription-tolerant comparison."""
+    """Normalize visible text; angle brackets are evidence, never markup."""
     text = html.unescape(text)
     text = unicodedata.normalize("NFKC", text)
     # Case is not semantically significant to a quotation's fidelity: a worker
@@ -70,9 +71,6 @@ def fold(text: str) -> str:
     # altered number, invented words -- survives lowercasing and is still
     # rejected; lowercasing cannot mask those.)
     text = text.lower()
-    # Keep direct ``grounded`` callers backwards-compatible with raw HTML. The
-    # ledger path now supplies adapter-extracted text instead.
-    text = re.sub(r"<[^>]*>", " ", text)
     text = "".join(_PUNCT.get(ch, ch) for ch in text)
     # Collapse all whitespace, then remove whitespace adjacent to dashes so
     # "hands -fishing", "hands- fishing" and "hands-fishing" compare equal.
@@ -114,10 +112,10 @@ def grounded(excerpt: str, source_text: str) -> bool:
     return _grounded_across_marker(trimmed, hay)
 
 
-# Text permitted inside an elided span: HTML tags, whitespace, quote marks and
+# Text permitted inside an elided span: whitespace, quote marks and
 # a bracketed line/section marker. Any prose here means the excerpt skipped
 # real content and must not be treated as a faithful quotation.
-_ELIDABLE = re.compile(r"^(?:\s|</?[a-zA-Z][^>]*>|[\"'`]|\[\d+[a-z]?\]|[.,;:]|-)*$")
+_ELIDABLE = re.compile(r"^(?:\s|[\"'`]|\[\d+[a-z]?\]|[.,;:]|-)*$")
 _MAX_ELISION = 40
 
 
@@ -240,13 +238,24 @@ def _self_test() -> None:
         if grounded(bad, _SRC):
             errors.append(f"FALSE POSITIVE (should reject): {bad!r}")
     for good in _MUST_ACCEPT_MARKER:
-        if not grounded(good, _SRC_MARKER):
+        if not grounded(good, HTMLAdapter().extract_text(_SRC_MARKER)):
             errors.append(f"false negative across marker (should accept): {good!r}")
     for bad in _MUST_REJECT_MARKER:
-        if grounded(bad, _SRC_MARKER):
+        if grounded(bad, HTMLAdapter().extract_text(_SRC_MARKER)):
             errors.append(f"FALSE POSITIVE across marker (should reject): {bad!r}")
     if errors:
         raise SystemExit("excerpt-grounding self-test FAILED:\n  " + "\n  ".join(errors))
+
+
+def source_text(snapshot: pathlib.Path) -> str:
+    """Convert source syntax once; only EPUB's generated markers are elidable."""
+    if snapshot.suffix.lower() == ".txt":  # Legacy plain-text ledgers.
+        return snapshot.read_text(encoding="utf-8")
+    rep = representation_for(snapshot)
+    if rep.adapter == "epub":
+        # Before entity folding: escaped visible marker-like text stays evidence.
+        return re.sub(r"<!--@@(?:chapter |section |asset |formula)[^>]*-->", " ", rep.text)
+    return rep.text
 
 
 def main() -> int:
@@ -261,9 +270,7 @@ def main() -> int:
     texts = {}
     for row in sources:
         snap = field_root / row["snapshot"]
-        texts[row["source_id"]] = (
-            representation_for(snap).text if row.get("adapter") else snap.read_text(encoding="utf-8")
-        )
+        texts[row["source_id"]] = source_text(snap)
     failures = check(claims, texts)
     if failures:
         for cid, why in failures:

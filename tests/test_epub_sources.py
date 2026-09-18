@@ -124,9 +124,7 @@ def test_epub_section_locator_components_are_escaped_independently():
 
 def test_epub_rejects_utf16_dtd():
     xhtml = (
-        '<?xml version="1.0" encoding="utf-16"?>'
-        '<!DOCTYPE html [<!ENTITY x "INJECTED">]>'
-        "<html><body>&x;</body></html>"
+        '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE html [<!ENTITY x "INJECTED">]><html><body>&x;</body></html>'
     ).encode("utf-16")
     with pytest.raises(ValueError, match="DTD/entity declarations forbidden"):
         _chapter("OEBPS/ch.xhtml", xhtml, set())
