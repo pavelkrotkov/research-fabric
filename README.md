@@ -160,7 +160,9 @@ The full pipeline needs an installed environment. Exact controller paths and
 config are documented in `research-fabric-corpora` (private); here are the
 portable requirements:
 
-- A Python venv with the `openai` SDK (the direct-API worker — see ADR-0003).
+- Install the engine and its declared runtime dependencies with `uv sync`.
+  Claim persistence uses boltons for atomic replacement; no OAuth or model
+  credentials are needed for these filesystem operations.
 - `openkb` (pinned 0.4.5) and `cao` (CAO 2.4.1 + lifecycle patches), plus a
   local CAO server, for the orchestration layer.
   The compile adapter also pins LiteLLM 1.87.2 and checks native compiler bytes;

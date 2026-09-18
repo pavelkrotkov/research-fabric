@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "PyYAML>=6.0",
     "openai>=1.0",
+    "boltons==25.0.0",
 ]
 
 [dependency-groups]

@@ -617,10 +617,11 @@ def test_actual_grounding_report_binds_repair_and_ledger_ids(tmp_path, fault):
 def test_atomic_write_preserves_previous_json_on_replace_error(tmp_path, monkeypatch):
     path = tmp_path / "packet.json"
     atomic_write_json(path, {"valid": 1})
-    monkeypatch.setattr("research_fabric.claim_store.os.replace", lambda *_args: (_ for _ in ()).throw(OSError("stop")))
+    monkeypatch.setattr("boltons.fileutils.os.rename", lambda *_args: (_ for _ in ()).throw(OSError("stop")))
     with pytest.raises(OSError, match="stop"):
         atomic_write_json(path, {"valid": 2})
     assert json.loads(path.read_text(encoding="utf-8")) == {"valid": 1}
+    assert list(tmp_path.iterdir()) == [path]
 
 
 @pytest.mark.parametrize("change", ["drop", "reorder"])
@@ -978,3 +979,93 @@ def test_explicit_legacy_migration_preserves_existing_audit_without_rewriting_ar
     assert migrated["claim_history"][0] == audit
     assert [row["event"] for row in migrated["claim_history"][1:]] == ["accepted"] * 3
     assert artifact.read_bytes() == before
+
+
+def test_atomic_writes_preserve_mode_and_unicode(tmp_path):
+    import os
+    import stat
+
+    from research_fabric.claims import atomic_write_text
+
+    path = tmp_path / "packet.json"
+    atomic_write_json(path, {"old": True})
+    path.chmod(0o640)
+    atomic_write_text(path, "Ἀθηνᾶ")
+    assert path.read_text(encoding="utf-8") == "Ἀθηνᾶ"
+    atomic_write_json(path, {"claim": "Ἀθηνᾶ"})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"claim": "Ἀθηνᾶ"}
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_interrupted_part_file_does_not_block_or_get_deleted(tmp_path):
+    path = tmp_path / "packet.json"
+    interrupted = tmp_path / ".packet.json.interrupted.part"
+    interrupted.write_bytes(b"uncommitted partial packet")
+    atomic_write_json(path, {"valid": 1})
+    atomic_write_json(path, {"valid": 2})
+    assert json.loads(path.read_text()) == {"valid": 2}
+    assert interrupted.read_bytes() == b"uncommitted partial packet"
+    assert set(tmp_path.iterdir()) == {path, interrupted}
+
+
+def test_post_replace_failure_resumes_from_durable_packet(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from research_fabric import claim_store
+
+    if os.name == "nt":
+        pytest.skip("directory flush is a POSIX durability operation")
+
+    source_dir = _source(tmp_path)
+    packet = accept_packet(_packet(), "book-1", source_dir=source_dir)
+    path = tmp_path / "run" / "evidence" / "worker-book-1.json"
+    atomic_write_json(path, packet)
+    report = tmp_path / "report"
+    report.write_text(
+        _bound_report(
+            packet,
+            source_dir,
+            [
+                {"claim_id": "c-book-1-1", "old_excerpt": "bad A", "reason": "excerpt not found"},
+                {"claim_id": "c-book-1-2", "old_excerpt": "bad B", "reason": "excerpt not found"},
+            ],
+        )
+    )
+    original_sync = os.fsync
+    failed = False
+
+    def interrupt_after_transition(descriptor):
+        nonlocal failed
+        persisted = json.loads(path.read_text())
+        if (
+            stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            and not failed
+            and persisted["claim_history"][-1]["event"] == "drop"
+        ):
+            failed = True
+            raise OSError("directory flush interrupted after replace")
+        return original_sync(descriptor)
+
+    calls = []
+
+    def model(prompt):
+        cid = "c-book-1-1" if "c-book-1-1" in prompt else "c-book-1-2"
+        calls.append(cid)
+        return '{"found":false}' if cid.endswith("-1") else '{"found":true,"excerpt":"good B"}'
+
+    monkeypatch.setattr(claim_store.os, "fsync", interrupt_after_transition)
+    with pytest.raises(OSError, match="after replace"):
+        repair_claims.repair_claims(tmp_path / "run", source_dir, report, model=model)
+    persisted = json.loads(path.read_text())
+    assert persisted["claim_history"][-1]["event"] == "drop"
+    assert [claim["claim_id"] for claim in persisted["parsed"]["claims"]] == ["c-book-1-2", "c-book-1-3"]
+    assert not (path.parent / "claim-history.json").exists()
+    assert list(path.parent.iterdir()) == [path]
+    result = repair_claims.repair_claims(tmp_path / "run", source_dir, report, model=model)
+    assert result["repaired"] == 1 and result["dropped"] == 0
+    assert calls == ["c-book-1-1", "c-book-1-2"]
+    audit = json.loads((path.parent / "claim-history.json").read_text())
+    assert [event["event"] for event in audit] == ["drop", "repair"]

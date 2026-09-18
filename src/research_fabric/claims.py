@@ -20,8 +20,6 @@ import json
 import pathlib
 
 from ._source_adapter import ADAPTERS
-from .claim_store import append_history as append_history
-from .claim_store import atomic_write_bytes as atomic_write_bytes
 from .claim_store import atomic_write_json as atomic_write_json
 from .claim_store import atomic_write_text as atomic_write_text
 

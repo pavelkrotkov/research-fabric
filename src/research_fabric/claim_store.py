@@ -12,43 +12,28 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import tempfile
-from contextlib import suppress
+import uuid
+
+from boltons.fileutils import atomic_save
 
 from ._source_adapter import ADAPTERS
 
 
-def atomic_write_bytes(path: pathlib.Path, payload: bytes) -> None:
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-        try:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
-    except Exception:
-        with suppress(FileNotFoundError):
-            os.unlink(tmp_name)
-        raise
-
-
 def atomic_write_text(path: pathlib.Path, value: str) -> None:
-    """Replace UTF-8 text atomically while preserving the previous file."""
-    atomic_write_bytes(path, value.encode("utf-8"))
+    """Delegate replacement to boltons, then durably record the new directory entry."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_save(os.fspath(path), part_file=f".{path.name}.{uuid.uuid4().hex}.part") as handle:
+        handle.write(value.encode("utf-8"))
+    if os.name != "nt":
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def atomic_write_json(path: pathlib.Path, value) -> None:
-    """Write JSON without exposing a partially-written packet to a reader."""
+    """Serialize packet/audit JSON through the same durable replacement boundary."""
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
