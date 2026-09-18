@@ -10,7 +10,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.sources import representation_for  # noqa: E402
+from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 SOURCE_KEYS = {"source_id", "url", "title", "retrieved_at", "content_type", "sha256", "snapshot"}
 REPRESENTATION_KEYS = {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
@@ -44,7 +44,7 @@ def load_jsonl(path: pathlib.Path):
 
 
 def _representation_errors(row: dict, sid, snap: pathlib.Path) -> list[str]:
-    if REPRESENTATION_KEYS.isdisjoint(row):
+    if REPRESENTATION_KEYS.isdisjoint(row) and snap.suffix.lower() not in {".md", ".markdown"}:
         return []
     missing = REPRESENTATION_KEYS - row.keys()
     if missing:
@@ -53,14 +53,9 @@ def _representation_errors(row: dict, sid, snap: pathlib.Path) -> list[str]:
         rep = representation_for(snap)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return [f"source representation invalid: {sid}: {exc}"]
-    expected = {
-        "adapter": rep.adapter,
-        "adapter_version": rep.adapter_version,
-        "representation_encoding": "utf-8",
-        "representation_sha256": rep.representation_sha256,
-    }
-    if rep.assets_sha256 or "assets_sha256" in row:
-        expected["assets_sha256"] = rep.assets_sha256
+    expected = source_attestation(rep)
+    del expected["source_file"], expected["sha256"]
+    expected["assets_sha256"] = rep.assets_sha256
     if rep.source_metadata or "source_metadata" in row:
         expected["source_metadata"] = dict(rep.source_metadata)
     return [f"{key} mismatch: {sid}" for key, value in expected.items() if row.get(key) != value]

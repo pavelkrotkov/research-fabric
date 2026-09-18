@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 
 import pytest
 
-from research_fabric.sources import adapter_for, bind_manifest, discover_sources, representation_for, source_bundle
+from research_fabric.sources import (
+    adapter_for,
+    bind_manifest,
+    discover_sources,
+    packet_source_defects,
+    representation_for,
+    source_bundle,
+    source_provenance,
+    source_provenance_errors,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROVENANCE = ROOT / "bin" / "provenance_validate.py"
@@ -93,7 +104,7 @@ def test_markdown_preserves_structure_math_and_assets(tmp_path):
         "    ![indented-example](missing-indented.png)\r\n\r\n"
         "<!-- ![commented](missing-comment.png) -->\r\n\r\n"
         "- item\r\n\r\n    ![Nested](assets/nested.png)\r\n\r\n"
-        "![A \\] chart](chart.png)\r\n![Paren](assets/chart(1).png)\r\n![Ref][plot]\r\n![Shortcut]\r\n"
+        "![A \\] chart](chart.png)\r\n![Paren](assets/chart(1).png)\r\n![Ref][plot]\r\n![Shortcut]\r\n\r\n"
         "[plot]: assets/ref.png\r\n[shortcut]: assets/shortcut.png\r\n"
         "![Remote](https://example.com/chart.png)\r\n"
     )
@@ -140,9 +151,7 @@ def test_markdown_asset_change_invalidates_provenance(tmp_path):
         bind_manifest([source], [row])
 
 
-@pytest.mark.parametrize(
-    "field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)]
-)
+@pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])
 def test_bind_manifest_rejects_existing_representation_drift(tmp_path, field, value):
     source = _html(tmp_path / "book-1.html")
     row = _manifest_row(source)
@@ -209,3 +218,162 @@ def test_representation_digest_tamper_fails_closed(tmp_path):
     result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
     assert result.returncode == 1
     assert "representation_sha256 mismatch" in result.stderr
+
+
+class _TextAdapter:
+    name = "text"
+    version = "7"
+    suffixes = (".txt",)
+
+    def decode(self, raw: bytes) -> str:
+        return raw.decode("utf-8")
+
+    def extract_text(self, decoded: str) -> str:
+        return decoded.strip()
+
+    def map_locator(self, locator: str) -> str:
+        return locator.strip()
+
+    def assets(self, decoded: str) -> tuple[str, ...]:
+        return ()
+
+    def metadata(self, path: pathlib.Path) -> dict[str, str]:
+        return {"content_type": "text/plain", "filename": path.name}
+
+
+def test_custom_adapter_flows_from_discovery_to_manifest(tmp_path):
+    source = tmp_path / "book-1.txt"
+    source.write_text("Hello custom", encoding="utf-8")
+    adapters = (_TextAdapter(),)
+    files = discover_sources(tmp_path, adapters)
+    rep = representation_for(source, adapters)
+    assert source_provenance(files, adapters)[0]["adapter"] == "text"
+    bound = bind_manifest(files, [{"snapshot": source.name, "sha256": rep.original_sha256}], adapters)
+    assert bound[0]["adapter"] == "text"
+    assert bound[0]["representation_sha256"] == hashlib.sha256(b"Hello custom").hexdigest()
+
+
+def test_source_provenance_rejects_drift(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    expected = source_provenance([source])
+    actual = [dict(expected[0], representation_sha256="0" * 64)]
+    assert source_provenance_errors(actual, expected) == ["packet source provenance mismatch for book-1.html"]
+
+
+def test_reused_packet_requires_current_input_attestation(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    packet = {"parsed": {"claims": [{"claim": "grounded"}]}, "source_provenance": source_provenance([source])}
+    assert source_provenance_errors(packet["source_provenance"], source_provenance([source])) == []
+    source.write_text("<p>changed</p>", encoding="utf-8")
+    assert source_provenance_errors(packet["source_provenance"], source_provenance([source]))
+    assert source_provenance_errors(None, source_provenance([source])) == ["packet source provenance missing"]
+
+
+def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    expected = source_provenance([source])
+
+    workflow = ast.parse((ROOT / "workflows" / "research.py").read_text(encoding="utf-8"))
+    reuse_function = next(
+        node for node in workflow.body if isinstance(node, ast.FunctionDef) and node.name == "_reuse_evidence_packets"
+    )
+    namespace = {"json": json, "shutil": shutil, "packet_source_defects": packet_source_defects}
+    exec(compile(ast.Module(body=[reuse_function], type_ignores=[]), "workflows/research.py", "exec"), namespace)
+
+    valid = {"parsed": {"claims": ["ok"]}, "source_provenance": expected}
+    stale = {"parsed": {"claims": ["ok"]}, "source_provenance": [dict(expected[0], sha256="0" * 64)]}
+    unattested = {"parsed": {"claims": ["ok"]}}
+
+    def validator(parsed):
+        return [] if parsed and parsed.get("claims") else ["invalid"]
+
+    reuse_dir = tmp_path / "reuse"
+    destination_dir = tmp_path / "destination"
+    reuse_dir.mkdir()
+    destination_dir.mkdir()
+    (reuse_dir / "worker-book-1.json").write_text(json.dumps(valid), encoding="utf-8")
+    (reuse_dir / "worker-book-2.json").write_text(json.dumps(stale), encoding="utf-8")
+    (reuse_dir / "worker-book-3.json").write_text(json.dumps(unattested), encoding="utf-8")
+    specs = [("book-1", ""), ("book-2", ""), ("book-3", ""), ("book-4", "")]
+    reused = namespace["_reuse_evidence_packets"](
+        reuse_dir,
+        destination_dir,
+        specs,
+        {sid: expected for sid, _ in specs},
+        validator,
+    )
+    assert reused == ["book-1"]
+    assert [sid for sid, _ in specs if sid not in reused] == ["book-2", "book-3", "book-4"]
+    assert (destination_dir / "worker-book-1.json").is_file()
+    assert not (destination_dir / "worker-book-2.json").exists()
+
+
+def test_first_bind_requires_preexisting_asset_digest(tmp_path):
+    asset = tmp_path / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(tmp_path / "book.md", "![Chart](chart.png)")
+    rep = representation_for(source)
+    row = {"snapshot": source.name, "sha256": rep.original_sha256}
+    with pytest.raises(RuntimeError, match="assets_sha256"):
+        bind_manifest([source], [row])
+    row["assets_sha256"] = rep.assets_sha256
+    assert bind_manifest([source], [row])[0]["assets_sha256"] == rep.assets_sha256
+    asset.write_bytes(b"changed before first bind")
+    with pytest.raises(RuntimeError, match="assets_sha256"):
+        bind_manifest([source], [row])
+
+
+def test_markdown_packet_attests_assets(tmp_path):
+    asset = tmp_path / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(tmp_path / "book.md", "![Chart](chart.png)")
+    packet = {"parsed": {}, "source_provenance": source_provenance([source])}
+    assert packet_source_defects(packet, source_provenance([source]), lambda _: []) == []
+    asset.write_bytes(b"changed")
+    assert packet_source_defects(packet, source_provenance([source]), lambda _: [])
+
+
+@pytest.mark.parametrize("mutation", ["unchanged", "changed", "deleted"])
+def test_published_markdown_requires_metadata(tmp_path, mutation):
+    root = _ledger(tmp_path)
+    snapshots = root / "evidence" / "snapshots"
+    asset = snapshots / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(snapshots / "book.md", "Hello world\n\n![Chart](chart.png)")
+    ledger = root / "evidence" / "sources.jsonl"
+    row = json.loads(ledger.read_text())
+    row.update(_manifest_row(source), snapshot="evidence/snapshots/book.md", content_type="text/markdown")
+    ledger.write_text(json.dumps(row))
+    assert subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True).returncode == 0
+    for key in ("adapter", "adapter_version", "representation_encoding", "representation_sha256", "assets_sha256"):
+        row.pop(key)
+    if mutation == "changed":
+        asset.write_bytes(b"tampered")
+    elif mutation == "deleted":
+        asset.unlink()
+    ledger.write_text(json.dumps(row))
+    result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "representation metadata missing" in result.stderr
+
+
+@pytest.mark.parametrize("mutation", ["changed", "deleted", "unpinned"])
+def test_published_markdown_asset_gate(tmp_path, mutation):
+    root = _ledger(tmp_path)
+    snapshots = root / "evidence" / "snapshots"
+    asset = snapshots / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(snapshots / "book.md", "Hello world\n\n![Chart](chart.png)")
+    ledger = root / "evidence" / "sources.jsonl"
+    row = json.loads(ledger.read_text())
+    row.update(_manifest_row(source), snapshot="evidence/snapshots/book.md", content_type="text/markdown")
+    if mutation == "changed":
+        asset.write_bytes(b"tampered")
+    elif mutation == "deleted":
+        asset.unlink()
+    else:
+        row.pop("assets_sha256")
+    ledger.write_text(json.dumps(row))
+    result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "assets_sha256" in result.stderr or "missing source asset" in result.stderr

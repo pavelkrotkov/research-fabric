@@ -20,7 +20,7 @@ import time
 from openai import OpenAI
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.sources import representation_for  # noqa: E402
+from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 BOOK = int(sys.argv[3])
 RUN = pathlib.Path(sys.argv[1])
@@ -96,7 +96,9 @@ def call_model(prompt):
 
 
 def main():
-    body = representation_for(SRC / SOURCE_FILE).text
+    source = SRC / SOURCE_FILE
+    representation = representation_for(source)
+    body = representation.text
     focus = THEME or "key events, characters, divine actions, and decisions"
     prompt = (
         "You are a research evidence collector. Below is the full text of source '"
@@ -134,7 +136,15 @@ def main():
     pkt_dir = RUN / "evidence"
     pkt_dir.mkdir(parents=True, exist_ok=True)
     (pkt_dir / f"worker-book-{BOOK}.json").write_text(
-        json.dumps({"worker": f"book-{BOOK}", "attempts": [{"attempt": 1, "ok": True}], "parsed": parsed}, indent=2)
+        json.dumps(
+            {
+                "worker": f"book-{BOOK}",
+                "attempts": [{"attempt": 1, "ok": True}],
+                "source_provenance": [source_attestation(representation)],
+                "parsed": parsed,
+            },
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )

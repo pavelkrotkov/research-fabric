@@ -26,7 +26,14 @@ from research_fabric.core import (
 from research_fabric.core import (
     load_project as load_project_spec,
 )
-from research_fabric.sources import bind_manifest, discover_sources, source_bundle
+from research_fabric.sources import (
+    ADAPTERS,
+    bind_manifest,
+    discover_sources,
+    packet_source_defects,
+    source_bundle,
+    source_provenance,
+)
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
 # into claims + notes (snapshot regex, themes, source-id/note templates,
@@ -39,6 +46,7 @@ DEFAULT_PROJECT = "odyssey"
 # sync so run.json records the exact model that produced the claims.
 MODEL_REF = "z-ai/glm-5.3-flash"
 PROVIDER_REF = "openrouter"
+SOURCE_ADAPTERS = ADAPTERS
 
 INPUTS = {
     "field_root": {"type": "path", "required": True},
@@ -157,7 +165,7 @@ def _validator(parsed, acceptance=None):
 
 VALIDATOR = _validator
 
-source_files = discover_sources(source_dir)
+source_files = discover_sources(source_dir, SOURCE_ADAPTERS)
 if not source_files:
     raise RuntimeError("no supported source snapshots found in source_dir")
 
@@ -183,6 +191,40 @@ else:
         raise RuntimeError(f"all snapshots must match {BOOK_RE.pattern}")
 
 worker_specs = [(f"book-{b}", book_task_from_project(b, project, project_name)) for b in BOOKS]
+
+
+def _worker_source_files(book: int) -> list[pathlib.Path]:
+    if IS_MULTI:
+        labels = [project["book_label_template"].format(n=book, w=CANONICAL)] + [
+            project["book_label_template"].format(n=book, w=w) for w in WITNESSES
+        ]
+        paths = [source_dir / label for label in labels]
+    else:
+        label = project.get("book_label_template", "{n}.html").format(n=book)
+        path = source_dir / label
+        if not path.is_file():
+            path = next(
+                (p for p in source_files if (match := BOOK_RE.search(p.name)) and int(match.group(1)) == book), path
+            )
+        paths = [path]
+    missing = [path.name for path in paths if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"worker source input missing: {missing}")
+    return paths
+
+
+WORKER_SOURCE_FILES = {sid: _worker_source_files(int(sid.split("-")[1])) for sid, _ in worker_specs}
+WORKER_PROVENANCE = {
+    sid: source_provenance(paths, SOURCE_ADAPTERS) for sid, paths in WORKER_SOURCE_FILES.items()
+}
+
+
+def _packet_defects(packet: dict, sid: str) -> list[str]:
+    return packet_source_defects(
+        packet,
+        WORKER_PROVENANCE[sid],
+        lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+    )
 
 set_state(run_root, "PLANNING")
 if reuse_evidence_dir:
@@ -216,14 +258,8 @@ def collect(spec):
     b = int(sid.split("-")[1])
     theme_match = re.search(r"Extract claim-level evidence about (.+?)\\. Use", task)
     theme = theme_match.group(1) if theme_match else None
-    if IS_MULTI:
-        book_label = project["book_label_template"].format(n=b, w=CANONICAL)
-    else:
-        book_label = project.get("book_label_template", "{n}.html").format(n=b)
-    if not (source_dir / book_label).is_file():
-        book_label = next(
-            (p.name for p in source_files if (m := BOOK_RE.search(p.name)) and int(m.group(1)) == b), book_label
-        )
+    worker_sources = WORKER_SOURCE_FILES[sid]
+    book_label = worker_sources[0].name
     attempts = []
     for attempt in range(1, 3):
         try:
@@ -256,8 +292,8 @@ def collect(spec):
                 raise RuntimeError(
                     f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
                 )
-            parsed = json.loads(packet.read_text(encoding="utf-8")).get("parsed")
-            defects = VALIDATOR(parsed, ACCEPTANCE)
+            packet_data = json.loads(packet.read_text(encoding="utf-8"))
+            defects = _packet_defects(packet_data, sid)
             attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
             if not defects:
                 return sid, proc.stdout.strip(), None
@@ -273,21 +309,33 @@ def collect(spec):
     return sid, "", f"direct worker returned no valid evidence packet after attempts ({reason})"
 
 
-if reuse_evidence_dir:
+def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator):
     reused_sids = []
-    for sid, _ in worker_specs:
-        src_packet = reuse_evidence_dir / f"worker-{sid}.json"
+    for sid, _ in specs:
+        src_packet = reuse_dir / f"worker-{sid}.json"
         if not src_packet.exists():
             continue
         try:
             src_data = json.loads(src_packet.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        if VALIDATOR(src_data.get("parsed"), ACCEPTANCE):
+        defects = packet_source_defects(src_data, worker_provenance[sid], validator)
+        if defects:
             continue
-        dst = packet_dir / src_packet.name
+        dst = destination_dir / src_packet.name
         shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
         reused_sids.append(sid)
+    return reused_sids
+
+
+if reuse_evidence_dir:
+    reused_sids = _reuse_evidence_packets(
+        reuse_evidence_dir,
+        packet_dir,
+        worker_specs,
+        WORKER_PROVENANCE,
+        lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+    )
     pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
     results = [(sid, "reused", None) for sid in reused_sids]
 else:
@@ -302,10 +350,10 @@ if any(err for _, _, err in results):
 if reuse_evidence_dir:
     for sid, _ in worker_specs:
         packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-        defects = VALIDATOR(packet.get("parsed"), ACCEPTANCE)
+        defects = _packet_defects(packet, sid)
         if defects:
             set_state(run_root, "FAILED", failure=f"reused packet invalid: {sid}")
-            raise RuntimeError(f"reused packet {sid} failed structural validation: {'; '.join(defects)}")
+            raise RuntimeError(f"reused packet {sid} failed validation: {'; '.join(defects)}")
 
 VERDICT_CONTRACT = (
     "Work through the evidence first and write your findings. Then, as the very LAST line of your "
@@ -401,7 +449,7 @@ if not manifest_path.exists():
     raise RuntimeError(f"no source manifest available (looked at {run_manifest} and {CANONICAL_SOURCE_MANIFEST})")
 manifest_rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 try:
-    manifest_rows = bind_manifest(source_files, manifest_rows)
+    manifest_rows = bind_manifest(source_files, manifest_rows, SOURCE_ADAPTERS)
 except RuntimeError as exc:
     set_state(run_root, "FAILED", failure="source manifest validation failed")
     raise RuntimeError(str(exc)) from exc
