@@ -190,7 +190,9 @@ def _grounding_misses(snap_dest, source_by_file, claims):
     sys.path.insert(0, str(FABRIC / "bin"))
     import excerpt_grounding
 
-    rows = [json.loads(line) for line in (snap_dest.parent / "sources.jsonl").read_text().splitlines() if line.strip()]
+    rows = [
+        json.loads(line) for line in filter(str.strip, (snap_dest.parent / "sources.jsonl").read_text().splitlines())
+    ]
     snapshots = {row["source_id"]: snap_dest.parent.parent / row["snapshot"] for row in rows}
     snaps = {source_id: representation_for(path).text for source_id, path in snapshots.items()}
     misses = []
@@ -230,6 +232,16 @@ def _commit(field_root, project_name: str, claim_count: int) -> str:
     return status
 
 
+def _published_notes(field_root, source_files, note_by_source, source_by_file):
+    """Consume the native note identity recorded with a validated source bundle."""
+    for source in source_files:
+        key = snapshot_relative(source).parent.name
+        receipt = field_root / "wiki" / "assets" / key / "publication.json"
+        if receipt.is_file():
+            doc_name = json.loads(receipt.read_text())["native_doc_name"]
+            note_by_source[source_by_file[source.name]] = f"wiki/summaries/{doc_name}.md"
+
+
 def main() -> int:
     args = _parse_args()
     run_root = pathlib.Path(args.run_root).resolve()
@@ -239,12 +251,7 @@ def main() -> int:
     workdir, field_root = _clone(args.field_repo, args.branch)
     manifest_rows = _manifest(run_root, project, source_files)
     snap_dest = _publish_sources(field_root, source_files)
-    for source in source_files:
-        key = snapshot_relative(source).parent.name
-        receipt = field_root / "wiki" / "assets" / key / "publication.json"
-        if receipt.is_file():
-            doc_name = json.loads(receipt.read_text())["native_doc_name"]
-            note_by_source[source_by_file[source.name]] = f"wiki/summaries/{doc_name}.md"
+    _published_notes(field_root, source_files, note_by_source, source_by_file)
     claims = _materialize_claims(run_root / "evidence", field_root, note_by_source, source_by_file)
     if claims is None:
         return 1
