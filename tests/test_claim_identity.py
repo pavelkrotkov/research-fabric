@@ -404,14 +404,12 @@ def test_model_error_is_reported_after_prior_history_is_written(tmp_path):
 
 def _workflow_ledger(packet_dir, field_root):
     """Call the actual engine ledger projection without parsing production Python."""
-    from research_fabric.engine import ResearchRun, RunConfig
+    from research_fabric.publication import ledger_rows
 
     note = field_root / "note.md"
     note.write_text("Native compiler output is outside this identity test.")
-    config = RunConfig(ROOT, ROOT / "projects/odyssey.yaml", field_root, packet_dir.parent, field_root, "Identity")
-    run = ResearchRun(config, lambda **_: "")
-    run.results, run.is_multi = [("book-1", "", None)], True
-    claims, dropped = run._ledger_rows({"s-1": "note.md"}, {"source.html": "s-1"})
+    packets = {"book-1": json.loads((packet_dir / "worker-book-1.json").read_text())}
+    claims, dropped = ledger_rows(field_root, packets, {"s-1": "note.md"}, {"source.html": "s-1"}, multi=True)
     assert not dropped
     return claims
 

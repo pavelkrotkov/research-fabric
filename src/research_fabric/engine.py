@@ -21,12 +21,14 @@ from research_fabric.core import (
     multisource_packet_defects,
     normalize_packet,
     packet_defects,
+    read_verdict,
     source_mappings,
 )
 from research_fabric.core import (
     load_project as load_project_spec,
 )
 from research_fabric.execution import configure, configured, history, packet_policy_defects, resolve
+from research_fabric.publication import materialize_evidence
 from research_fabric.run_state import finalize_run, run_lifecycle, set_state
 from research_fabric.sources import (
     ADAPTERS,
@@ -111,25 +113,6 @@ def _reuse_evidence_packets(
         atomic_write_json(dst, accepted)
         reused_sids.append(sid)
     return reused_sids
-
-
-def read_verdict(text):
-    """Return ('PASS'|'FAIL'|None, detail) from a verifier reply."""
-    matches = list(re.finditer("^\\s*VERDICT:\\s*(PASS|FAIL)\\b[ \\t]*(.*)$", text or "", flags=re.I | re.M))
-    if matches:
-        verdict = matches[-1].group(1).upper()
-        detail = matches[-1].group(2).strip().lstrip("-–—:").strip()
-        if verdict == "FAIL" and (not detail):
-            return (None, "FAIL with no enumerated defect")
-        return (verdict, detail)
-    lowered = (text or "").lower()
-    positive = "verified sound" in lowered or "verified clean" in lowered
-    negative = re.search(
-        "\\bfail(?:ed|ure)?\\b|blocking defect|\\bdefect(?:s)?\\b|not verified|unable to verify", lowered
-    )
-    if positive and (not negative):
-        return ("PASS", "implicit positive attestation")
-    return (None, "no usable VERDICT line or unambiguous positive attestation")
 
 
 VERDICT_CONTRACT = (
@@ -411,7 +394,7 @@ class ResearchRun:
             verdict, detail = None, f"verifier errored: {exc}"
         write_json(self.config.run_root / "verification" / report, {"verdict": verdict, "detail": detail})
 
-    def _verify_sources(self):
+    def _verification_manifests(self):
         verification_dir = self.config.run_root / "verification"
         verification_dir.mkdir(exist_ok=True)
         verification_manifests = []
@@ -427,6 +410,10 @@ class ResearchRun:
                 },
             )
             verification_manifests.append(verification_path)
+        return verification_manifests
+
+    def _verify_sources(self):
+        verification_manifests = self._verification_manifests()
         self._advisory(
             "verify-sources",
             f"Read these exact verification manifests: {', '.join(map(str, verification_manifests))}. "
@@ -480,96 +467,26 @@ class ResearchRun:
         )
         normalize_generated_log(self.config.field_root)
 
-    def _ledger_rows(self, NOTE_BY_SOURCE, SOURCE_BY_FILE):
-        claims = []
-        dropped = []
-        for sid, _, _ in self.results:
-            packet = json.loads((self.packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-            parsed = packet.get("parsed") or {}
-            for idx, claim in enumerate(parsed.get("claims", []), 1):
-                source_file = pathlib.Path(claim.get("source_file", "")).name
-                source_id = SOURCE_BY_FILE.get(source_file)
-                if not source_id:
-                    dropped.append({"worker": sid, "index": idx, "source_file": claim.get("source_file", "")})
-                    continue
-                note = NOTE_BY_SOURCE[source_id]
-                if not (self.config.field_root / note).is_file():
-                    raise RuntimeError(f"claim note target does not exist: {note}")
-                claim_id = claim.get("claim_id")
-                if not isinstance(claim_id, str) or not claim_id:
-                    dropped.append({"worker": sid, "index": idx, "source_file": claim.get("source_file", "")})
-                    continue
-                ledger_claim = {
-                    "claim_id": claim_id,
-                    "worker": sid,
-                    "claim": claim.get("claim", ""),
-                    "note": note,
-                    "source_ids": [source_id],
-                    "source_file": claim.get("source_file", ""),
-                    "locator": claim.get("locator", ""),
-                    "excerpt": claim.get("excerpt", ""),
-                    "stance": claim.get("stance", "supports"),
-                    "confidence": claim.get("confidence", 0.0),
-                    "independence_group": claim.get("independence_group", sid),
-                    "verified_at": "pilot-verifier-pass",
-                    "packet_revision": packet.get("packet_revision"),
-                    "packet_state_revision": packet.get("packet_state_revision"),
-                    "source_revision": claim.get("source_revision"),
-                }
-                if claim.get("accepted_attempt_id"):
-                    ledger_claim["accepted_attempt_id"] = claim["accepted_attempt_id"]
-                claims.append(ledger_claim)
-                if self.is_multi:
-                    claims[-1].update(
-                        {
-                            "claim_type": claim.get("claim_type", ""),
-                            "english_witness": claim.get("english_witness"),
-                            "witnesses_consulted": claim.get("witnesses_consulted", []),
-                        }
-                    )
-        return claims, dropped
-
     def _materialize(self):
-        NOTE_BY_SOURCE, SOURCE_BY_FILE = source_mappings(self.project, self.books)
+        notes, sources = source_mappings(self.project, self.books)
         for filename, bundle in self.bundles.items():
             if bundle["source"]["adapter"] == "markdown":
-                NOTE_BY_SOURCE[SOURCE_BY_FILE[filename]] = (
-                    f"wiki/summaries/{pathlib.Path(bundle['input_path']).stem}.md"
-                )
-        self.claims, dropped = self._ledger_rows(NOTE_BY_SOURCE, SOURCE_BY_FILE)
-        if dropped:
-            write_json(self.config.run_root / "verification" / "dropped-claims.json", dropped)
-            raise RuntimeError(
-                f"{len(dropped)} claim(s) could not be mapped to a manifest source; see dropped-claims.json"
-            )
-        if not self.claims:
-            raise RuntimeError("no claims survived materialization")
-        (self.config.field_root / "evidence" / "claims.jsonl").write_text(
-            "\n".join(json.dumps(c, ensure_ascii=False) for c in self.claims) + "\n", encoding="utf-8"
-        )
-        packet_execution = {}
-        claim_history = []
-        for sid, _, _ in self.results:
-            packet = json.loads((self.packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-            packet_execution[sid] = {"packet_revision": packet["packet_revision"], "execution": packet.get("execution")}
-            claim_history.extend(packet.get("claim_history") or [])
-        write_json(self.config.field_root / "evidence" / "packet-execution.json", packet_execution)
-        if claim_history:
-            write_json(self.config.field_root / "evidence" / "claim-history.json", claim_history)
-            write_json(self.config.run_root / "verification" / "claim-history.json", claim_history)
-        manifest_out = []
+                notes[sources[filename]] = f"wiki/summaries/{pathlib.Path(bundle['input_path']).stem}.md"
         present_names = {p.name for p in self.source_files}
+        source_rows = []
         for row in self.manifest_rows:
-            if pathlib.Path(row["snapshot"]).name not in present_names:
-                continue
-            row = dict(row)
-            row["snapshot"] = (
-                "evidence/snapshots/"
-                + snapshot_relative(self.config.source_dir / pathlib.Path(row["snapshot"]).name).as_posix()
-            )
-            manifest_out.append(json.dumps(row, ensure_ascii=False))
-        (self.config.field_root / "evidence" / "sources.jsonl").write_text(
-            "\n".join(manifest_out) + "\n", encoding="utf-8"
+            name = pathlib.Path(row["snapshot"]).name
+            if name in present_names:
+                relative = snapshot_relative(self.config.source_dir / name).as_posix()
+                source_rows.append(dict(row, snapshot="evidence/snapshots/" + relative))
+        self.claims = materialize_evidence(
+            self.config.field_root,
+            self.config.run_root,
+            [sid for sid, _, _ in self.results],
+            notes,
+            sources,
+            source_rows,
+            multi=self.is_multi,
         )
 
     def _run_gate(self, script, artifact, *extra):

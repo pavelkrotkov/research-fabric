@@ -6,6 +6,12 @@ filesystem writes or subprocesses. Constructing a `ResearchRun` is also inert;
 journal, claim identity, source adapters, gates and terminal-state owner remain
 authoritative.
 
+`publication.materialize_evidence` projects accepted packets and bound source
+rows into the existing ledgers and packet histories. It reads each packet once
+and returns the projected claims. The engine still runs the gates and delegates
+the proposed commit to `run_state.finalize_run`; materialization cannot declare
+a run ready. The rehearsal does not yet share this operation (#18).
+
 ```python
 from pathlib import Path
 from research_fabric.engine import ResearchRun, RunConfig
