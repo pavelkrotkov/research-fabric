@@ -40,3 +40,23 @@ jobs:
 
       - name: Run the deterministic grounding gate self-test
         run: uv run python bin/excerpt_grounding.py
+
+  native-compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install qualified native compiler and portable engine
+        run: |
+          uv venv
+          uv pip install -e . pytest -r tests/native-requirements.txt
+      - name: Exercise real native rollback and production retry without credentials
+        run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py

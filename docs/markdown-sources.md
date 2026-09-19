@@ -14,7 +14,7 @@ Markdown is decoded as strict UTF-8 and the derived view changes only line endin
 
 ## Images and other visual assets
 
-Local Markdown image references (`![alt](path)` and reference-style equivalents) must resolve beneath the snapshot directory. Missing or escaping paths fail closed, and publication copies referenced files beside the Markdown snapshot with the same relative path. Remote image URLs remain references and are not fetched.
+Local Markdown image references (`![alt](path)` and reference-style equivalents) must resolve beneath the snapshot directory. Missing or escaping paths fail closed, and publication copies referenced files beside the Markdown snapshot with the same relative path. Remote images are not fetched; required remote visuals block native preparation, while explicitly optional HTML visuals retain a limitation.
 
 The text-only pipeline verifies the Markdown representation and asset bytes, **not image/chart meaning**. Put a caption, transcription, or data description in ordinary Markdown text when visual content must support a claim; that text can then be excerpt-grounded normally. Image alt text and links are preserved, but must not be treated as pixel-content verification.
 
@@ -25,8 +25,10 @@ unpinned asset bytes. Published Markdown rows require representation metadata,
 and worker packet attestations include the asset digest so asset drift invalidates
 reuse. Existing metadata-free legacy HTML and text rows retain their policy.
 
-Publication preserves assets in evidence snapshots. Compiler input remains the
-source document only; complete compiler asset-bundle integration belongs to #12.
+Publication preserves assets in source-scoped evidence snapshots and validated
+[compiler/browser bundles](source-assets.md). Only prepared documents are passed
+to native compilation; their referenced derivatives remain available beside them,
+and bundled PDF/EPS originals are never ingested as separate documents.
 
 ## Native compatibility check and limits
 
@@ -35,6 +37,14 @@ It initializes a disposable KB, converts a synthetic Markdown formula through
 native `add_single_file`, executes the real short-document compiler, and checks
 its source, summary, index and hash registry. Only external model replies are
 scripted (a summary and a valid empty concept plan); no compiler result is mocked.
-This is a narrow native compatibility check, not a CAO end-to-end run to
-`READY_FOR_REVIEW`. That full-workflow acceptance remains unverified here and
-must compose with the native compile lifecycle work in #10.
+The qualified `tests/test_native_compilation.py` workflow fixture additionally
+executes Markdown with an image through fresh extraction and attested reuse, real
+native compilation, deterministic gates, a clean commit and `READY_FOR_REVIEW`.
+It verifies stable claim/execution records, browser assets and rehearsal against
+the production-compiled KB. External model responses and CAO transport/advice are
+scripted; live provider or CAO service execution is not claimed.
+
+Grounding reports record the original document filenames from their source
+ledger so repair hashes the same document set even when the source directory
+also contains assets. Packet attestations separately reject changed asset bytes.
+Legacy reports without filenames retain their strict whole-directory check.

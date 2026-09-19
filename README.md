@@ -61,8 +61,8 @@ reason at any point).
 
 ```
 workflows/research.py      the full pipeline (CAO workflow script)
-bin/direct_worker.py       evidence worker: HTML → text → one ox-alpha call → validated packet
-bin/repair_claims.py       claim-level repair: re-ground only failed claims against the source
+bin/direct_worker.py       evidence worker: HTML → text → configured API call → validated packet
+bin/repair_claims.py       claim-level repair: re-ground failed claims, then re-run all acceptance gates
 bin/excerpt_grounding.py   gate: every excerpt must be a verbatim substring of its snapshot
 bin/provenance_validate.py gate: claims ledger ↔ source ledger ↔ snapshot bytes
 bin/negative_controls.py   gate test-suite: known-bad packets must be rejected
@@ -96,6 +96,45 @@ and carry a `source-manifest.jsonl` (sha256 per snapshot) in the run root.
 The canonical manifest, derived from the project spec, lives at
 `corpora/<project>/source-manifest.jsonl` and is re-verified at publish.
 
+Claim repair also requires the run's isolated field root and project spec so
+the packet transition can be rechecked against the existing provenance,
+grounding, and acceptance gates:
+
+```bash
+python bin/repair_claims.py <run_root> <source_dir> <grounding_report.txt> \
+  --field-root <isolated-field-root> --project <projects/project.yaml>
+```
+
+Stable claim IDs are persisted at host acceptance, before any repair or ledger
+materialization. Repair reports bind packet state and source bytes; stale or
+unknown targets fail before mutation. Each atomic packet write includes its
+transition history; publication projects that history into its audit file.
+Repair validates a disposable evidence copy; rerun the publication workflow
+to materialize the repaired packet into the isolated proposed branch.
+
+Legacy positional reports require the **retained original published ledger**.
+Do not reconstruct that ledger from a packet that may have been filtered or
+reordered. Migrate and persist the packet before passing its old report to repair:
+
+```python
+from research_fabric.claims import atomic_write_json, migrate_legacy_packet
+
+# original_ledger rows must include source_file and source_revision from the
+# retained source ledger, joined by their original source_ids (never current bytes).
+# Missing original source correspondence is an error, not an inferred mapping.
+accepted = migrate_legacy_packet(packet, "book-1", original_ledger, source_dir=source_dir)
+atomic_write_json(packet_path, accepted)
+```
+
+If the original correspondence cannot be established, generate a new revision-bound
+report after host acceptance instead of applying an old positional report.
+Repair uses the shared source-adapter representation and re-verifies every
+present source attestation before any model call or packet write. Unsupported
+formats fail closed. Library callers can supply the same adapter registry used
+for extraction; pre-adapter packets retain their explicit compatibility path. A library call
+without `field_root` is packet-only and returns `fully_validated=False`; the CLI
+requires both the field root and project spec for full deterministic re-gating.
+
 ## Reproducibility chain
 
 Every successful run writes a `provenance` block into the run's `run.json`
@@ -108,12 +147,15 @@ KB commit (message includes run-id)
          └─ engine Git SHA + tag
          └─ project name + project-spec SHA
          └─ corpus manifest SHA + corpus sources content-hash
-         └─ model, provider, openkb/CAO/python versions
+         └─ per-attempt model/provider/usage histories + openkb/CAO/python versions
 ```
 
 The KB commit message ends with `run <run-id>` (e.g. "…Books 1-24; run
 20260825T154543Z-odyssey-full-publication7"), closing the loop from a claim in
 the KB back to the exact code, spec, corpus bytes, and model that produced it.
+
+See [execution profiles and resume](docs/execution-profiles.md) for role-specific
+model settings, configured fallback, shared budgets and recorded model changes.
 
 ## Host requirements (abstracted)
 
@@ -121,9 +163,13 @@ The full pipeline needs an installed environment. Exact controller paths and
 config are documented in `research-fabric-corpora` (private); here are the
 portable requirements:
 
-- A Python venv with the `openai` SDK (the direct-API worker — see ADR-0003).
+- Install the engine and its declared runtime dependencies with `uv sync`.
+  Claim persistence uses boltons for atomic replacement; no OAuth or model
+  credentials are needed for these filesystem operations.
 - `openkb` (pinned 0.4.5) and `cao` (CAO 2.4.1 + lifecycle patches), plus a
   local CAO server, for the orchestration layer.
+  The compile adapter also pins LiteLLM 1.87.2 and checks native compiler bytes;
+  see [compile qualification and recovery](docs/compilation-attempts.md).
 - An OpenRouter-capable API key for the worker model (set via the
   `OPENROUTER_API_KEY` environment variable; the worker falls back to
   reading it from the host's Hermes env file if unset).
@@ -165,3 +211,9 @@ matters more than certainty and the human stays in the loop on every ingest.
 research-fabric is right for fixed, authoritative corpora (primary texts,
 specs, legal documents) where a single hallucinated quote is poison and the
 corpus must be re-verifiable years later without the original session.
+
+Markdown visual assets use [validated source bundles](docs/source-assets.md): byte-exact
+originals, bounded PDF/EPS raster derivatives, and manifest-driven browser export.
+Optional source-image inspection is available through the
+[native OAuth visual preflight](docs/visual-preflight.md). It records derived,
+unreviewed notes and incomplete coverage; text-only runs do not require OAuth.

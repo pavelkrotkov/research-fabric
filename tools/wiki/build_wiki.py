@@ -24,6 +24,12 @@ import os
 import pathlib
 import re
 import shutil
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
+from research_fabric._source_assets import export_assets  # noqa: E402
+
+ASSET_PATHS = {}
 
 SRC = None
 DST = None
@@ -58,7 +64,11 @@ def convert(text: str, page_dir: pathlib.Path) -> str:
                 return f"**{alias}**"
         return f"[{alias}]({href})"
 
-    return re.sub(r"\[\[([^\]]+)\]\]", repl, text)
+    text = re.sub(r"\[\[([^\]]+)\]\]", repl, text)
+    for asset in ASSET_PATHS:
+        relative = pathlib.Path(os.path.relpath(SRC / asset, page_dir)).as_posix()
+        text = text.replace("](" + asset + ")", "](" + relative + ")")
+    return text
 
 
 def book_sort_key(rel):
@@ -151,7 +161,7 @@ def sort_index_page(text: str) -> str:
 
 
 def main():
-    global SRC, DST
+    global SRC, DST, ASSET_PATHS
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault", default=os.environ.get("WIKI_VAULT"), help="path to the source OpenKB wiki/ vault")
     ap.add_argument("--site", default=os.environ.get("WIKI_SITE_NAME", "Research KB"), help="MkDocs site_name")
@@ -174,6 +184,7 @@ def main():
     if DST.exists():
         shutil.rmtree(DST)
     DST.mkdir(parents=True)
+    ASSET_PATHS = export_assets(SRC, DST)
     n = 0
     for md in SRC.rglob("*.md"):
         rel = md.relative_to(SRC)

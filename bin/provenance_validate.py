@@ -84,6 +84,7 @@ def main() -> int:
     source_rows = load_jsonl(evidence / "sources.jsonl")
     claim_rows = load_jsonl(evidence / "claims.jsonl")
     source_ids = set()
+    sources_by_id = {}
     for line, row in source_rows:
         missing = SOURCE_KEYS - row.keys()
         if missing:
@@ -92,6 +93,7 @@ def main() -> int:
         if sid in source_ids:
             errors.append(f"duplicate source_id: {sid}")
         source_ids.add(sid)
+        sources_by_id[sid] = row
         errors.extend(source_errors(root, row, sid))
     claim_ids = set()
     for line, row in claim_rows:
@@ -99,6 +101,8 @@ def main() -> int:
         if missing:
             errors.append(f"claims.jsonl:{line}: missing {sorted(missing)}")
         cid = row.get("claim_id")
+        if not isinstance(cid, str) or not cid.strip():
+            errors.append(f"missing claim_id: claims.jsonl:{line}")
         if cid in claim_ids:
             errors.append(f"duplicate claim_id: {cid}")
         claim_ids.add(cid)
@@ -109,6 +113,16 @@ def main() -> int:
         for sid in row.get("source_ids", []):
             if sid not in source_ids:
                 errors.append(f"unknown source_id {sid} in claim {cid}")
+        source_revision = row.get("source_revision")
+        if source_revision is not None:
+            cited_revisions = {
+                sources_by_id[sid].get("sha256") for sid in row.get("source_ids", []) if sid in sources_by_id
+            }
+            if source_revision not in cited_revisions:
+                errors.append(f"source revision mismatch: {cid}")
+        for field in ("packet_revision", "packet_state_revision", "accepted_attempt_id"):
+            if field in row and (not isinstance(row[field], str) or not row[field].strip()):
+                errors.append(f"bad {field}: {cid}")
         confidence = row.get("confidence")
         if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
             errors.append(f"bad confidence: {cid}")
