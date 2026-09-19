@@ -165,3 +165,6 @@ matters more than certainty and the human stays in the loop on every ingest.
 research-fabric is right for fixed, authoritative corpora (primary texts,
 specs, legal documents) where a single hallucinated quote is poison and the
 corpus must be re-verifiable years later without the original session.
+
+Markdown visual assets use [validated source bundles](docs/source-assets.md): byte-exact
+originals, bounded PDF/EPS raster derivatives, and manifest-driven browser export.

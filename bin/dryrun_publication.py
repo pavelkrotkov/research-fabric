@@ -27,7 +27,13 @@ FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
-from research_fabric.sources import bind_manifest, discover_sources, representation_for, source_bundle  # noqa: E402
+from research_fabric.sources import (  # noqa: E402
+    bind_manifest,
+    copy_source_snapshot,
+    discover_sources,
+    representation_for,
+    snapshot_relative,
+)
 
 
 def _load_project(name):
@@ -90,13 +96,7 @@ def _publish_sources(field_root: pathlib.Path, source_files: list[pathlib.Path])
     snap_dest = field_root / "evidence" / "snapshots"
     snap_dest.mkdir(parents=True, exist_ok=True)
     for src in source_files:
-        for original, relative in source_bundle(src):
-            dest = snap_dest / relative
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                dest.chmod(0o644)
-            shutil.copy2(original, dest)
-            dest.chmod(0o444)
+        copy_source_snapshot(src, snap_dest)
     print(f"[dryrun] snapshots copied: {len(source_files)}")
     return snap_dest
 
@@ -154,7 +154,8 @@ def _write_sources_manifest(field_root, source_files, manifest_rows):
         if pathlib.Path(row["snapshot"]).name not in present_names:
             continue
         row = dict(row)
-        row["snapshot"] = "evidence/snapshots/" + pathlib.Path(row["snapshot"]).name
+        source = next(path for path in source_files if path.name == pathlib.Path(row["snapshot"]).name)
+        row["snapshot"] = "evidence/snapshots/" + snapshot_relative(source).as_posix()
         manifest_out.append(json.dumps(row, ensure_ascii=False))
     (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n")
 
@@ -189,16 +190,14 @@ def _grounding_misses(snap_dest, source_by_file, claims):
     sys.path.insert(0, str(FABRIC / "bin"))
     import excerpt_grounding
 
-    snaps = {}
-    for name in source_by_file:
-        path = snap_dest / name
-        if path.is_file():
-            snaps[name] = representation_for(path).text
-    file_by_source = {source_id: name for name, source_id in source_by_file.items()}
+    rows = [
+        json.loads(line) for line in filter(str.strip, (snap_dest.parent / "sources.jsonl").read_text().splitlines())
+    ]
+    snapshots = {row["source_id"]: snap_dest.parent.parent / row["snapshot"] for row in rows}
+    snaps = {source_id: representation_for(path).text for source_id, path in snapshots.items()}
     misses = []
     for claim in claims:
-        snap_name = file_by_source[claim["source_ids"][0]]
-        if not excerpt_grounding.grounded(claim["excerpt"], snaps[snap_name]):
+        if not excerpt_grounding.grounded(claim["excerpt"], snaps[claim["source_ids"][0]]):
             misses.append((claim["claim_id"], re.sub(r"\s+", " ", claim["excerpt"])[:80]))
     print(f"[dryrun] excerpt grounding: {len(claims) - len(misses)}/{len(claims)} grounded")
     for cid, frag in misses[:10]:
@@ -233,6 +232,19 @@ def _commit(field_root, project_name: str, claim_count: int) -> str:
     return status
 
 
+def _published_notes(field_root, source_files, note_by_source, source_by_file):
+    """Derive native note identity from the published source bundle."""
+    for source in source_files:
+        key = snapshot_relative(source).parent.name
+        bundle_path = field_root / "wiki" / "assets" / key / "bundle.json"
+        if bundle_path.is_file():
+            manifest = json.loads(bundle_path.read_text())
+            doc_name = pathlib.Path(manifest["input_path"]).stem
+            if doc_name != key or manifest["key"] != key:
+                raise ValueError("published native source identity drift")
+            note_by_source[source_by_file[source.name]] = f"wiki/summaries/{doc_name}.md"
+
+
 def main() -> int:
     args = _parse_args()
     run_root = pathlib.Path(args.run_root).resolve()
@@ -242,6 +254,7 @@ def main() -> int:
     workdir, field_root = _clone(args.field_repo, args.branch)
     manifest_rows = _manifest(run_root, project, source_files)
     snap_dest = _publish_sources(field_root, source_files)
+    _published_notes(field_root, source_files, note_by_source, source_by_file)
     claims = _materialize_claims(run_root / "evidence", field_root, note_by_source, source_by_file)
     if claims is None:
         return 1
