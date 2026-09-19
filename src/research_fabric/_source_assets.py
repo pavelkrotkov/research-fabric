@@ -13,8 +13,7 @@ from urllib.parse import quote, urlsplit
 
 from PIL import Image
 
-from ._asset_input import literal_caption, normalize_images
-from ._source_adapter import _local_asset, visual_references
+from ._source_adapter import _local_asset, _visual_source, literal_caption
 
 POLICY = {"version": 1, "page": 1, "region": "whole-page", "max_pixels": 1600, "timeout_seconds": 30}
 MAX_BYTES = 20_000_000
@@ -161,9 +160,8 @@ def _record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> dict:
 
 
 def _derived_text(text: str, records: list[dict], key: str) -> str:
-    result = normalize_images(text)
     if not records:
-        return result
+        return text
     gallery = []
     for number, row in enumerate(records, 1):
         gallery.append(f"\nFigure {number}; source locator: {json.dumps(row['locator'], sort_keys=True)}\n")
@@ -174,7 +172,7 @@ def _derived_text(text: str, records: list[dict], key: str) -> str:
             gallery.append(f"[Original figure {number}](../assets/{key}/{quote(row['original_path'])})\n")
         if row.get("limitation"):
             gallery.append("Visual unavailable:\n\n" + literal_caption(row["limitation"]) + "\n")
-    return result + "\n\n## Source figures\n" + "\n".join(gallery)
+    return text + "\n\n## Source figures\n" + "\n".join(gallery)
 
 
 def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation: dict) -> dict:
@@ -191,10 +189,10 @@ def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation:
         verify_bundle(root, manifest)
         return manifest
     normalized = source.suffix.lower() in (".md", ".markdown")
-    references = visual_references(raw.decode("utf-8")) if normalized else []
+    references, text = _visual_source(raw.decode("utf-8")) if normalized else ([], "")
     records = [_record(source, reference, root) for reference in references]
     _write(root, "original/" + source.name, raw)
-    prepared = _derived_text(raw.decode("utf-8"), records, key).encode() if normalized else raw
+    prepared = _derived_text(text, records, key).encode() if normalized else raw
     input_name = key + ".md" if normalized else source.name
     _write(root, "prepared/" + input_name, prepared)
     manifest = {
@@ -236,8 +234,7 @@ def _verify_source(root: pathlib.Path, manifest: dict) -> None:
 
 
 def _verify_mapping(source: pathlib.Path, manifest: dict) -> bytes:
-    text = source.read_bytes().decode("utf-8")
-    references = visual_references(text)
+    references, text = _visual_source(source.read_bytes().decode("utf-8"))
     actual = [{key: row[key] for key in reference} for row, reference in zip(manifest["assets"], references)]
     if actual != references or len(actual) != len(manifest["assets"]):
         raise ValueError("bundle reference mapping drift")

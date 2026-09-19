@@ -10,6 +10,7 @@ from typing import Protocol
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline import html_inline, image
 
 
 class SourceAdapter(Protocol):
@@ -76,7 +77,45 @@ class HTMLAdapter:
         return {"content_type": "text/html", "filename": path.name}
 
 
+_NATIVE_IMAGE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _lines(text):
+    # CommonMark lines end at CR/LF, not at Unicode paragraph separators.
+    return re.findall(r"[^\r\n]*(?:\r\n|\r|\n|$)", text)[:-1]
+
+
+def _positioned(rule):
+    def parse(state, silent):
+        start = state.pos
+        matched = rule(state, silent)
+        if matched and not silent:
+            state.tokens[-1].meta["source_span"] = (start, state.pos)
+        return matched
+
+    return parse
+
+
+def _source_positions(content, lines, start):
+    """Map parser-stripped container prefixes back to original character offsets."""
+    positions = []
+    for fragment, line in zip(_lines(content), lines):
+        body = fragment.rstrip("\r\n")
+        column = line.find(body)
+        if column < 0:
+            raise ValueError("cannot map visual reference to original source")
+        positions.extend(range(start + column, start + column + len(body)))
+        if fragment.endswith("\n"):
+            positions.append(start + len(line) - 1)
+        start += len(line)
+    if len(positions) != len(content):
+        raise ValueError("incomplete visual source position mapping")
+    return positions
+
+
 _MARKDOWN = MarkdownIt("commonmark")
+_MARKDOWN.inline.ruler.at("image", _positioned(image))
+_MARKDOWN.inline.ruler.at("html_inline", _positioned(html_inline))
 
 
 class _VisualHTML(HTMLParser):
@@ -148,27 +187,62 @@ class _VisualHTML(HTMLParser):
 
 def _token_visual(child, parser):
     if child.type in ("html_inline", "html_block"):
-        parser.references = []
-        parser.feed(child.content)
-        return parser.references
+        edits = parser.visual_edits(child.content)
+        if child.type == "html_inline":
+            start = child.meta["source_span"][0]
+            edits = [(start + a, start + b, value) for a, b, value in edits]
+        return parser.references, edits
     if child.type == "image" and not parser.inert:
-        return [{"target": child.attrGet("src"), "syntax": "image", "caption": child.content, "required": True}]
-    return []
+        row = {"target": child.attrGet("src"), "syntax": "image", "caption": child.content, "required": True}
+        return [row], [(*child.meta["source_span"], "[Figure]")]
+    return [], []
+
+
+def _block_visual(token, parser):
+    locator = {"lines": [n + 1 for n in token.map]} if token.map else {}
+    rows = []
+    edits = []
+    for child in token.children or [token]:
+        child_rows, child_edits = _token_visual(child, parser)
+        rows.extend({**row, "locator": locator} for row in child_rows)
+        edits.extend(child_edits)
+    return rows, edits
+
+
+def _source_edits(token, edits, lines):
+    if not edits:
+        return []
+    first, last = token.map
+    positions = _source_positions(token.content, lines[first:last], sum(map(len, lines[:first])))
+    return [(positions[a], positions[b - 1] + 1, value) for a, b, value in edits]
+
+
+def _visual_source(text: str) -> tuple[list[dict], str]:
+    """Discover and rewrite references in one CommonMark pass."""
+    result = []
+    edits = []
+    lines = _lines(text)
+    parser = _VisualHTML()
+    for token in _MARKDOWN.parse(text):
+        rows, local = _block_visual(token, parser)
+        result.extend(rows)
+        edits.extend(_source_edits(token, local, lines))
+    for start, end, value in sorted(edits, reverse=True):
+        text = text[:start] + value + text[end:]
+    text = _NATIVE_IMAGE.sub(lambda match: "&#33;" + match.group()[1:], text)
+    return result, text
 
 
 def visual_references(text: str) -> list[dict]:
     """Discover active images; locators retain one-based, end-exclusive block lines."""
-    result = []
-    parser = _VisualHTML()
-    for token in _MARKDOWN.parse(text):
-        locator = {"lines": [n + 1 for n in token.map]} if token.map else {}
-        for child in token.children or [token]:
-            result.extend({**row, "locator": locator} for row in _token_visual(child, parser))
-    return result
+    return _visual_source(text)[0]
 
 
-def _image_targets(text: str) -> list[str]:
-    return [row["target"] for row in visual_references(text) if row["syntax"] != "srcset"]
+def literal_caption(caption):
+    """Literal captions keep scientific notation and cannot activate HTML tags."""
+    fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", caption)), default=0))
+    caption = _NATIVE_IMAGE.sub(lambda match: "&#33;" + match.group()[1:], caption)
+    return f"{fence}text\n{caption}\n{fence}"
 
 
 def _local_asset(target: str) -> str | None:
@@ -194,7 +268,8 @@ class MarkdownAdapter:
         return locator.strip()
 
     def assets(self, decoded: str) -> tuple[str, ...]:
-        local = (_local_asset(target) for target in _image_targets(decoded))
+        references = visual_references(decoded)
+        local = (_local_asset(row["target"]) for row in references if row["syntax"] != "srcset")
         return tuple(dict.fromkeys(asset for asset in local if asset))
 
     def metadata(self, path: pathlib.Path) -> dict[str, str]:
