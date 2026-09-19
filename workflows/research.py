@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 
-from cao_workflow import ShimError, emit_output, get_inputs, run_step
+from cao_workflow import emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.compilation import assert_run_branch, compile_with_recovery, normalize_generated_log
@@ -309,53 +309,48 @@ with run_lifecycle(run_root):
         theme = theme_match.group(1) if theme_match else None
         worker_sources = WORKER_SOURCE_FILES[sid]
         book_label = worker_sources[0].name
-        attempts = []
-        for attempt in range(1, 2):
-            try:
-                if IS_MULTI:
-                    canon_label = book_label
-                    witness_args = []
-                    for w in WITNESSES:
-                        wfile = project["book_label_template"].format(n=b, w=w)
-                        wid = project["source_id_template"].format(n=b, w=w)
-                        witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
-                    cmd = [
-                        DIRECT_WORKER_PY,
-                        AENEID_WORKER,
-                        str(run_root),
-                        str(source_dir),
-                        str(b),
-                        canon_label,
-                        theme or "",
-                    ] + witness_args
-                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
-                else:
-                    proc = subprocess.run(
-                        [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
-                        capture_output=True,
-                        text=True,
-                        timeout=1500,
-                    )
-                packet = packet_dir / f"worker-{sid}.json"
-                if proc.returncode != 0 or not packet.exists():
-                    raise RuntimeError(
-                        f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
-                    )
-                packet_data = json.loads(packet.read_text(encoding="utf-8"))
-                defects = _packet_defects(packet_data, sid)
-                attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
-                if not defects:
-                    return sid, proc.stdout.strip(), None
-            except ShimError as exc:
-                attempts.append({"attempt": attempt, "error": str(exc)})
-            except (subprocess.TimeoutExpired, RuntimeError) as exc:
-                attempts.append({"attempt": attempt, "error": str(exc)[:400]})
-            except Exception as exc:
-                attempts.append({"attempt": attempt, "error": f"unexpected: {exc}"})
-        write_json(packet_dir / f"worker-{sid}.json", {"worker": sid, "attempts": attempts, "parsed": None})
-        last = attempts[-1] if attempts else {}
-        reason = last.get("error") or "; ".join(last.get("defects", [])) or "unknown"
-        return sid, "", f"direct worker returned no valid evidence packet after attempts ({reason})"
+        try:
+            if IS_MULTI:
+                canon_label = book_label
+                witness_args = []
+                for w in WITNESSES:
+                    wfile = project["book_label_template"].format(n=b, w=w)
+                    wid = project["source_id_template"].format(n=b, w=w)
+                    witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
+                cmd = [
+                    DIRECT_WORKER_PY,
+                    AENEID_WORKER,
+                    str(run_root),
+                    str(source_dir),
+                    str(b),
+                    canon_label,
+                    theme or "",
+                ] + witness_args
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
+            else:
+                proc = subprocess.run(
+                    [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=1500,
+                )
+            packet = packet_dir / f"worker-{sid}.json"
+            if proc.returncode != 0 or not packet.exists():
+                raise RuntimeError(
+                    f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
+                )
+            packet_data = json.loads(packet.read_text(encoding="utf-8"))
+            defects = _packet_defects(packet_data, sid)
+            result = {"stdout": proc.stdout.strip()[-200:], "defects": defects}
+            if not defects:
+                return sid, proc.stdout.strip(), None
+        except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            result = {"error": str(exc)[:400]}
+        except Exception as exc:
+            result = {"error": f"unexpected: {exc}"}
+        write_json(packet_dir / f"worker-{sid}.json", {"worker": sid, "attempts": [result], "parsed": None})
+        reason = result.get("error") or "; ".join(result.get("defects", [])) or "unknown"
+        return sid, "", f"direct worker returned no valid evidence packet ({reason})"
 
 
     if reuse_evidence_dir:

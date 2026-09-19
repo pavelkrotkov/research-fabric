@@ -164,44 +164,6 @@ def test_real_direct_worker_invalid_response_and_effort(tmp_path, source, transp
     assert packet["execution"][1]["actual_model"] == "gpt-5-returned"
 
 
-def test_real_multistage_worker_shares_profile_and_records_each_call(tmp_path, transport, monkeypatch):
-    calls, replies = transport
-    run, sources = tmp_path / "run", tmp_path / "sources"
-    sources.mkdir()
-    (sources / "latin.html").write_text("<p>Arma virumque cano</p>")
-    (sources / "english.html").write_text("<p>Arms and the man I sing</p>")
-    ex.configure(run, ex.resolve({"project": "aeneid"}, environ={}))
-    claim = {
-        "claim": "The poet sings",
-        "excerpt": "Arma virumque cano",
-        "locator": "Aen.1.1",
-        "source_file": "latin.html",
-    }
-    selection = {"i": 1, "translator": "Kline", "source_id": "s-english", "excerpt": "Arms and the man I sing"}
-    replies.extend(
-        (200, json.dumps(value), "z-ai/glm-5.3-flash", None)
-        for value in ({"claims": [claim]}, {"selections": [selection]}, {"selections": [selection]})
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "aeneid_worker.py",
-            str(run),
-            str(sources),
-            "1",
-            "latin.html",
-            "theme",
-            "--witness",
-            "Kline:s-english:english.html",
-        ],
-    )
-    runpy.run_path(str(ROOT / "bin/aeneid_worker.py"), run_name="__main__")
-    packet = json.loads((run / "evidence/worker-book-1.json").read_text())
-    assert len(calls) == len(packet["execution"]) == 3
-    assert all(row["actual_model"] == "z-ai/glm-5.3-flash" for row in packet["execution"])
-
-
 def test_real_repair_uses_role_profile_and_shared_history(tmp_path, source, transport, monkeypatch):
     calls, replies = transport
     run = tmp_path / "run"
@@ -375,6 +337,7 @@ def test_restricted_artifact_requires_original_extraction_history():
     "case",
     [
         "second-witness",
+        "one-witness",
         "invented-selection",
         "missing-selection",
         "invalid-index",
@@ -402,13 +365,17 @@ def test_real_aeneid_stage_grounding_and_fallback(tmp_path, transport, monkeypat
     if case == "json-retry":
         replies.append((200, "[invalid JSON", "z-ai/glm-5.3-flash", None))
     if case != "no-latin":
-        for text in ("Arms and the man I sing", "I sing of arms and a man"):
+        for text in (
+            ("Arms and the man I sing",)
+            if case == "one-witness"
+            else ("Arms and the man I sing", "I sing of arms and a man")
+        ):
             values.append({"selections": [] if case == "no-witness" else [{"i": "1", "excerpt": text}]})
     if case not in ("no-latin", "no-witness"):
         selection = {
             "i": "bad" if case == "invalid-index" else 1,
-            "translator": "Mackail",
-            "excerpt": "I sing of arms and a man",
+            "translator": "Kline" if case == "one-witness" else "Mackail",
+            "excerpt": "Arms and the man I sing" if case == "one-witness" else "I sing of arms and a man",
         }
         if case == "invented-selection":
             selection["excerpt"] = "Model invented this rendering"
@@ -426,9 +393,8 @@ def test_real_aeneid_stage_grounding_and_fallback(tmp_path, transport, monkeypat
             "theme",
             "--witness",
             "Kline:s-kline:kline.html",
-            "--witness",
-            "Mackail:s-mackail:mackail.html",
-        ],
+        ]
+        + ([] if case == "one-witness" else ["--witness", "Mackail:s-mackail:mackail.html"]),
     )
     output = run / "evidence/worker-book-1.json"
     if case in ("no-latin", "no-witness"):
@@ -443,10 +409,12 @@ def test_real_aeneid_stage_grounding_and_fallback(tmp_path, transport, monkeypat
     chosen = "Mackail" if case in ("second-witness", "json-retry") else "Kline"
     assert row["english_witness"]["translator"] == chosen
     assert row["english_witness"]["excerpt"] in (sources / f"{chosen.lower()}.html").read_text()
-    assert set(row["witnesses_consulted"]) == {"s-kline", "s-mackail"}
-    assert len(row["witnesses_consulted"]) == 2
-    assert len(packet["source_provenance"]) == 3
-    assert len(calls) == (5 if case == "json-retry" else 4)
+    witnesses = {"s-kline"} if case == "one-witness" else {"s-kline", "s-mackail"}
+    assert set(row["witnesses_consulted"]) == witnesses
+    assert len(row["witnesses_consulted"]) == len(witnesses)
+    assert len(packet["source_provenance"]) == len(witnesses) + 1
+    assert len(calls) == len(packet["execution"]) == len(witnesses) + 2 + (case == "json-retry")
+    assert all(row["actual_model"] == "z-ai/glm-5.3-flash" for row in packet["execution"])
     if case == "json-retry":
         assert packet["execution"][0]["outcome"] == "invalid_output"
 

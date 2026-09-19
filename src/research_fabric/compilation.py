@@ -36,13 +36,37 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from research_fabric._openkb045 import POLICY, CompilationError, native_compile
+from research_fabric.execution import configured, history
 from research_fabric.execution_native import (
     _attempt_limit,
-    _check_retry_allowed,
     _compile_checkpoint,
     _execution_arguments,
-    _execution_identity,
 )
+
+
+def _execution_identity(root):
+    if root is None:
+        return None
+
+    revision, config = configured(root)
+    return {
+        "revision": revision,
+        "config": config,
+        "code": {
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("execution.py", "execution_native.py", "_execution_profiles.py", "_execution_journal.py")
+        },
+    }
+
+
+def _check_retry_allowed(root, checkpoint):
+    if root is None:
+        return
+
+    rows = [r for r in history(root)["attempts"] if r["id"] > checkpoint and r["role"] == "compile"]
+    terminal = {None, "authentication", "credential_unavailable", "configuration_or_transport"}
+    if any(r["outcome"] in terminal for r in rows):
+        raise CompilationError("Native execution requires operator configuration/cancellation before retry")
 
 
 def digest(path):

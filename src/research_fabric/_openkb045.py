@@ -23,6 +23,8 @@ from collections import Counter
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
+from research_fabric.execution_native import native_execution
+
 POLICY = "native-045-complete-v1"
 COMPILER_SHA = "9d697d323100916017e25c0826efb3922092f56fe8971b13d725ce80b898d1da"
 
@@ -198,8 +200,6 @@ def native_compile(kb, sources, execution_root=None, profile_index=0):
     """
     cli, compiler, versions = _native_modules()
     from openkb.state import HashRegistry
-
-    from research_fabric.execution_native import native_execution
 
     execution = (
         native_execution(execution_root, sources, compiler, cli, profile_index) if execution_root else nullcontext()

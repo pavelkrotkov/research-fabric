@@ -4,13 +4,10 @@ A failed required operation escapes to #10's disposable-candidate recovery.
 Fallback selection happens only when starting another pristine candidate.
 """
 
-import hashlib
-import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from research_fabric._openkb045 import CompilationError
-from research_fabric.execution import ExecutionError, Session, _validated, classify, configured, history
+from research_fabric.execution import ExecutionError, Session, _validated, configured, history
 
 
 def native_model(profile):
@@ -39,35 +36,19 @@ def native_execution(root, sources, compiler, cli, index):
             raise
         kwargs.update(session.arguments(profile, timeout, kwargs.get("max_tokens")))
         kwargs.update(model=native_model(profile), num_retries=0, max_retries=0)
-        return attempt, time.monotonic(), timeout
+        return attempt, timeout
 
     def sync(**kwargs):
-        attempt, started, timeout = prepare(kwargs)
-        response, outcome = None, "configuration_or_transport"
-        try:
-            response = original_sync(**kwargs)
-            _validated(response, lambda text: text)
-            outcome = "accepted"
-            return response
-        except Exception as exc:
-            outcome = classify(exc)
-            raise ExecutionError(outcome) from None
-        finally:
-            session.finish(attempt, response, outcome, time.monotonic() - started)
+        with session.attempt(*prepare(kwargs)) as call:
+            call.response = original_sync(**kwargs)
+            _validated(call.response, lambda text: text)
+            return call.response
 
     async def asynchronous(**kwargs):
-        attempt, started, timeout = prepare(kwargs)
-        response, outcome = None, "configuration_or_transport"
-        try:
-            response = await original_async(**kwargs)
-            _validated(response, lambda text: text)
-            outcome = "accepted"
-            return response
-        except Exception as exc:
-            outcome = classify(exc)
-            raise ExecutionError(outcome) from None
-        finally:
-            session.finish(attempt, response, outcome, time.monotonic() - started)
+        with session.attempt(*prepare(kwargs)) as call:
+            call.response = await original_async(**kwargs)
+            _validated(call.response, lambda text: text)
+            return call.response
 
     cli.load_config = config
     compiler.litellm.completion, compiler.litellm.acompletion = sync, asynchronous
@@ -80,21 +61,6 @@ def native_execution(root, sources, compiler, cli, index):
     finally:
         cli.load_config = original_config
         compiler.litellm.completion, compiler.litellm.acompletion = original_sync, original_async
-
-
-def _execution_identity(root):
-    if root is None:
-        return None
-
-    revision, config = configured(root)
-    return {
-        "revision": revision,
-        "config": config,
-        "code": {
-            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ("execution.py", "execution_native.py", "_execution_profiles.py", "_execution_journal.py")
-        },
-    }
 
 
 def _attempt_limit(root, attempts):
@@ -115,13 +81,3 @@ def _compile_checkpoint(root):
         return 0
 
     return max((r["id"] for r in history(root)["attempts"]), default=0)
-
-
-def _check_retry_allowed(root, checkpoint):
-    if root is None:
-        return
-
-    rows = [r for r in history(root)["attempts"] if r["id"] > checkpoint and r["role"] == "compile"]
-    terminal = {None, "authentication", "credential_unavailable", "configuration_or_transport"}
-    if any(r["outcome"] in terminal for r in rows):
-        raise CompilationError("Native execution requires operator configuration/cancellation before retry")

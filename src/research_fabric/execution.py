@@ -11,7 +11,9 @@ import hashlib
 import os
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from openai import OpenAI
 
@@ -52,13 +54,6 @@ def classify(exc):
     ):
         return "transient"
     return "configuration_or_transport"
-
-
-def _connection_failure(exc):
-    return isinstance(exc, (TimeoutError, ConnectionError)) or type(exc).__name__ in (
-        "APITimeoutError",
-        "APIConnectionError",
-    )
 
 
 def _usage(response):
@@ -156,26 +151,32 @@ class Session:
         for index in range(self.config["budget"]["attempts"]):
             profile = profiles[min(index, len(profiles) - 1)]
             try:
-                return self._call_once(profile, messages, validate, max_tokens)
+                with self.attempt(*self.begin(profile)) as call:
+                    kwargs = self.arguments(profile, call.timeout, max_tokens)
+                    call.response = _client(profile, call.timeout).chat.completions.create(messages=messages, **kwargs)
+                    return _validated(call.response, validate)
             except ExecutionError as exc:
                 if exc.reason not in ("transient", "invalid_output"):
                     raise
         raise ExecutionError("attempt_limit")
 
-    def _call_once(self, profile, messages, validate, max_tokens):
-        attempt, timeout = self.begin(profile)
-        started, response, outcome = time.monotonic(), None, "configuration_or_transport"
+    @contextmanager
+    def attempt(self, attempt, timeout):
+        """Record one reserved call, including invalid output and failed transport.
+
+        Callers set response before validating it so rejected content is charged.
+        Usage acceptance in finally must succeed before a result can escape.
+        """
+        call = SimpleNamespace(response=None, timeout=timeout)
+        started, outcome = time.monotonic(), "configuration_or_transport"
         try:
-            kwargs = self.arguments(profile, timeout, max_tokens)
-            response = _client(profile, timeout).chat.completions.create(messages=messages, **kwargs)
-            result = _validated(response, validate)
+            yield call
             outcome = "accepted"
-            return result
         except Exception as exc:
             outcome = classify(exc)
             raise ExecutionError(outcome) from None
         finally:
-            self.finish(attempt, response, outcome, time.monotonic() - started)
+            self.finish(attempt, call.response, outcome, time.monotonic() - started)
 
     def arguments(self, profile, timeout, max_tokens=None):
         result = {
