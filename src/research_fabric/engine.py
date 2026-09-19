@@ -132,6 +132,7 @@ class ResearchRun:
     def __init__(self, config, agent_step, *, agent_provider=None):
         self.config, self.agent_step = config, agent_step
         self.agent_provider = agent_provider
+        self.reading_plan = None
         self.packet_dir = config.run_root / "evidence"
         self.snap_dest = config.field_root / "evidence/snapshots"
         self.compiler_dir = config.run_root / "compiler-sources"
@@ -181,7 +182,6 @@ class ResearchRun:
         self.canonical_manifest = (
             self.config.engine_root / "corpora" / self.project["corpus_dir"] / self.project["manifest_path"]
         ).resolve()
-        self.reading_plan = None
         self.book_re = re.compile(self.project.get("snapshot_pattern", ""))
         self.witnesses = list((self.project.get("witnesses") or {}).keys())
         self.canonical = self.project.get("canonical_variant", "latin")
