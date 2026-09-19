@@ -170,16 +170,49 @@ def test_real_repair_uses_role_profile_and_shared_history(tmp_path, source, tran
     (run / "evidence").mkdir(parents=True)
     ex.configure(run, configuration(roles={"repair": {"model": "repair-B"}}))
     packet = run / "evidence/worker-book-1.json"
-    packet.write_text(
-        json.dumps({"parsed": {"claims": [{"claim": "Athena speaks", "excerpt": "wrong"}]}, "attempts": []})
+    from research_fabric.claims import accept_packet, source_revision, stable_revision
+
+    data = accept_packet(
+        {
+            "parsed": {
+                "claims": [
+                    {
+                        "claim": "Athena speaks",
+                        "excerpt": "wrong",
+                        "source_file": source.name,
+                        "locator": "1",
+                        "stance": "supports",
+                    }
+                ]
+            }
+        },
+        "book-1",
+        source_dir=source.parent,
     )
+    packet.write_text(json.dumps(data))
+    metadata = {
+        "version": 1,
+        "source_revision": source_revision(source.parent),
+        "packets": {"book-1": {key: data[key] for key in ("packet_revision", "packet_state_revision")}},
+        "failures": [
+            {"claim_id": "c-book-1-1", "worker": "book-1", "old_excerpt": "wrong", "reason": "excerpt not found"}
+        ],
+    }
+    metadata["report_id"] = stable_revision(metadata)
     report = run / "report.txt"
-    report.write_text("c-book-1-1: excerpt not found\n")
+    report.write_text("REPORT-META: " + json.dumps(metadata))
     replies.append((200, json.dumps({"found": True, "excerpt": "Athena spoke"}), "repair-actual", None))
-    monkeypatch.setattr(sys, "argv", ["repair_claims.py", str(run), str(source.parent), str(report)])
-    runpy.run_path(str(ROOT / "bin/repair_claims.py"), run_name="__main__")
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    repair = runpy.run_path(str(ROOT / "bin/repair_claims.py"))
+    result = repair["repair_claims"](run, source.parent, report, acceptance={"min_claims": 1})
+    assert result["repaired"] == 1
     assert calls[0]["model"] == "repair-B"
-    assert json.loads(packet.read_text())["execution"][0]["actual_model"] == "repair-actual"
+    accepted = json.loads(packet.read_text())
+    assert accepted["execution"][0]["actual_model"] == "repair-actual"
+    assert accepted["claim_history"][-1]["claim_id"] == "c-book-1-1"
+    assert accepted["parsed"]["claims"][0]["excerpt"] == "Athena spoke"
+    repair["repair_claims"](run, source.parent, report, acceptance={"min_claims": 1})
+    assert len(calls) == 1
 
 
 def test_known_token_limit_rejects_response_and_records_usage(tmp_path, source, transport):

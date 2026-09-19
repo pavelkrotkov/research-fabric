@@ -119,12 +119,25 @@ def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path
     reuse_function = next(
         node for node in workflow.body if isinstance(node, ast.FunctionDef) and node.name == "_reuse_evidence_packets"
     )
-    namespace = {"json": json, "shutil": shutil, "packet_source_defects": packet_source_defects}
+    from research_fabric.claims import ClaimIdentityError, accept_packet, atomic_write_json
+
+    namespace = {
+        "json": json,
+        "shutil": shutil,
+        "packet_source_defects": packet_source_defects,
+        "ADAPTERS": __import__("research_fabric.sources", fromlist=["ADAPTERS"]).ADAPTERS,
+        "accept_packet": accept_packet,
+        "atomic_write_json": atomic_write_json,
+        "ClaimIdentityError": ClaimIdentityError,
+    }
     exec(compile(ast.Module(body=[reuse_function], type_ignores=[]), "workflows/research.py", "exec"), namespace)
 
-    valid = {"parsed": {"claims": ["ok"]}, "source_provenance": expected}
-    stale = {"parsed": {"claims": ["ok"]}, "source_provenance": [dict(expected[0], sha256="0" * 64)]}
-    unattested = {"parsed": {"claims": ["ok"]}}
+    valid = {"parsed": {"claims": [{"source_file": "book-1.html", "excerpt": "ok"}]}, "source_provenance": expected}
+    stale = {
+        "parsed": {"claims": [{"source_file": "book-1.html", "excerpt": "ok"}]},
+        "source_provenance": [dict(expected[0], sha256="0" * 64)],
+    }
+    unattested = {"parsed": {"claims": [{"source_file": "book-1.html", "excerpt": "ok"}]}}
 
     def validator(parsed):
         return [] if parsed and parsed.get("claims") else ["invalid"]
@@ -143,6 +156,7 @@ def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path
         specs,
         {sid: expected for sid, _ in specs},
         validator,
+        tmp_path,
     )
     assert reused == ["book-1"]
     assert [sid for sid, _ in specs if sid not in reused] == ["book-2", "book-3", "book-4"]

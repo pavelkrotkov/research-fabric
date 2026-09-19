@@ -24,6 +24,9 @@ import tempfile
 
 import yaml
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.claims import accept_packet, atomic_write_json
+
 FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
 
@@ -47,6 +50,20 @@ def normalize_packet(value):
             if isinstance(claim.get("excerpt"), str):
                 claim["excerpt"] = re.sub(r"\s+", " ", claim["excerpt"]).strip()
     return value
+
+
+def accept_and_persist_packet(packet_path, worker, source_dir, destination):
+    """Migrate one packet into the disposable publication destination."""
+    packet_path = pathlib.Path(packet_path)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if not packet.get("packet_revision"):
+        normalize_packet(packet.get("parsed") or packet)
+    accepted = accept_packet(packet, worker, source_dir=source_dir)
+    destination = pathlib.Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / packet_path.name
+    atomic_write_json(target, accepted)
+    return accepted, target
 
 
 def main() -> int:
@@ -109,11 +126,14 @@ def main() -> int:
     print(f"[dryrun] snapshots copied: {len(source_files)}")
 
     # --- ledger materialization --------------------------------------------
-    claims, dropped = [], []
+    claims, dropped, history = [], [], []
+    accepted_packets = field_root / "evidence" / "accepted-packets"
+    accepted_packets.mkdir(parents=True, exist_ok=True)
     for packet_path in sorted(packet_dir.glob("worker-*.json")):
         sid = packet_path.stem.replace("worker-", "")
-        packet = json.loads(packet_path.read_text())
-        parsed = normalize_packet(packet.get("parsed") or {})
+        packet, _accepted_path = accept_and_persist_packet(packet_path, sid, source_dir, accepted_packets)
+        history.extend(packet.get("claim_history") or [])
+        parsed = packet.get("parsed") or {}
         for idx, claim in enumerate(parsed.get("claims", []), 1):
             source_file = pathlib.Path(claim.get("source_file", "")).name
             source_id = SOURCE_BY_FILE.get(source_file)
@@ -124,22 +144,34 @@ def main() -> int:
             assert (field_root / note).is_file(), f"note target missing: {note}"
             claims.append(
                 {
-                    "claim_id": f"c-{sid}-{idx}",
+                    "claim_id": claim["claim_id"],
+                    "worker": sid,
                     "claim": claim.get("claim", ""),
                     "note": note,
                     "source_ids": [source_id],
+                    "source_file": claim.get("source_file", ""),
                     "locator": claim.get("locator", ""),
                     "excerpt": claim.get("excerpt", ""),
                     "stance": claim.get("stance", "supports"),
                     "confidence": claim.get("confidence", 0.0),
                     "independence_group": claim.get("independence_group", sid),
                     "verified_at": "pilot-verifier-pass",
+                    "packet_revision": packet.get("packet_revision"),
+                    "packet_state_revision": packet.get("packet_state_revision"),
+                    "source_revision": claim.get("source_revision"),
+                    "claim_type": claim.get("claim_type", ""),
+                    "english_witness": claim.get("english_witness"),
+                    "witnesses_consulted": claim.get("witnesses_consulted", []),
                 }
             )
+            if claim.get("accepted_attempt_id"):
+                claims[-1]["accepted_attempt_id"] = claim["accepted_attempt_id"]
     if dropped:
         print(f"[dryrun] DROPPED {len(dropped)} claim(s): {json.dumps(dropped, indent=2)}")
         return 1
     assert claims, "no claims materialized"
+    if history:
+        atomic_write_json(field_root / "evidence" / "claim-history.json", history)
     (field_root / "evidence" / "claims.jsonl").write_text(
         "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n"
     )
