@@ -84,32 +84,66 @@ class _VisualHTML(HTMLParser):
         super().__init__()
         self.references = []
         self.inert = 0
+        self._edits = None
+        self._objects = []
+
+    def visual_edits(self, text):
+        """Return active visual tag spans without a second HTML policy."""
+        self.reset()
+        self.references = []
+        self._edits = []
+        self._text = text
+        self._starts = [0, *(match.end() for match in re.finditer("\n", text))]
+        self.feed(text)
+        return self._edits
+
+    def _replace(self, raw, replacement):
+        line, column = self.getpos()
+        start = self._starts[line - 1] + column
+        self._edits.append((start, start + len(raw), replacement))
+
+    def _track_starttag(self, tag, visual):
+        if self._edits is None:
+            return
+        if tag == "object":
+            self._objects.append(visual)
+        if visual:
+            self._replace(self.get_starttag_text(), "[Figure]")
 
     def handle_starttag(self, tag, attrs):
+        before = len(self.references)
         if tag in ("pre", "code", "script", "style"):
             self.inert += 1
-        if self.inert:
-            return
-        attrs = dict(attrs)
-        if tag in ("img", "embed", "object"):
-            target = attrs.get("data" if tag == "object" else "src")
-            if target:
-                self.references.append(
-                    {
-                        "target": target,
-                        "syntax": tag,
-                        "caption": attrs.get("alt", attrs.get("title", "")),
-                        "required": attrs.get("data-optional") != "true",
-                    }
-                )
-            if "srcset" in attrs:
-                self.references.append(
-                    {"target": attrs["srcset"], "syntax": "srcset", "required": attrs.get("data-optional") != "true"}
-                )
+        if not self.inert:
+            attrs = dict(attrs)
+            if tag in ("img", "embed", "object"):
+                target = attrs.get("data" if tag == "object" else "src")
+                if target:
+                    self.references.append(
+                        {
+                            "target": target,
+                            "syntax": tag,
+                            "caption": attrs.get("alt", attrs.get("title", "")),
+                            "required": attrs.get("data-optional") != "true",
+                        }
+                    )
+                if "srcset" in attrs:
+                    self.references.append(
+                        {
+                            "target": attrs["srcset"],
+                            "syntax": "srcset",
+                            "required": attrs.get("data-optional") != "true",
+                        }
+                    )
+        self._track_starttag(tag, len(self.references) > before)
 
     def handle_endtag(self, tag):
         if tag in ("pre", "code", "script", "style"):
             self.inert = max(0, self.inert - 1)
+        if self._edits is not None and tag == "object" and self._objects and self._objects.pop():
+            line, column = self.getpos()
+            start = self._starts[line - 1] + column
+            self._replace(self._text[start : self._text.index(">", start) + 1], "")
 
 
 def _token_visual(child, parser):

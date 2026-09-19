@@ -44,55 +44,16 @@ def _source_positions(content, lines, start):
     return positions
 
 
-class _VisualTags(_VisualHTML):
-    """Find only visual tag spans, retaining surrounding HTML byte for byte."""
-
-    def __init__(self):
-        super().__init__()
-        self.objects = []
-
-    def scan(self, text):
-        self.reset()
-        self.text = text
-        self.lines = _lines(text)
-        self.edits = []
-        self.references = []
-        self.feed(text)
-        return self.edits
-
-    def _replace(self, raw, replacement):
-        line, column = self.getpos()
-        start = sum(map(len, self.lines[: line - 1])) + column
-        self.edits.append((start, start + len(raw), replacement))
-
-    def handle_starttag(self, tag, attrs):
-        before = len(self.references)
-        super().handle_starttag(tag, attrs)
-        visual = len(self.references) > before
-        if tag == "object":
-            self.objects.append(visual)
-        if visual:
-            self._replace(self.get_starttag_text(), "[Figure]")
-
-    def handle_endtag(self, tag):
-        super().handle_endtag(tag)
-        if tag == "object" and self.objects and self.objects.pop():
-            line, column = self.getpos()
-            start = sum(map(len, self.lines[: line - 1])) + column
-            raw = self.text[start : self.text.index(">", start) + 1]
-            self._replace(raw, "")
-
-
 def _block_edits(token, html_parser):
     if token.type == "html_block":
-        return html_parser.scan(token.content)
+        return html_parser.visual_edits(token.content)
     edits = []
     for child in token.children:
         span = child.meta.get("source_span")
         if child.type == "image" and not html_parser.inert:
             edits.append((*span, "[Figure]"))
         elif child.type == "html_inline":
-            edits.extend((span[0] + a, span[0] + b, value) for a, b, value in html_parser.scan(child.content))
+            edits.extend((span[0] + a, span[0] + b, value) for a, b, value in html_parser.visual_edits(child.content))
     return edits
 
 
@@ -102,7 +63,7 @@ def normalize_images(text):
     parser.inline.ruler.at("html_inline", _positioned(html_inline))
     lines = _lines(text)
     edits = []
-    html_parser = _VisualTags()
+    html_parser = _VisualHTML()
     for token in parser.parse(text):
         if token.type not in ("inline", "html_block"):
             continue

@@ -228,6 +228,19 @@ def test_raw_html_code_examples_are_inert(tmp_path, body):
     assert [row["target"] for row in manifest["assets"]] == ["real.png"]
 
 
+def test_html_rewrite_shares_discovery_inert_and_object_policy(tmp_path):
+    source = tmp_path / "paper.md"
+    png(tmp_path / "figure.png")
+    body = '<object data="figure.png">outer <object>fallback</object> <code><img src="missing.png"></code></object>'
+    source.write_text(body)
+    manifest = prepare(source, tmp_path / "bundles")
+    prepared = (tmp_path / "bundles" / manifest["key"] / manifest["input_path"]).read_text()
+    assert [row["target"] for row in manifest["assets"]] == ["figure.png"]
+    assert prepared.startswith(
+        '[Figure]outer <object>fallback</object> <code><img src="missing.png"></code>\n\n## Source figures'
+    )
+
+
 def test_page_selection_and_caption_cannot_change_native_input_scope(tmp_path):
     source = tmp_path / "paper.md"
     (tmp_path / "figure.pdf").write_bytes(b"original")

@@ -268,15 +268,14 @@ def verify_bundle(root: pathlib.Path, manifest: dict) -> None:
 def publish_bundle(root: pathlib.Path, manifest: dict, wiki: pathlib.Path, doc_name: str) -> None:
     """Record native image outputs and preserve their originals for the exporter."""
     verify_bundle(root, manifest)
-    for row in manifest["assets"]:
-        if "original_path" in row:
-            relative = f"assets/{manifest['key']}/{row['original_path']}"
-            _write(wiki, relative, safe_path(root, row["original_path"]).read_bytes())
-        if "derivative_path" in row:
-            relative = f"sources/images/{doc_name}/{pathlib.Path(row['derivative_path']).name}"
-            actual = _read(safe_path(wiki, relative))
-            if digest(actual) != row["derivative_sha256"]:
-                raise ValueError(f"native asset drift: {relative}")
+    original_prefix = f"assets/{manifest['key']}/"
+    for relative, expected in publication_files(manifest, doc_name).items():
+        if relative.startswith(original_prefix):
+            source_relative = relative.removeprefix(original_prefix)
+            _write(wiki, relative, safe_path(root, source_relative).read_bytes())
+            continue
+        if digest(_read(safe_path(wiki, relative))) != expected:
+            raise ValueError(f"native asset drift: {relative}")
     receipt = {"bundle": manifest, "native_doc_name": doc_name}
     _write(
         wiki,
