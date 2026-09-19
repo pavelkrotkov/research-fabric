@@ -31,7 +31,7 @@ from .claims import (
     validated_drop_ids,
 )
 from .core import multisource_packet_defects, packet_defects
-from .sources import representation_for
+from .sources import reading_source_text, representation_for
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -40,7 +40,7 @@ def source_body(source_dir, claim, adapters=ADAPTERS):
     # Containment is checked before the adapter opens a packet-controlled path.
     source_file_revision(source_dir, claim.get("source_file", ""))
     try:
-        return representation_for(source_dir / claim["source_file"], adapters).grounding_text
+        return reading_source_text(representation_for(source_dir / claim["source_file"], adapters), claim)
     except ValueError as exc:
         raise ClaimIdentityError(str(exc)) from exc
 

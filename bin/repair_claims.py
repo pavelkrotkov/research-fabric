@@ -84,6 +84,10 @@ def _repair_target(target, source_dir, model, grounded, adapters):
     result = extract_json(model(prompt))
     if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
         raise ValueError("repair response requires a boolean found field")
+    if "reading" in claim and result["found"]:
+        from research_fabric.sources import exact_excerpt
+
+        exact_excerpt(body, result.get("excerpt"))
     return _replacement(result, body, grounded)
 
 
@@ -104,8 +108,10 @@ def _process_targets(targets, store, source_dir, report_id, model, grounded, ada
             session = worker_session(
                 run_root, "repair", target.claim_id, [source_dir / target.claim["source_file"]], project
             )
+
             def callback(prompt):
                 return call_model(prompt, session)
+
         try:
             action, excerpt, reason = _repair_target(target, source_dir, callback, grounded, adapters)
         except Exception as exc:

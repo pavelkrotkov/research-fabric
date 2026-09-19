@@ -6,8 +6,9 @@ import hashlib
 import pathlib
 import re
 from dataclasses import dataclass
+from itertools import accumulate
 
-from ._source_adapter import ADAPTERS, SourceAdapter
+from ._source_adapter import ADAPTERS, SourceAdapter, _lines
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 ASSET_HASH_FIELD = "assets_sha256"
@@ -25,6 +26,7 @@ class SourceRepresentation:
     assets: tuple[str, ...] = ()
     assets_sha256: str | None = None
     source_metadata: tuple[tuple[str, str], ...] = ()
+    original_line_offsets: tuple[int, ...] = ()
 
     @property
     def grounding_text(self) -> str:
@@ -33,11 +35,19 @@ class SourceRepresentation:
             return re.sub(r"<!--@@(?:chapter |section |asset |formula)[^>]*-->", " ", self.text)
         return self.text
 
+    def original_byte_offset(self, position: int) -> int:
+        """Map a Markdown character boundary back to its immutable UTF-8 snapshot."""
+        if self.adapter != "markdown" or not 0 <= position <= len(self.text):
+            raise ValueError("source position has no exact original-byte mapping")
+        line = self.text.count("\n", 0, position)
+        column_start = self.text.rfind("\n", 0, position) + 1
+        return self.original_line_offsets[line] + len(self.text[column_start:position].encode("utf-8"))
 
-def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
+
+def source_attestation(rep: SourceRepresentation, source_root: pathlib.Path | None = None) -> dict:
     """Return the exact source input attestation consumed by a worker."""
     return {
-        "source_file": rep.path.name,
+        "source_file": rep.path.relative_to(source_root).as_posix() if source_root is not None else rep.path.name,
         "sha256": rep.original_sha256,
         **_representation_metadata(rep),
     }
@@ -89,6 +99,11 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
         assets=assets,
         assets_sha256=_assets_sha256(path, assets),
         source_metadata=source_metadata,
+        original_line_offsets=(
+            tuple(accumulate((len(line.encode("utf-8")) for line in _lines(decoded)), initial=0))
+            if adapter.name == "markdown"
+            else ()
+        ),
     )
 
 
@@ -100,11 +115,14 @@ def source_bundle(path: pathlib.Path) -> tuple[tuple[pathlib.Path, pathlib.Path]
 
 
 def source_provenance(
-    source_files: list[pathlib.Path], adapters: tuple[SourceAdapter, ...] = ADAPTERS
+    source_files: list[pathlib.Path],
+    adapters: tuple[SourceAdapter, ...] = ADAPTERS,
+    *,
+    source_root: pathlib.Path | None = None,
 ) -> list[dict[str, str]]:
     """Hash and describe the representations supplied to one worker."""
     return sorted(
-        (source_attestation(representation_for(path, adapters)) for path in source_files),
+        (source_attestation(representation_for(path, adapters), source_root) for path in source_files),
         key=lambda row: row["source_file"],
     )
 
@@ -199,12 +217,17 @@ def _manifest_representation(source: pathlib.Path, adapters: tuple[SourceAdapter
 
 
 def bind_manifest(
-    source_files: list[pathlib.Path], rows: list[dict], adapters: tuple[SourceAdapter, ...] = ADAPTERS
+    source_files: list[pathlib.Path],
+    rows: list[dict],
+    adapters: tuple[SourceAdapter, ...] = ADAPTERS,
+    *,
+    source_root: pathlib.Path | None = None,
+    representations: dict | None = None,
 ) -> list[dict]:
     """Verify original bytes and bind exact worker-representation provenance."""
     by_name = {}
     for row in rows:
-        name = pathlib.Path(row.get("snapshot", "")).name
+        name = row.get("source_file") if source_root is not None else pathlib.Path(row.get("snapshot", "")).name
         if not name:
             raise RuntimeError("source manifest row missing snapshot")
         if name in by_name:
@@ -212,39 +235,44 @@ def bind_manifest(
         by_name[name] = row
     bound = []
     for source in source_files:
-        row = by_name.get(source.name)
+        name = source.relative_to(source_root).as_posix() if source_root is not None else source.name
+        row = by_name.get(name)
         if row is None:
             raise RuntimeError(f"source manifest has no entry for {source.name}")
-        rep = _manifest_representation(source, adapters)
+        rep = representations[source] if representations is not None else _manifest_representation(source, adapters)
         if rep.original_sha256 != row.get("sha256"):
             raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
         bound.append(_bind_representation(row, rep, source))
     return bound
 
 
-def prepare_source_bundle(source: pathlib.Path, destination: pathlib.Path, attestation: dict) -> dict:
+def prepare_source_bundle(
+    source: pathlib.Path, destination: pathlib.Path, attestation: dict, *, source_root: pathlib.Path | None = None
+) -> dict:
     """Extend the existing source attestation with a frozen visual asset closure."""
     from ._source_assets import prepare_bundle
 
-    if source_attestation(representation_for(source)) != attestation:
+    if source_attestation(representation_for(source), source_root) != attestation:
         raise ValueError(f"source bundle attestation drift: {source.name}")
     return prepare_bundle(source, destination, attestation)
 
 
-def snapshot_relative(source: pathlib.Path) -> pathlib.Path:
+def snapshot_relative(source: pathlib.Path, source_root: pathlib.Path | None = None) -> pathlib.Path:
     from ._source_assets import bundle_key
 
-    attestation = source_attestation(representation_for(source))
+    attestation = source_attestation(representation_for(source), source_root)
     return pathlib.Path(bundle_key(attestation)) / source.name
 
 
-def copy_source_snapshot(source: pathlib.Path, snapshots: pathlib.Path) -> pathlib.Path:
+def copy_source_snapshot(
+    source: pathlib.Path, snapshots: pathlib.Path, *, source_root: pathlib.Path | None = None
+) -> pathlib.Path:
     """The original document and local assets share one collision-free namespace."""
     import shutil
 
     from ._source_assets import safe_path
 
-    relative = snapshot_relative(source)
+    relative = snapshot_relative(source, source_root)
     for original, asset_relative in source_bundle(source):
         destination = safe_path(snapshots, (relative.parent / asset_relative).as_posix())
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -256,3 +284,424 @@ def copy_source_snapshot(source: pathlib.Path, snapshots: pathlib.Path) -> pathl
         shutil.copy2(original, destination)
         destination.chmod(0o444)
     return snapshots / relative
+
+
+def _reading_tokenizer():
+    """Use the qualified BPE data, explicitly provisioned before an offline run."""
+    import importlib.metadata
+    import os
+    import platform
+
+    import tiktoken
+
+    cache = os.environ.get("TIKTOKEN_CACHE_DIR")
+    url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    expected = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+    path = pathlib.Path(cache or "") / hashlib.sha1(url.encode()).hexdigest()
+    if not cache or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise ValueError("provision verified cl100k_base data in TIKTOKEN_CACHE_DIR before reading-plan preparation")
+    encoding = tiktoken.get_encoding("cl100k_base")
+    record = {
+        "encoding": encoding.name,
+        "package": importlib.metadata.version("tiktoken"),
+        "python": platform.python_version(),
+        "data_sha256": expected,
+        "count_semantics": "cl100k_base BPE; source/context counted separately; not provider usage",
+    }
+    return encoding, record
+
+
+def _span_range(rep, span):
+    bounds = span.get("lines")
+    lines = _lines(rep.text)
+    if not (
+        isinstance(bounds, list)
+        and len(bounds) == 2
+        and all(type(n) is int for n in bounds)
+        and 1 <= bounds[0] < bounds[1] <= len(lines) + 1
+    ):
+        raise ValueError("invalid reading source line range")
+    return sum(map(len, lines[: bounds[0] - 1])), sum(map(len, lines[: bounds[1] - 1]))
+
+
+def exact_excerpt(text, excerpt):
+    """Return one exact occurrence; overlapping occurrences are also ambiguous."""
+    if not isinstance(excerpt, str) or not excerpt:
+        raise ValueError("reading claim has no exact excerpt")
+    start = text.find(excerpt)
+    if start < 0 or text.find(excerpt, start + 1) >= 0:
+        raise ValueError("reading quote is missing, ambiguous, or outside its assigned source spans")
+    return start
+
+
+def reading_source_text(rep, claim):
+    if "reading" not in claim:
+        return rep.grounding_text
+    start, end = _span_range(rep, claim["reading"])
+    return rep.text[start:end]
+
+
+def reading_quote(rep, claim):
+    """Project current excerpt coordinates; repair never persists stale quote offsets."""
+    start, end = _span_range(rep, claim["reading"])
+    start += exact_excerpt(rep.text[start:end], claim.get("excerpt"))
+    end = start + len(claim["excerpt"])
+    return {
+        "representation_bytes": [len(rep.text[:start].encode()), len(rep.text[:end].encode())],
+        "original_bytes": [rep.original_byte_offset(start), rep.original_byte_offset(end)],
+    }
+
+
+def _span_text(representations, span):
+    rep = representations[span["source_file"]]
+    start, end = _span_range(rep, span)
+    return rep.text[start:end]
+
+
+def _protected_boundaries(lines, tokens):
+    blocked = set()
+    inert = set()
+    for token in tokens:
+        if token.level == 0 and token.map:
+            blocked.update(range(token.map[0] + 1, token.map[1]))
+        if token.type in {"fence", "code_block"} and token.map:
+            inert.update(range(*token.map))
+    opening = None
+    for index, line in enumerate(lines):
+        if index not in inert and line.strip() == "$$":
+            if opening is None:
+                opening = index
+            else:
+                blocked.update(range(opening + 1, index + 1))
+                opening = None
+    if opening is not None:
+        blocked.update(range(opening + 1, len(lines)))
+    if lines[0].strip() == "---":
+        closing = next((i for i, line in enumerate(lines[1:], 1) if line.strip() in {"---", "..."}), 0)
+        blocked.update(range(1, closing + 1))
+    return blocked
+
+
+def _reading_structure(name, rep):
+    from ._source_adapter import _MARKDOWN
+
+    lines = _lines(rep.text)
+    if not lines:
+        raise ValueError(f"empty reading source: {name}")
+    environment = {}
+    tokens = _MARKDOWN.parse(rep.text, environment)
+    allowed = set(range(len(lines) + 1)) - _protected_boundaries(lines, tokens)
+    starts = sorted(
+        {
+            0,
+            len(lines),
+            *(t.map[0] for t in tokens if t.type == "heading_open" and t.level == 0 and t.map[0] in allowed),
+        }
+    )
+    sections = {
+        f"{name}#L{a + 1}-{b}": {"source_file": name, "lines": [a + 1, b + 1], "disposition": "primary"}
+        for a, b in zip(starts, starts[1:])
+    }
+    definitions = {key: row["map"][0] for key, row in environment.get("references", {}).items()}
+    for token in tokens:
+        match = re.match(r"\[\^([^\]]+)\]:", token.content) if token.type == "inline" else None
+        if match:
+            definitions["^" + match[1].upper()] = token.map[0]
+    return sections, definitions, allowed
+
+
+def _bibliographic_values(work):
+    title, authors = work["title"], work["authors"]
+    if authors is not None and (not isinstance(authors, list) or not authors):
+        raise ValueError("work authors must be a nonempty list or explicit null")
+    values = ([title] if title is not None else []) + (authors or [])
+    if not all(isinstance(value, str) and value.strip() for value in values):
+        raise ValueError("work bibliography must contain nonempty text or explicit null")
+    return values
+
+
+def _bibliography(works, representations):
+    for work_id, work in works.items():
+        if not isinstance(work_id, str) or not work_id or not isinstance(work, dict):
+            raise ValueError("reading works require explicit identities and bibliographic records")
+        values = _bibliographic_values(work)
+        evidence = "\n".join(_span_text(representations, span) for span in work.get("bibliography_evidence", []))
+        if any(value not in evidence for value in values):
+            raise ValueError(f"bibliographic attribution has no source evidence: {work_id}")
+
+
+def _default_readings(sections, sources, representations, encoding, target):
+    from .claims import stable_revision
+
+    readings, primary = [], []
+    for key, section in sections.items():
+        if section["disposition"] != "primary":
+            continue
+        combined = "".join(_span_text(representations, sections[item]) for item in [*primary, key])
+        different_source = primary and section["source_file"] != sections[primary[0]]["source_file"]
+        if primary and (different_source or len(encoding.encode(combined, disallowed_special=())) > target):
+            readings.append({"primary": primary})
+            primary = []
+        primary.append(key)
+    if primary:
+        readings.append({"primary": primary})
+    for reading in readings:
+        reading["work_id"] = sources[sections[reading["primary"][0]]["source_file"]]["work_id"]
+        reading["id"] = "read-" + stable_revision(reading)[:20]
+    return readings
+
+
+def _reading_context(reading, data, representations, references):
+    sections = data["sections"]
+    context = list(data["works"][reading["work_id"]].get("context", []))
+    for key in reading["primary"]:
+        span = sections[key]
+        text = _span_text(representations, span)
+        for label in re.findall(r"\[([^\]]+)\]", text):
+            line = references[span["source_file"]].get(label.upper())
+            if line is not None:
+                context.append(
+                    next(
+                        key
+                        for key, section in sections.items()
+                        if section["source_file"] == span["source_file"]
+                        and section["lines"][0] <= line + 1 < section["lines"][1]
+                    )
+                )
+
+    return list(dict.fromkeys(key for key in context if key not in reading["primary"]))
+
+
+def _reading_budget(reading, sections, representations, encoding, policy):
+    counts = {
+        role: sum(
+            len(encoding.encode(_span_text(representations, sections[key]), disallowed_special=()))
+            for key in reading[role]
+        )
+        for role in ("primary", "context")
+    }
+    return {
+        "token_counts": counts,
+        "budget_excess": {
+            role: counts[role] > policy[limit]
+            for role, limit in (("primary", "soft_limit_tokens"), ("context", "context_budget_tokens"))
+        },
+    }
+
+
+def _reading_assets(reading, sections, bundles):
+    spans = [sections[key] for key in [*reading["primary"], *reading["context"]]]
+    return [
+        {"source_file": name, "index": index}
+        for name, bundle in bundles.items()
+        for index, asset in enumerate(bundle["assets"])
+        if any(
+            span["source_file"] == name
+            and max(span["lines"][0], asset["locator"]["lines"][0])
+            < min(span["lines"][1], asset["locator"]["lines"][1])
+            for span in spans
+        )
+    ]
+
+
+def _validate_sections(sections, representations, boundaries):
+    for name, rep in representations.items():
+        ranges = sorted(section["lines"] for section in sections.values() if section["source_file"] == name)
+        if not ranges or ranges[0][0] != 1 or ranges[-1][1] != len(_lines(rep.text)) + 1:
+            raise ValueError("reading section coverage has gaps")
+        if any(left[1] != right[0] for left, right in zip(ranges, ranges[1:])):
+            raise ValueError("reading section coverage has gaps or overlaps")
+    for section in sections.values():
+        _span_range(representations[section["source_file"]], section)
+        if not {n - 1 for n in section["lines"]}.issubset(boundaries[section["source_file"]]):
+            raise ValueError("reviewed reading boundary splits a coherent source block")
+        if section["disposition"] not in {"primary", "context", "excluded"}:
+            raise ValueError("unknown reading section disposition")
+        if section["disposition"] != "primary" and not section.get("reason"):
+            raise ValueError("non-primary reading section needs an explicit reason")
+
+
+def _validate_reading(reading, sections, sources):
+    if not reading["primary"]:
+        raise ValueError("reading assignment has no primary source")
+    ranges = {}
+    for role in ("primary", "context"):
+        for key in reading[role]:
+            span = sections[key]
+            if role == "primary" and sources[span["source_file"]]["work_id"] != reading["work_id"]:
+                raise ValueError("reading primary assignment crosses parent works")
+            ranges.setdefault(span["source_file"], []).append(span["lines"])
+    for spans in ranges.values():
+        ordered = sorted(spans)
+        if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
+            raise ValueError("reading primary/context source spans overlap")
+
+
+def _validate_ownership(readings, sections):
+    from collections import Counter
+
+    ids = [row["id"] for row in readings]
+    if not ids or len(ids) != len(set(ids)):
+        raise ValueError("reading plan has missing or duplicate assignments")
+    primary = Counter(key for reading in readings for key in reading["primary"])
+    expected = Counter({key: 1 for key, section in sections.items() if section["disposition"] == "primary"})
+    if primary != expected:
+        raise ValueError("reading section has missing or overlapping primary ownership")
+    context = {key for reading in readings for key in reading["context"]}
+    required = {key for key, section in sections.items() if section["disposition"] == "context"}
+    excluded = {key for key, section in sections.items() if section["disposition"] == "excluded"}
+    if not required.issubset(context) or context & excluded:
+        raise ValueError("reading context does not match section dispositions")
+
+
+class ReadingPlan:
+    """One frozen source assignment shared by dispatch, publication and resume."""
+
+    def __init__(self, data, representations, boundaries):
+        self.data, self.representations, self.boundaries = data, representations, boundaries
+
+    def reading(self, reading_id):
+        matches = [row for row in self.data["readings"] if row["id"] == reading_id]
+        if len(matches) != 1:
+            raise ValueError(f"unknown or ambiguous reading assignment: {reading_id}")
+        return matches[0]
+
+    def input(self, reading_id):
+        """Generated labels have no source range and can never ground an excerpt."""
+        parts = []
+        for role in ("primary", "context"):
+            for key in self.reading(reading_id)[role]:
+                span = self.data["sections"][key]
+                start, end = span["lines"]
+                parts.extend(
+                    [
+                        f"\n[{role.upper()} SOURCE {span['source_file']} L{start}-{end - 1}]\n",
+                        _span_text(self.representations, span),
+                    ]
+                )
+        return "".join(parts)
+
+    def claim(self, reading_id, claim):
+        """Resolve the quote once; context retains its cited work, not the reader's work."""
+        matches = []
+        for role in ("primary", "context"):
+            for key in self.reading(reading_id)[role]:
+                span = self.data["sections"][key]
+                if span["source_file"] == claim.get("source_file") and claim.get("excerpt") in _span_text(
+                    self.representations, span
+                ):
+                    matches.append((role, span))
+        if len(matches) != 1:
+            raise ValueError("reading quote is missing, ambiguous, or outside its assigned source spans")
+        role, span = matches[0]
+        binding = {
+            "plan_sha256": self.data["sha256"],
+            "reading_id": reading_id,
+            "work_id": self.data["sources"][span["source_file"]]["work_id"],
+            "role": role,
+            "lines": span["lines"],
+        }
+        return binding, reading_quote(self.representations[span["source_file"]], {**claim, "reading": binding})
+
+    def validate(self):
+        from .claims import stable_revision
+
+        data = self.data
+        if data.get("version") != 1:
+            raise ValueError("unsupported reading plan version")
+        if data.get("sha256") != stable_revision({key: value for key, value in data.items() if key != "sha256"}):
+            raise ValueError("reading plan digest drift")
+        _validate_sections(data["sections"], self.representations, self.boundaries)
+        _validate_ownership(data["readings"], data["sections"])
+        for reading in data["readings"]:
+            _validate_reading(reading, data["sections"], data["sources"])
+
+
+def _reading_policy(profile):
+    policy = {
+        "version": 1,
+        "target_tokens": 6000,
+        "soft_limit_tokens": 12000,
+        "context_budget_tokens": 2000,
+        **profile.get("policy", {}),
+    }
+    if (
+        set(policy) != {"version", "target_tokens", "soft_limit_tokens", "context_budget_tokens"}
+        or policy["version"] != 1
+    ):
+        raise ValueError("unsupported reading policy")
+    if any(type(value) is not int or value < 1 for value in policy.values()):
+        raise ValueError("reading budgets must be positive integers")
+    return policy
+
+
+def _reading_sources(source_root, profile, manifest_rows, bundle_directory):
+    from ._source_assets import safe_path
+
+    assignments = profile["sources"]
+    if not isinstance(assignments, dict) or not assignments:
+        raise ValueError("reading profile requires explicit source-file to work assignments")
+    paths = [safe_path(source_root, name) for name in assignments]
+    representations = {path: representation_for(path) for path in paths}
+    if any(rep.adapter != "markdown" for rep in representations.values()):
+        raise ValueError(
+            "source-mapped reading currently requires Markdown; legacy HTML/witness projects are unchanged"
+        )
+    bound = bind_manifest(paths, manifest_rows, source_root=source_root, representations=representations)
+    reps = {path.relative_to(source_root).as_posix(): rep for path, rep in representations.items()}
+    sources, bundles = {}, {}
+    for row in bound:
+        name = row["source_file"]
+        if assignments[name] not in profile["works"] or not row.get("source_id"):
+            raise ValueError("reading source needs a known work and manifest source ID")
+        rep = reps[name]
+        bundle = prepare_source_bundle(
+            rep.path, bundle_directory, source_attestation(rep, source_root), source_root=source_root
+        )
+        bundles[name] = bundle
+        sources[name] = {**row, "work_id": assignments[name], "bundle_key": bundle["key"]}
+    ids = [row["source_id"] for row in sources.values()]
+    if len(ids) != len(set(ids)):
+        raise ValueError("reading sources have ambiguous manifest identities")
+    return sources, bundles, reps
+
+
+def prepare_reading_plan(source_root, project, manifest_rows, destination, bundle_directory):
+    """Verify sources, then create or validate the frozen assignment before generation."""
+    import json
+
+    from .claims import atomic_write_json, stable_revision
+
+    source_root = pathlib.Path(source_root).resolve()
+    profile = project["reading"]
+    sources, bundles, reps = _reading_sources(source_root, profile, manifest_rows, bundle_directory)
+    _bibliography(profile["works"], reps)
+    encoding, tokenizer = _reading_tokenizer()
+    policy = _reading_policy(profile)
+    sections, references, boundaries = {}, {}, {}
+    for name, rep in reps.items():
+        source_sections, references[name], boundaries[name] = _reading_structure(name, rep)
+        sections.update(source_sections)
+    base = {"version": 1, "policy": policy, "tokenizer": tokenizer, "works": profile["works"], "sources": sources}
+    if destination.exists():
+        data = json.loads(destination.read_text())
+        if any(data.get(key) != value for key, value in base.items()):
+            raise ValueError("frozen reading plan source, bibliography, policy or tokenizer drift")
+    else:
+        reviewed = profile.get("reviewed_plan")
+        chosen = json.loads(pathlib.Path(reviewed).read_text()) if reviewed else {}
+        sections = chosen.get("sections", sections)
+        readings = chosen.get("readings") or _default_readings(
+            sections, sources, reps, encoding, policy["target_tokens"]
+        )
+        data = {**base, "sections": sections, "readings": readings}
+        for reading in readings:
+            reading.setdefault("context", _reading_context(reading, data, reps, references))
+            reading.update(_reading_budget(reading, sections, reps, encoding, policy))
+            reading["assets"] = _reading_assets(reading, sections, bundles)
+        data["sha256"] = stable_revision(data)
+    plan = ReadingPlan(data, reps, boundaries)
+    plan.validate()
+    if not destination.exists():
+        atomic_write_json(destination, data)
+    return plan, bundles
