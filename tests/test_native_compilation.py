@@ -469,10 +469,26 @@ def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, mode
     assert not (kb / "wiki/concepts/one.md").exists()
 
 
-def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tmp_path):
+def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tmp_path, monkeypatch):
+    import time
+
+    from litellm.llms.chatgpt.authenticator import Authenticator
+
     from research_fabric.execution import configure, history, resolve
 
     run = tmp_path / "run"
+    # Native provider detection reads OAuth state before the completion boundary.
+    # Isolate it from developer credentials and never initiate device login.
+    tokens = tmp_path / "tokens"
+    tokens.mkdir()
+    (tokens / "auth.json").write_text(json.dumps({"access_token": "offline-fixture", "expires_at": time.time() + 3600}))
+    monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tokens))
+    monkeypatch.setenv("CHATGPT_AUTH_FILE", "auth.json")
+
+    def unexpected_login(self):
+        pytest.fail("offline OAuth fixture must never initiate device login")
+
+    monkeypatch.setattr(Authenticator, "_login_device_code", unexpected_login)
     configure(run, resolve(native_model="chatgpt/gpt-5", environ={}))
     report = native_compile(kb, [source(tmp_path)], execution_root=run)
     assert report["sources"]
