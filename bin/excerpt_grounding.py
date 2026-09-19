@@ -31,6 +31,10 @@ import pathlib
 import re
 import sys
 import unicodedata
+from collections import Counter
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.claim_report import grounding_report_metadata
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.sources import representation_for  # noqa: E402
@@ -265,6 +269,12 @@ def main() -> int:
             representation_for(snap).text if row.get("adapter") else snap.read_text(encoding="utf-8")
         )
     failures = check(claims, texts)
+    claim_ids = [claim.get("claim_id") for claim in claims]
+    duplicate_ids = {cid for cid, count in Counter(claim_ids).items() if count > 1}
+    if duplicate_ids:
+        failures.extend((cid, "duplicate claim_id") for cid in sorted(duplicate_ids))
+    metadata = grounding_report_metadata(claims, sources, failures)
+    print(f"REPORT-META: {json.dumps(metadata, ensure_ascii=False, sort_keys=True)}")
     if failures:
         for cid, why in failures:
             print(f"{cid}: {why}", file=sys.stderr)

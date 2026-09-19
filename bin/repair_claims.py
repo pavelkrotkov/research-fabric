@@ -1,163 +1,215 @@
-"""Claim-level excerpt repair: re-ground only the claims the grounding gate rejected.
+"""Repair failed excerpts by stable claim identity.
 
-For each failed claim, show ox-alpha its claim + excerpt + the book text and ask for
-the exact verbatim span. Writes repaired packets in-place (attempt-2 recorded).
+The grounding report binds each target to a packet revision and source
+revision. All targets are resolved and validated before the first packet is
+written. Packet writes use ``os.replace`` through the shared core helper, so a
+failed write leaves the last valid packet intact.
+
 Usage: repair_claims.py <run_root> <source_dir> <grounding_report.txt>
+    --field-root <isolated-field-root> --project <project.yaml> [--alignment <alignment.jsonl>]
 """
 
+from __future__ import annotations
+
 import json
-import os
 import pathlib
-import re
 import sys
-import time
 
-from openai import OpenAI
-
-RUN = pathlib.Path(sys.argv[1])
-SRC = pathlib.Path(sys.argv[2])
-REPORT = pathlib.Path(sys.argv[3])
-
-_key = os.environ.get("OPENROUTER_API_KEY")
-if not _key and (
-    envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-):
-    fallback = pathlib.Path(envfile)
-    if fallback.is_file():
-        for line in fallback.read_text(errors="replace").splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                _key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-if not _key:
-    raise RuntimeError(
-        "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via RESEARCH_FABRIC_ENV_FILE"
-    )
-CLIENT = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_key)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric._source_adapter import ADAPTERS
+from research_fabric.claim_report import Report
+from research_fabric.claim_store import PacketStore
+from research_fabric.claim_validation import preflight, revalidate
+from research_fabric.claim_validation import source_body as _source_body
+from research_fabric.claims import (
+    ClaimIdentityError,
+)
+from research_fabric.execution import InvalidOutput, worker_session
 
 
-def call_model(prompt):
-    for a in range(1, 16):
-        try:
-            r = CLIENT.chat.completions.create(
-                model="stealth/ox-alpha",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=20000,
-            )
-            return r.choices[0].message.content
-        except Exception as e:
-            s = str(e)
-            if "429" in s or "Provider returned error" in s or any(f"5{x}" in s[:4] for x in "01234"):
-                time.sleep(min(60, 6 * a))
-            else:
-                raise
-    raise RuntimeError("model call failed after 15 attempts")
+def call_model(prompt, session):
+    def validate(text):
+        value = extract_json(text)
+        if not isinstance(value, dict) or not isinstance(value.get("found"), bool):
+            raise InvalidOutput()
+        if value["found"] and not isinstance(value.get("excerpt"), str):
+            raise InvalidOutput()
+        return text
+
+    return session.call([{"role": "user", "content": prompt}], validate=validate)
 
 
 def extract_json(text):
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = re.sub(r"^```(?:json)?\s*", "", t)
-        t = t.rsplit("```", 1)[0]
-    i = t.find('{"')
-    if i > 0:
-        t = t[i:]
-    return json.loads(t.strip())
+    """Decode whole JSON first, then find a repair object inside fences or prose."""
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return _scan_json_object(text)
 
 
-# 1. Parse the grounding report for failed claim ids
-failed_ids = []
-for line in REPORT.read_text().splitlines():
-    m = re.match(r"(c-book-\d+-\d+): excerpt not found", line.strip())
-    if m:
-        failed_ids.append(m.group(1))
-print(f"failed claims: {len(failed_ids)}")
-
-# 2. Group by book; load each book's packet and text once
-by_book = {}
-for cid in failed_ids:
-    b = int(re.search(r"c-book-(\d+)-", cid).group(1))
-    by_book.setdefault(b, []).append(cid)
-
-
-def html_to_text_local(raw):
-    from html.parser import HTMLParser
-
-    class T(HTMLParser):
-        def __init__(s):
-            super().__init__()
-            s.parts = []
-            s.skip = 0
-
-        def handle_starttag(s, t, a):
-            if t in ("script", "style"):
-                s.skip += 1
-            if t in ("br", "p", "div", "li"):
-                s.parts.append("\n")
-
-        def handle_endtag(s, t):
-            if t in ("script", "style"):
-                s.skip = max(0, s.skip - 1)
-
-        def handle_data(s, d):
-            if not s.skip:
-                s.parts.append(d)
-
-    tp = T()
-    tp.feed(raw)
-    import html as h
-
-    text = h.unescape("".join(tp.parts))
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    i = text.find("Homer")
-    return text[i:] if i > 0 else text
-
-
-repaired = 0
-dropped = 0
-for b, cids in sorted(by_book.items()):
-    pkt_path = RUN / "evidence" / f"worker-book-{b}.json"
-    pkt = json.loads(pkt_path.read_text())
-    claims = pkt["parsed"]["claims"]
-    body = html_to_text_local((SRC / f"odyssey-book-{b}.html").read_text(encoding="utf-8", errors="replace"))
-    for cid in cids:
-        idx = int(cid.rsplit("-", 1)[1]) - 1
-        if idx >= len(claims):
+def _scan_json_object(text):
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(text):
+        if char != "{":
             continue
-        c = claims[idx]
-        prompt = (
-            f"You are repairing one evidence claim about Odyssey Book {b}. The claim's "
-            f'"excerpt" was rejected because it is not a verbatim substring of the book text.\n\n'
-            f'CLAIM: "{c["claim"]}"\n'
-            f'REJECTED EXCERPT: "{c["excerpt"]}"\n\n'
-            "Find the passage in BOOK TEXT that this excerpt attempted to quote. Reply with ONLY "
-            'a JSON object: {"excerpt": "<exact verbatim substring of BOOK TEXT>", "found": true}\n'
-            "The excerpt must be copied character-for-character from BOOK TEXT (you may choose a "
-            'shorter span). If the passage does not exist in BOOK TEXT, reply {"found": false}.\n\n'
-            f"BOOK TEXT:\n{body}"
-        )
         try:
-            out = extract_json(call_model(prompt))
-        except Exception as e:
-            print(f"{cid}: model error {e}")
+            value, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
             continue
-        if not out.get("found"):
-            # Drop the ungroundable claim
-            claims.remove(c)
-            dropped += 1
-            print(f"{cid}: dropped (passage not found)")
-            continue
-        new_ex = out.get("excerpt", "")
-        if new_ex and new_ex in body:
-            c["excerpt"] = new_ex
-            repaired += 1
-            print(f"{cid}: repaired ({len(new_ex)} chars)")
-        else:
-            claims.remove(c)
-            dropped += 1
-            print(f"{cid}: dropped (model excerpt still not verbatim)")
-    pkt["attempts"].append({"attempt": "excerpt-repair", "repaired": True})
-    pkt_path.write_text(json.dumps(pkt, indent=2) + "\n", encoding="utf-8")
+        if isinstance(value, dict) and "found" in value:
+            return value
+    raise ValueError("model response did not contain a repair JSON object")
 
-print(f"\ndone: repaired={repaired}, dropped={dropped}")
+
+def _replacement(result, body, grounded):
+    if not result.get("found"):
+        return "drop", None, "passage not found in source"
+    excerpt = result.get("excerpt", "")
+    if not excerpt or not grounded(excerpt, body):
+        return "drop", None, "model excerpt was not verbatim in source"
+    return "repair", excerpt, "model supplied a grounded replacement excerpt"
+
+
+def _repair_target(target, source_dir, model, grounded, adapters):
+    claim = target.claim
+    body = _source_body(source_dir, claim, adapters)
+    prompt = (
+        f"You are repairing evidence claim {target.claim_id}. Its excerpt was rejected because it is not a verbatim "
+        "substring of the source text. Preserve the claim text and stance.\n\n"
+        f"CLAIM: {claim.get('claim', '')}\nREJECTED EXCERPT: {claim.get('excerpt', '')}\n\n"
+        'Reply with ONLY JSON: {"excerpt":"<exact source substring>","found":true}. '
+        'If the passage does not exist, reply {"found":false}.\n\nSOURCE TEXT:\n' + body
+    )
+    result = extract_json(model(prompt))
+    if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
+        raise ValueError("repair response requires a boolean found field")
+    return _replacement(result, body, grounded)
+
+
+def _process_targets(targets, store, source_dir, report_id, model, grounded, adapters, run_root, project):
+    """Commit each completed target before continuing; aggregate model errors afterward.
+
+    Persistence failures propagate immediately; replay reads the last durable
+    packet to determine which targets still need repair.
+    """
+    counts = {"repair": 0, "drop": 0}
+    errors = []
+    for number, target in enumerate(targets, 1):
+        if target.applied:
+            continue
+        session = None
+        callback = model
+        if callback is None:
+            session = worker_session(
+                run_root, "repair", target.claim_id, [source_dir / target.claim["source_file"]], project
+            )
+            def callback(prompt):
+                return call_model(prompt, session)
+        try:
+            action, excerpt, reason = _repair_target(target, source_dir, callback, grounded, adapters)
+        except Exception as exc:
+            errors.append(f"{target.claim_id}: model error {exc}")
+            continue
+        if session:
+            target.packet.setdefault("execution", []).extend(session.records())
+        event = store.commit(
+            target,
+            action=action,
+            new_excerpt=excerpt,
+            reason=reason,
+            attempt_id=f"{report_id}:{target.claim_id}:call-{number}",
+            report_id=report_id,
+        )
+        if event:
+            counts[event["event"]] += 1
+    if errors:
+        raise ClaimIdentityError("repair did not resolve every target: " + "; ".join(errors))
+    return counts
+
+
+def repair_claims(
+    run_root: pathlib.Path,
+    source_dir: pathlib.Path,
+    report_path: pathlib.Path,
+    model=None,
+    *,
+    field_root: pathlib.Path | None = None,
+    acceptance: dict | None = None,
+    project: dict | None = None,
+    alignment_path: pathlib.Path | None = None,
+    adapters=ADAPTERS,
+):
+    """Repair one bound report with the supplied provider callback, then re-gate.
+
+    A library call without ``field_root`` validates packets only and returns
+    ``fully_validated=False``. The CLI requires a field root and project spec
+    so provenance, excerpt and applicable translation gates also run. Neither
+    mode materializes the repaired publication ledger; the workflow does that.
+
+    Report/identity errors fail before calls or writes. Once repair starts,
+    successful earlier targets remain durable if a later model call or gate
+    fails. Their audit permits resume without repeating or retargeting them.
+    The callback receives a prompt and returns response text; execution policy
+    and provider provenance remain the configurable-execution boundary.
+    """
+    from excerpt_grounding import grounded
+
+    run_root = pathlib.Path(run_root)
+    source_dir = pathlib.Path(source_dir)
+    store = PacketStore(run_root / "evidence", source_dir, adapters)
+    report = Report.read(pathlib.Path(report_path), store.packets, source_dir)
+    targets = report.targets(store.packets)
+    preflight(field_root, project)
+    counts = _process_targets(
+        targets, store, source_dir, report.report_id, model, grounded, adapters, run_root, project
+    )
+    fully_validated = revalidate(
+        run_root,
+        source_dir,
+        store.packets,
+        field_root,
+        project or {"acceptance": acceptance or {}},
+        alignment_path,
+        grounded,
+        adapters,
+    )
+    return {
+        "repaired": counts["repair"],
+        "dropped": counts["drop"],
+        "report_id": report.report_id,
+        "fully_validated": fully_validated,
+    }
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("run_root", type=pathlib.Path)
+    parser.add_argument("source_dir", type=pathlib.Path)
+    parser.add_argument("report", type=pathlib.Path)
+    parser.add_argument("--field-root", type=pathlib.Path, required=True)
+    parser.add_argument("--project", type=pathlib.Path, required=True)
+    parser.add_argument("--alignment", type=pathlib.Path)
+    args = parser.parse_args()
+    from research_fabric.core import load_project
+
+    try:
+        project = load_project(args.project.parent, args.project.stem)
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    repair_claims(
+        args.run_root,
+        args.source_dir,
+        args.report,
+        field_root=args.field_root,
+        acceptance=project.get("acceptance") or {},
+        project=project,
+        alignment_path=args.alignment,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

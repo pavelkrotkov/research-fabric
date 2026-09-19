@@ -1,0 +1,5 @@
+# Version-tested OAuth adapter. Upgrade only with the real converter/runner regression.
+openkb==0.4.5
+litellm==1.87.2
+openai-agents==0.17.3
+openai==2.44.0

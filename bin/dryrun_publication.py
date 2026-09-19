@@ -26,6 +26,7 @@ import yaml
 FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.claims import accept_packet, atomic_write_json  # noqa: E402
 from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
 from research_fabric.sources import (  # noqa: E402
     bind_manifest,
@@ -41,6 +42,20 @@ def _load_project(name):
     if not path.exists():
         raise SystemExit(f"no project spec at {path}")
     return yaml.safe_load(path.read_text())
+
+
+def accept_and_persist_packet(packet_path, worker, source_dir, destination):
+    """Migrate one packet into the disposable publication destination."""
+    packet_path = pathlib.Path(packet_path)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    if not packet.get("packet_revision"):
+        normalize_packet(packet.get("parsed") or packet)
+    accepted = accept_packet(packet, worker, source_dir=source_dir)
+    destination = pathlib.Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / packet_path.name
+    atomic_write_json(target, accepted)
+    return accepted, target
 
 
 def _parse_args():
@@ -101,27 +116,14 @@ def _publish_sources(field_root: pathlib.Path, source_files: list[pathlib.Path])
     return snap_dest
 
 
-def _claim_row(sid: str, idx: int, claim: dict, source_id: str, note: str):
-    return {
-        "claim_id": f"c-{sid}-{idx}",
-        "claim": claim.get("claim", ""),
-        "note": note,
-        "source_ids": [source_id],
-        "locator": claim.get("locator", ""),
-        "excerpt": claim.get("excerpt", ""),
-        "stance": claim.get("stance", "supports"),
-        "confidence": claim.get("confidence", 0.0),
-        "independence_group": claim.get("independence_group", sid),
-        "verified_at": "pilot-verifier-pass",
-    }
-
-
-def _materialize_claims(packet_dir, field_root, note_by_source, source_by_file):
-    claims, dropped = [], []
+def _materialize_claims(packet_dir, field_root, note_by_source, source_by_file, source_dir):
+    claims, dropped, history = [], [], []
+    accepted_packets = field_root / "evidence" / "accepted-packets"
     for packet_path in sorted(packet_dir.glob("worker-*.json")):
         sid = packet_path.stem.replace("worker-", "")
-        packet = json.loads(packet_path.read_text())
-        parsed = normalize_packet(packet.get("parsed") or {})
+        packet, _accepted_path = accept_and_persist_packet(packet_path, sid, source_dir, accepted_packets)
+        history.extend(packet.get("claim_history") or [])
+        parsed = packet.get("parsed") or {}
         for idx, claim in enumerate(parsed.get("claims", []), 1):
             source_file = pathlib.Path(claim.get("source_file", "")).name
             source_id = source_by_file.get(source_file)
@@ -130,11 +132,36 @@ def _materialize_claims(packet_dir, field_root, note_by_source, source_by_file):
                 continue
             note = note_by_source[source_id]
             assert (field_root / note).is_file(), f"note target missing: {note}"
-            claims.append(_claim_row(sid, idx, claim, source_id, note))
+            claims.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "worker": sid,
+                    "claim": claim.get("claim", ""),
+                    "note": note,
+                    "source_ids": [source_id],
+                    "source_file": claim.get("source_file", ""),
+                    "locator": claim.get("locator", ""),
+                    "excerpt": claim.get("excerpt", ""),
+                    "stance": claim.get("stance", "supports"),
+                    "confidence": claim.get("confidence", 0.0),
+                    "independence_group": claim.get("independence_group", sid),
+                    "verified_at": "pilot-verifier-pass",
+                    "packet_revision": packet.get("packet_revision"),
+                    "packet_state_revision": packet.get("packet_state_revision"),
+                    "source_revision": claim.get("source_revision"),
+                    "claim_type": claim.get("claim_type", ""),
+                    "english_witness": claim.get("english_witness"),
+                    "witnesses_consulted": claim.get("witnesses_consulted", []),
+                }
+            )
+            if claim.get("accepted_attempt_id"):
+                claims[-1]["accepted_attempt_id"] = claim["accepted_attempt_id"]
     if dropped:
         print(f"[dryrun] DROPPED {len(dropped)} claim(s): {json.dumps(dropped, indent=2)}")
         return None
     assert claims, "no claims materialized"
+    if history:
+        atomic_write_json(field_root / "evidence" / "claim-history.json", history)
     return claims
 
 
@@ -255,7 +282,9 @@ def main() -> int:
     manifest_rows = _manifest(run_root, project, source_files)
     snap_dest = _publish_sources(field_root, source_files)
     _published_notes(field_root, source_files, note_by_source, source_by_file)
-    claims = _materialize_claims(run_root / "evidence", field_root, note_by_source, source_by_file)
+    claims = _materialize_claims(
+        run_root / "evidence", field_root, note_by_source, source_by_file, run_root / "sources"
+    )
     if claims is None:
         return 1
     _write_claims(field_root, claims)
