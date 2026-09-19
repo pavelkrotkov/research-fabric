@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,14 +25,17 @@ def run_lifecycle(run_root):
     try:
         yield
     except BaseException as exc:
-        record = json.loads(path.read_text())
-        record.update(
-            state="FAILED",
-            failed_stage=record["state"],
-            failure=f"{type(exc).__name__}: {exc}",
-            artifacts=str(Path(run_root).resolve()),
-        )
-        write_json(path, record)
+        try:
+            record = json.loads(path.read_text())
+            record.update(
+                state="FAILED",
+                failed_stage=record["state"],
+                failure=f"{type(exc).__name__}: {exc}",
+                artifacts=str(Path(run_root).resolve()),
+            )
+            write_json(path, record)
+        except Exception:
+            logging.exception("Cannot record FAILED at %s; preserving original failure: %s", path, exc)
         raise
 
 

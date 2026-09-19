@@ -208,3 +208,42 @@ def test_compile_profile_switch_during_candidate_never_accepts_stale_result(repo
     assert git(repo, "status", "--porcelain") == ""
     failure = json.loads(next((run / "compile").glob("*/failure-1.json")).read_text())
     assert "Input/policy changed" in failure["reason"]
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "unwritable"])
+def test_failure_recording_preserves_original_error_and_damaged_state(tmp_path, monkeypatch, caplog, damage):
+    from research_fabric import run_state
+
+    run = tmp_path / "run"
+    original = RuntimeError("original worker failure")
+    with pytest.raises(RuntimeError) as caught, run_state.run_lifecycle(run):
+        path = run / "run.json"
+        run_state.set_state(run, "RESEARCHING")
+        if damage == "missing":
+            path.unlink()
+        elif damage == "corrupt":
+            path.write_text("broken JSON")
+        else:
+
+            def reject_write(*args):
+                raise OSError("state storage unavailable")
+
+            monkeypatch.setattr(run_state, "write_json", reject_write)
+        before = path.read_bytes() if path.exists() else None
+        raise original
+    assert caught.value is original
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert f"Cannot record FAILED at {path}" in caplog.text
+    assert "original worker failure" in caplog.text
+    assert "UNKNOWN" not in caplog.text
+
+
+def test_initial_state_write_failure_does_not_enter_run(tmp_path, monkeypatch):
+    from research_fabric import run_state
+
+    def reject_write(*args):
+        raise OSError("initial state write failed")
+
+    monkeypatch.setattr(run_state, "write_json", reject_write)
+    with pytest.raises(OSError, match="initial state write failed"), run_state.run_lifecycle(tmp_path):
+        pytest.fail("execution began without the initial state record")
