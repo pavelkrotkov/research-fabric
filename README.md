@@ -61,7 +61,7 @@ reason at any point).
 
 ```
 workflows/research.py      the full pipeline (CAO workflow script)
-bin/direct_worker.py       evidence worker: HTML → text → one ox-alpha call → validated packet
+bin/direct_worker.py       evidence worker: HTML → text → configured API call → validated packet
 bin/repair_claims.py       claim-level repair: re-ground failed claims, then re-run all acceptance gates
 bin/excerpt_grounding.py   gate: every excerpt must be a verbatim substring of its snapshot
 bin/provenance_validate.py gate: claims ledger ↔ source ledger ↔ snapshot bytes
@@ -147,12 +147,15 @@ KB commit (message includes run-id)
          └─ engine Git SHA + tag
          └─ project name + project-spec SHA
          └─ corpus manifest SHA + corpus sources content-hash
-         └─ model, provider, openkb/CAO/python versions
+         └─ per-attempt model/provider/usage histories + openkb/CAO/python versions
 ```
 
 The KB commit message ends with `run <run-id>` (e.g. "…Books 1-24; run
 20260825T154543Z-odyssey-full-publication7"), closing the loop from a claim in
 the KB back to the exact code, spec, corpus bytes, and model that produced it.
+
+See [execution profiles and resume](docs/execution-profiles.md) for role-specific
+model settings, configured fallback, shared budgets and recorded model changes.
 
 ## Host requirements (abstracted)
 

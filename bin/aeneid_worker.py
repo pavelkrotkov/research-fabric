@@ -30,15 +30,12 @@ witness is dropped rather than published with synthesized English.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import re
 import sys
-import time
-
-from openai import OpenAI
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.execution import ExecutionError, InvalidOutput, packet_policy_defects, worker_session
 from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 RUN = pathlib.Path(sys.argv[1])
@@ -56,39 +53,13 @@ while i < len(sys.argv):
     else:
         i += 1
 
-NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY")
-if not NVIDIA_KEY and (
-    envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-):
-    fallback = pathlib.Path(envfile)
-    if fallback.is_file():
-        for line in fallback.read_text(errors="replace").splitlines():
-            if line.startswith("NVIDIA_API_KEY="):
-                NVIDIA_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-
-MODEL = os.environ.get("RESEARCH_FABRIC_WORKER_MODEL", "deepseek-ai/deepseek-v4-flash-0731")
-PROVIDER = os.environ.get("RESEARCH_FABRIC_WORKER_PROVIDER", "")
-if not PROVIDER:
-    PROVIDER = "nvidia" if NVIDIA_KEY else "openrouter"
-if PROVIDER == "nvidia":
-    BASE_URL = "https://integrate.api.nvidia.com/v1"
-    API_KEY = NVIDIA_KEY
-else:
-    BASE_URL = "https://openrouter.ai/api/v1"
-    API_KEY = os.environ.get("OPENROUTER_API_KEY")
-    if not API_KEY and (
-        envfile := os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-    ):
-        fallback = pathlib.Path(envfile)
-        if fallback.is_file():
-            for line in fallback.read_text(errors="replace").splitlines():
-                if line.startswith("OPENROUTER_API_KEY="):
-                    API_KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-if not API_KEY:
-    raise RuntimeError(f"no API key for provider {PROVIDER}: set NVIDIA_API_KEY or OPENROUTER_API_KEY")
-CLIENT = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=300)
+SESSION = worker_session(
+    RUN,
+    "extraction",
+    f"book-{BOOK}",
+    [SRC / CANONICAL_FILE, *(SRC / w["file"] for w in WITNESSES)],
+    project={"project": "aeneid"},
+)
 CLAIM_TYPES = [
     "textual",
     "linguistic",
@@ -105,36 +76,19 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip().lower()
 
 
-def call_model(messages, max_tokens=32000):
-    for a in range(1, 16):
-        try:
-            r = CLIENT.chat.completions.create(model=MODEL, messages=messages, temperature=0, max_tokens=max_tokens)
-            text = r.choices[0].message.content
-            if text and text.strip():
-                return text
-            print(f"[worker] empty content (attempt {a})", flush=True)
-            continue
-        except Exception as e:
-            s = str(e)
-            transient = "429" in s or "50" in s[:3] or "Provider returned error" in s
-            if not transient:
-                raise
-            print(f"[worker] transient {s[:40]!r} (attempt {a}); backoff", flush=True)
-            time.sleep(min(60, 6 * a))
-    raise RuntimeError("model call returned no content after 15 attempts")
+def call_model(messages, key="selections"):
+    def validate(text):
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise InvalidOutput()
+        rows = parsed.get(key)
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise InvalidOutput()
+        if key == "claims" and not rows:
+            raise InvalidOutput()
+        return rows
 
-
-def extract_json(text):
-    t = (text or "").strip()
-    dec = json.JSONDecoder()
-    for idx in [k for k, ch in enumerate(t) if ch in "{"][:100]:
-        try:
-            obj, _ = dec.raw_decode(re.sub(r"\n[ \t]+", " ", t[idx:]))
-        except Exception:
-            continue
-        if isinstance(obj, dict) and ("claims" in obj or "selections" in obj):
-            return obj
-    return None
+    return SESSION.call(messages, validate=validate)
 
 
 def build_latin_prompt(latin_body, canon_file):
@@ -192,147 +146,105 @@ def build_select_prompt(items):
     )
 
 
-def main():
-    canonical_representation = representation_for(SRC / CANONICAL_FILE)
-    latin_body = canonical_representation.text
-    latin_hay = norm(latin_body)
-    witness_texts = []
-    for w in WITNESSES:
-        representation = representation_for(SRC / w["file"])
-        text = representation.text
-        witness_texts.append({**w, "text": text, "hay": norm(text), "representation": representation})
+def verbatim(excerpt, text):
+    """Empty or non-text excerpts are not evidence, even if containment succeeds."""
+    return isinstance(excerpt, str) and bool(norm(excerpt)) and norm(excerpt) in norm(text)
 
-    claims, last_err = None, None
-    for _attempt in range(1, 4):
-        text = call_model([{"role": "user", "content": build_latin_prompt(latin_body, CANONICAL_FILE)}])
-        p = extract_json(text)
-        cs = (p or {}).get("claims")
-        if isinstance(cs, list) and cs and all(isinstance(c, dict) and c.get("excerpt") for c in cs):
-            claims = cs
-            break
-        last_err = "stage1 no claims"
-    if claims is None:
-        raise RuntimeError(f"stage 1 failed after 3 attempts: {last_err}")
 
-    kept = []
-    for c in claims:
-        if norm(c.get("excerpt")) in latin_hay:
-            kept.append(c)
-    claims = kept
-    if not claims:
+def indexed(selections):
+    """Model item numbers are local selection indices, never persistent claim IDs."""
+    result = {}
+    for row in selections:
+        try:
+            result[int(row.get("i"))] = row
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return result
+
+
+def collect_latin(text):
+    claims = call_model([{"role": "user", "content": build_latin_prompt(text, CANONICAL_FILE)}], key="claims")
+    kept = [claim for claim in claims if verbatim(claim.get("excerpt"), text)]
+    if not kept:
         raise RuntimeError("stage 1 produced no verbatim Latin excerpts")
-
-    items = [
-        {"i": idx, "locator": c["locator"], "latin": c["excerpt"], "claim": c, "candidates": []}
-        for idx, c in enumerate(claims, 1)
+    return [
+        {"i": i, "locator": claim["locator"], "latin": claim["excerpt"], "claim": claim, "candidates": []}
+        for i, claim in enumerate(kept, 1)
     ]
 
-    for w in witness_texts:
-        text = call_model(
-            [{"role": "user", "content": build_witness_prompt(items, w["label"], w["source_id"], w["text"])}]
-        )
-        sel = extract_json(text)
-        sel_list = (sel or {}).get("selections") or []
-        by_i = {}
-        for s in sel_list:
-            try:
-                by_i[int(s.get("i"))] = s
-            except (TypeError, ValueError):
-                continue
-        for it in items:
-            s = by_i.get(it["i"])
-            if not s or not isinstance(s, dict):
-                continue
-            ex = s.get("excerpt")
-            if not isinstance(ex, str) or not ex.strip():
-                continue
-            if norm(ex) not in w["hay"]:
-                continue
-            it["candidates"].append(
-                {
-                    "translator": w["label"],
-                    "source_id": w["source_id"],
-                    "excerpt": ex,
-                }
+
+def collect_witness(items, witness):
+    text = witness["representation"].text
+    rows = call_model(
+        [{"role": "user", "content": build_witness_prompt(items, witness["label"], witness["source_id"], text)}]
+    )
+    selections = indexed(rows)
+    for item in items:
+        excerpt = selections.get(item["i"], {}).get("excerpt")
+        if verbatim(excerpt, text):
+            item["candidates"].append(
+                {"translator": witness["label"], "source_id": witness["source_id"], "excerpt": excerpt}
             )
 
-    selectable = [it for it in items if it["candidates"]]
-    selection_map = {}
-    if selectable:
-        text = call_model([{"role": "user", "content": build_select_prompt(selectable)}])
-        sel = extract_json(text)
-        for s in (sel or {}).get("selections") or []:
-            try:
-                selection_map[int(s.get("i"))] = s
-            except (TypeError, ValueError):
-                continue
 
-    final = []
-    for it in items:
-        chosen = selection_map.get(it["i"])
-        ew = None
-        if chosen and isinstance(chosen, dict):
-            translator = chosen.get("translator")
-            cand = next((c for c in it["candidates"] if c["translator"] == translator), None)
-            if cand and norm(chosen.get("excerpt", "")) == norm(cand["excerpt"]):
-                ew = {
-                    "translator": cand["translator"].capitalize(),
-                    "source_id": cand["source_id"],
-                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
-                    "excerpt": cand["excerpt"],
-                }
-            elif it["candidates"]:
-                c0 = it["candidates"][0]
-                ew = {
-                    "translator": c0["translator"].capitalize(),
-                    "source_id": c0["source_id"],
-                    "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}"
-                    if "." in it["locator"]
-                    else it["locator"],
-                    "excerpt": c0["excerpt"],
-                }
-        elif it["candidates"]:
-            c0 = it["candidates"][0]
-            ew = {
-                "translator": c0["translator"].capitalize(),
-                "source_id": c0["source_id"],
-                "locator": f"{BOOK}.{it['locator'].split('.', 1)[-1]}" if "." in it["locator"] else it["locator"],
-                "excerpt": c0["excerpt"],
-            }
-        if ew is None:
+def chosen_candidate(item, selection):
+    """Preserve the existing advisory-choice fallback to a grounded candidate.
+
+    The model can select a witnessed span, never introduce one during selection.
+    Missing/invalid choices use the first already-grounded witness in input order.
+    """
+    for candidate in item["candidates"]:
+        if candidate["translator"] != selection.get("translator"):
             continue
-        final.append(
-            {
-                **it["claim"],
-                "english_witness": ew,
-                "witnesses_consulted": [w["source_id"] for w in witness_texts if w["label"] != ew["translator"]]
-                + [ew["source_id"]],
-            }
-        )
+        excerpt = selection.get("excerpt")
+        if isinstance(excerpt, str) and norm(excerpt) == norm(candidate["excerpt"]):
+            return candidate
+    return item["candidates"][0]
 
-    if not final:
+
+def assemble_claim(item, selection, witnesses):
+    candidate = chosen_candidate(item, selection)
+    locator = item["locator"]
+    witness = {
+        **candidate,
+        "translator": candidate["translator"].capitalize(),
+        "locator": f"{BOOK}.{locator.split('.', 1)[-1]}" if "." in locator else locator,
+    }
+    consulted = [w["source_id"] for w in witnesses if w["source_id"] != candidate["source_id"]]
+    return {**item["claim"], "english_witness": witness, "witnesses_consulted": [*consulted, candidate["source_id"]]}
+
+
+def collect_claims(canonical, witnesses):
+    items = collect_latin(canonical.text)
+    for witness in witnesses:
+        collect_witness(items, witness)
+    selectable = [item for item in items if item["candidates"]]
+    if not selectable:
         raise RuntimeError("no claims with a verbatim English witness survived all stages")
+    rows = call_model([{"role": "user", "content": build_select_prompt(selectable)}])
+    selections = indexed(rows)
+    return [assemble_claim(item, selections.get(item["i"], {}), witnesses) for item in selectable]
 
-    pkt = RUN / "evidence" / f"worker-book-{BOOK}.json"
-    pkt.parent.mkdir(parents=True, exist_ok=True)
-    pkt.write_text(
-        json.dumps(
-            {
-                "worker": f"book-{BOOK}",
-                "attempts": [{"attempt": 1, "stages": 3, "ok": True, "claims_kept": len(final)}],
-                "source_provenance": sorted(
-                    [source_attestation(canonical_representation)]
-                    + [source_attestation(w["representation"]) for w in witness_texts],
-                    key=lambda row: row["source_file"],
-                ),
-                "parsed": {"claims": final, "conflicts": [], "coverage_notes": []},
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"OK aeneid-book-{BOOK}: {len(final)} claims")
+
+def main():
+    canonical = representation_for(SRC / CANONICAL_FILE)
+    witnesses = [{**w, "representation": representation_for(SRC / w["file"])} for w in WITNESSES]
+    claims = collect_claims(canonical, witnesses)
+    packet = {
+        "worker": f"book-{BOOK}",
+        "execution": SESSION.records(),
+        "source_provenance": sorted(
+            [source_attestation(canonical)] + [source_attestation(w["representation"]) for w in witnesses],
+            key=lambda row: row["source_file"],
+        ),
+        "parsed": {"claims": claims, "conflicts": [], "coverage_notes": []},
+    }
+    if packet_policy_defects(packet, {"project": "aeneid"}):
+        raise ExecutionError("artifact_model_policy")
+    path = RUN / "evidence" / f"worker-book-{BOOK}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(packet, indent=2) + "\n", encoding="utf-8")
+    print(f"OK aeneid-book-{BOOK}: {len(claims)} claims")
 
 
 if __name__ == "__main__":

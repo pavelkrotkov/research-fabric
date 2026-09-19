@@ -20,8 +20,10 @@ import hashlib
 import importlib.metadata
 import inspect
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+
+from research_fabric.execution import ExecutionError, Session, _validated
 
 POLICY = "native-045-complete-v1"
 COMPILER_SHA = "9d697d323100916017e25c0826efb3922092f56fe8971b13d725ce80b898d1da"
@@ -188,7 +190,7 @@ def strict_native(compiler, cli):
         cli._run_compile_with_retry = original_retry
 
 
-def native_compile(kb, sources):
+def native_compile(kb, sources, execution_root=None, profile_index=0):
     """Aggregate single-file native results; directory CLI ignores failures.
 
     Each file must add exactly one completed native compile report. A native
@@ -199,8 +201,11 @@ def native_compile(kb, sources):
     cli, compiler, versions = _native_modules()
     from openkb.state import HashRegistry
 
+    execution = (
+        native_execution(execution_root, sources, compiler, cli, profile_index) if execution_root else nullcontext()
+    )
     outcomes = []
-    with strict_native(compiler, cli) as reports:
+    with execution, strict_native(compiler, cli) as reports:
         for source in sources:
             # No native registry entry is an acceptance record. The outer seam
             # alone can skip a byte-identical, previously accepted candidate.
@@ -213,3 +218,53 @@ def native_compile(kb, sources):
                 {"source": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest(), **reports[-1]}
             )
     return {"policy": POLICY, "versions": versions, "sources": outcomes}
+
+
+@contextmanager
+def native_execution(root, sources, compiler, cli, index):
+    session = Session(root, "compile", "native-compile", sources)
+    profiles = session.profiles()
+    profile = profiles[min(index, len(profiles) - 1)]
+    model = f"{profile['provider']}/{profile['model']}"
+    original_sync, original_async = compiler.litellm.completion, compiler.litellm.acompletion
+    original_config = cli.load_config
+    stopped = []
+
+    def config(path):
+        value = dict(original_config(path))
+        value.update(model=model, timeout=session.config["budget"]["attempt_seconds"])
+        return value
+
+    def prepare(kwargs):
+        try:
+            attempt, timeout = session.begin(profile)
+        except ExecutionError as exc:
+            stopped.append(exc.reason)
+            raise
+        kwargs.update(session.arguments(profile, timeout, kwargs.get("max_tokens")))
+        kwargs.update(model=model, num_retries=0, max_retries=0)
+        return attempt, timeout
+
+    def sync(**kwargs):
+        with session.attempt(*prepare(kwargs)) as call:
+            call.response = original_sync(**kwargs)
+            _validated(call.response, lambda text: text)
+            return call.response
+
+    async def asynchronous(**kwargs):
+        with session.attempt(*prepare(kwargs)) as call:
+            call.response = await original_async(**kwargs)
+            _validated(call.response, lambda text: text)
+            return call.response
+
+    cli.load_config = config
+    compiler.litellm.completion, compiler.litellm.acompletion = sync, asynchronous
+    try:
+        yield session
+        if stopped:
+            raise ExecutionError(stopped[0])
+        if any(row["outcome"] == "budget_exhausted" for row in session.records()):
+            raise ExecutionError("budget_exhausted")
+    finally:
+        cli.load_config = original_config
+        compiler.litellm.completion, compiler.litellm.acompletion = original_sync, original_async

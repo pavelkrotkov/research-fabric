@@ -37,9 +37,10 @@ def response(content):
 
 @pytest.fixture
 def model(monkeypatch):
-    state = {"failure": None, "calls": [], "plan": {"create": [{"name": "one"}, {"name": "two"}]}}
+    state = {"failure": None, "calls": [], "models": [], "plan": {"create": [{"name": "one"}, {"name": "two"}]}}
 
     def sync(model, messages, **kwargs):
+        state["models"].append(model)
         prompt = messages[-1]["content"]
         if isinstance(prompt, list):
             prompt = prompt[0]["text"]
@@ -52,6 +53,7 @@ def model(monkeypatch):
         return response(json.dumps({"description": "Synthetic source", "content": "Initial summary"}))
 
     async def async_call(model, messages, **kwargs):
+        state["models"].append(model)
         await asyncio.sleep(0.001)  # Exercise real coroutine suspension.
         prompt = messages[-1]["content"]
         state["calls"].append(prompt)
@@ -165,17 +167,22 @@ def test_production_native_retry_starts_from_baseline(kb, model, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "ignored,attestation",
+    "ignored,collect_new,policy,attestation",
     [
-        (None, "valid"),
-        ("wiki/concepts/", "valid"),
-        ("evidence/snapshots/", "valid"),
-        (None, "missing"),
-        (None, "stale"),
+        (None, False, None, "valid"),
+        ("wiki/concepts/", False, None, "valid"),
+        ("evidence/snapshots/", False, None, "valid"),
+        (None, True, None, "valid"),
+        (None, False, "restricted-reuse", "valid"),
+        (None, True, "restricted-fresh", "valid"),
+        (None, False, "compatible-reuse", "valid"),
+        (None, False, "legacy-restricted", "valid"),
+        (None, False, None, "missing"),
+        (None, False, None, "stale"),
     ],
 )
 def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
-    kb, tmp_path, monkeypatch, ignored, attestation
+    kb, tmp_path, monkeypatch, ignored, collect_new, policy, attestation
 ):
     """CAO transport and provider are synthetic; workflow, compiler and gates are real."""
     import hashlib
@@ -188,6 +195,8 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
     from research_fabric import compilation
 
     root = Path(__file__).resolve().parents[1]
+    if collect_new:
+        (kb / ".openkb/config.yaml").write_text("language: en\nconcurrency: 1\n")
     if ignored:
         (kb / ".gitignore").write_text(ignored + "\n")
     for args in (
@@ -233,14 +242,37 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         "conflicts": [],
         "coverage_notes": [],
     }
+    from research_fabric import execution as ex
     from research_fabric.sources import source_provenance
 
-    envelope = {"parsed": packet, "source_provenance": source_provenance([src])}
+    reused_packet = {"parsed": packet, "source_provenance": source_provenance([src])}
     if attestation == "missing":
-        del envelope["source_provenance"]
+        del reused_packet["source_provenance"]
     elif attestation == "stale":
-        envelope["source_provenance"][0]["sha256"] = "0" * 64
-    (reused / "worker-book-1.json").write_text(json.dumps(envelope))
+        reused_packet["source_provenance"][0]["sha256"] = "0" * 64
+    if policy in ("restricted-reuse", "compatible-reuse"):
+        prior = tmp_path / "prior-run"
+        ex.configure(prior, ex.resolve(override={"roles": {"extraction": {"model": "forbidden-B"}}}, environ={}))
+        session = ex.Session(prior, "extraction", "book-1", [src])
+        attempt, _ = session.begin(session.profiles()[0])
+        session.finish(attempt, SimpleNamespace(model="forbidden-B"), "accepted", 0.01)
+        reused_packet["execution"] = session.records()
+    if policy:
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        restriction = "" if policy == "compatible-reuse" else "allowed_models: [allowed-C]\n"
+        (projects / "odyssey.yaml").write_text(
+            (root / "projects/odyssey.yaml").read_text()
+            + "\n"
+            + restriction
+            + "execution:\n  roles:\n    extraction: {model: allowed-C}\n    repair: {model: allowed-C}\n"
+        )
+        monkeypatch.setenv("RESEARCH_FABRIC_PROJECTS", str(projects))
+    (reused / "worker-book-1.json").write_text(json.dumps(reused_packet))
+    collected = collect_new or policy in ("restricted-reuse", "legacy-restricted")
+    returned_model = (
+        "forbidden-B" if policy == "restricted-fresh" else "allowed-C" if policy else "actual-evidence-model"
+    )
     shim = types.ModuleType("cao_workflow")
     shim.ShimError = RuntimeError
     shim.get_inputs = lambda: {
@@ -248,13 +280,41 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         "run_root": str(run),
         "source_dir": str(sources),
         "question": "What happened?",
-        "reuse_evidence_dir": str(reused),
+        "reuse_evidence_dir": None if collect_new else str(reused),
     }
     outputs = []
     shim.emit_output = outputs.append
     shim.run_step = lambda **kwargs: SimpleNamespace(output="VERDICT: FAIL - advisory fixture")
     monkeypatch.setitem(sys.modules, "cao_workflow", shim)
     monkeypatch.setenv("RESEARCH_FABRIC_ROOT", str(root))
+    if collected:
+        wrapper = tmp_path / "worker-python"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            + """
+import json, runpy, sys
+import httpx
+import openai
+Original = openai.OpenAI
+"""
+            + f"packet = {packet!r}\nreturned_model = {returned_model!r}\n"
+            + """
+def respond(request):
+    return httpx.Response(200, json={"id":"fixture", "object":"chat.completion", "created":1,
+        "model":returned_model, "choices":[{"index":0,"finish_reason":"stop",
+        "message":{"role":"assistant","content":json.dumps(packet)}}],
+        "usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}})
+def client(**kwargs):
+    kwargs["api_key"] = "offline-fixture"
+    return Original(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond)))
+openai.OpenAI = client
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "offline-fixture")
+        monkeypatch.setenv("RESEARCH_FABRIC_WORKER_PYTHON", str(wrapper))
     executables = tmp_path / "bin"
     executables.mkdir()
     lint = executables / "openkb"
@@ -271,8 +331,17 @@ cli.cli()
     production_compile = compilation.compile_with_recovery
     command = [sys.executable, str(root / "tests/fixtures/scripted_openkb.py"), str(tmp_path / "calls.json")]
     monkeypatch.setattr(
-        compilation, "compile_with_recovery", lambda kb, src, diag: production_compile(kb, src, diag, command=command)
+        compilation,
+        "compile_with_recovery",
+        lambda kb, src, diag, **kwargs: production_compile(kb, src, diag, command=command, **kwargs),
     )
+    if policy == "restricted-fresh":
+        with pytest.raises(RuntimeError, match="evidence workers failed"):
+            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+        assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+        assert ex.history(run)["attempts"][0]["actual_model"] == "forbidden-B"
+        assert not (tmp_path / "calls.json").exists()
+        return
     if attestation != "valid":
         # An invalid reused packet must trigger collection, never compilation.
         # The unavailable executable makes that required collection fail offline.
@@ -300,6 +369,25 @@ cli.cli()
     )
     assert result["provenance"]["source_adapters"] == ["html@1"]
     assert result["claims"] == 5
+    execution = result["provenance"]["execution"]
+    assert execution["attempts"]
+    assert {row["role"] for row in execution["attempts"]} == ({"compile", "extraction"} if collected else {"compile"})
+    if collect_new:
+        from openkb.config import DEFAULT_CONFIG
+
+        native_rows = [row for row in execution["attempts"] if row["role"] == "compile"]
+        assert {row["profile"]["model"] for row in native_rows} == {DEFAULT_CONFIG["model"]}
+    if collected:
+        packet_execution = json.loads((run / "evidence/worker-book-1.json").read_text())["execution"]
+        assert packet_execution[0]["actual_model"] == returned_model
+        ledger = json.loads((kb / "evidence/claims.jsonl").read_text().splitlines()[0])
+        published = json.loads((kb / "evidence/packet-execution.json").read_text())[ledger["worker"]]
+        assert published == {"packet_revision": ledger["packet_revision"], "execution": packet_execution}
+    if policy == "compatible-reuse":
+        ledger = json.loads((kb / "evidence/claims.jsonl").read_text().splitlines()[0])
+        published = json.loads((kb / "evidence/packet-execution.json").read_text())[ledger["worker"]]
+        assert published == {"packet_revision": ledger["packet_revision"], "execution": reused_packet["execution"]}
+    assert result["provenance"]["advisory_execution"]["actual_model"] is None
     accepted = json.loads((run / "evidence/worker-book-1.json").read_text())
     ledger = [json.loads(line) for line in (kb / "evidence/claims.jsonl").read_text().splitlines()]
     assert [row["claim_id"] for row in ledger] == accepted["claim_identity"]["claim_ids"]
@@ -331,3 +419,83 @@ def test_unqualified_native_source_fails_before_writing(kb, model, tmp_path, mon
         native_compile(kb, [source(tmp_path)])
     assert model["calls"] == []
     assert json.loads((kb / ".openkb/hashes.json").read_text()) == {}
+
+
+def test_native_fallback_uses_fresh_candidate_and_shared_accounting(kb, tmp_path):
+    import subprocess
+    import sys
+
+    from research_fabric.compilation import compile_with_recovery
+    from research_fabric.execution import configure, history, resolve
+
+    for args in (
+        ("init", "-b", "agent/execution"),
+        ("config", "user.email", "test@example.invalid"),
+        ("config", "user.name", "Test"),
+        ("add", "."),
+        ("commit", "-m", "baseline"),
+    ):
+        subprocess.run(["git", "-C", str(kb), *args], check=True, capture_output=True)
+    run = tmp_path / "run"
+    configure(
+        run,
+        resolve(
+            override={"fallbacks": {"compile": [{"provider": "openai", "model": "C"}]}},
+            native_model="openai/B",
+            environ={},
+        ),
+    )
+    command = [sys.executable, str(Path(__file__).parent / "fixtures/scripted_openkb.py"), str(tmp_path / "calls.json")]
+    compile_with_recovery(kb, [source(tmp_path)], tmp_path / "diagnostics", command=command, execution_root=run)
+    records = [row for row in history(run)["attempts"] if row["role"] == "compile"]
+    assert {row["profile"]["model"] for row in records} == {"B", "C"}
+    assert sum(row["outcome"] == "transient" for row in records) >= 2
+    assert all(row["revision"] == 1 for row in records)
+    assert (kb / "wiki/concepts/two.md").is_file()
+    failed = next((tmp_path / "diagnostics").glob("*/candidate-1"))
+    assert not (failed / "wiki/concepts/one.md").exists()
+    identity = json.loads(next((tmp_path / "diagnostics").glob("*/identity.json")).read_text())
+    assert identity["execution"]["revision"] == 1
+    assert set(identity["execution"]["code"]) == {"execution.py"}
+
+
+def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, model, tmp_path):
+    from research_fabric.execution import configure, history, resolve
+
+    run = tmp_path / "run"
+    configure(run, resolve(override={"budget": {"requests": 1}}, native_model="openai/B", environ={}))
+    with pytest.raises((CompilationError, RuntimeError)):
+        native_compile(kb, [source(tmp_path)], execution_root=run)
+    records = history(run)["attempts"]
+    assert len(records) == 1
+    assert not (kb / "wiki/concepts/one.md").exists()
+
+
+def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tmp_path, monkeypatch):
+    import time
+
+    from litellm.llms.chatgpt.authenticator import Authenticator
+
+    from research_fabric.execution import configure, history, resolve
+
+    run = tmp_path / "run"
+    # Native provider detection reads OAuth state before the completion boundary.
+    # Isolate it from developer credentials and never initiate device login.
+    tokens = tmp_path / "tokens"
+    tokens.mkdir()
+    (tokens / "auth.json").write_text(json.dumps({"access_token": "offline-fixture", "expires_at": time.time() + 3600}))
+    monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tokens))
+    monkeypatch.setenv("CHATGPT_AUTH_FILE", "auth.json")
+
+    def unexpected_login(self):
+        pytest.fail("offline OAuth fixture must never initiate device login")
+
+    monkeypatch.setattr(Authenticator, "_login_device_code", unexpected_login)
+    configure(run, resolve(native_model="chatgpt/gpt-5", environ={}))
+    report = native_compile(kb, [source(tmp_path)], execution_root=run)
+    assert report["sources"]
+    records = history(run)["attempts"]
+    assert all(row["profile"]["auth"] == "oauth" for row in records)
+    assert all(row["profile"]["provider"] == "chatgpt" for row in records)
+    assert all(row["actual_model"] is None for row in records)
+    assert set(model["models"]) == {"chatgpt/gpt-5"}

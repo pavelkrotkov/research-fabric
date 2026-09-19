@@ -12,12 +12,8 @@ Usage: repair_claims.py <run_root> <source_dir> <grounding_report.txt>
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import sys
-import time
-
-from openai import OpenAI
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric._source_adapter import ADAPTERS
@@ -28,42 +24,19 @@ from research_fabric.claim_validation import source_body as _source_body
 from research_fabric.claims import (
     ClaimIdentityError,
 )
+from research_fabric.execution import InvalidOutput, worker_session
 
 
-def _client():
-    key = os.environ.get("OPENROUTER_API_KEY")
-    envfile = os.environ.get("RESEARCH_FABRIC_ENV_FILE") or str(pathlib.Path.home() / ".hermes" / ".env")
-    if not key and pathlib.Path(envfile).is_file():
-        for line in pathlib.Path(envfile).read_text(errors="replace").splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
-                key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-    if not key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY not available: set the env var or provide a .env-style file via "
-            "RESEARCH_FABRIC_ENV_FILE"
-        )
-    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=key)
+def call_model(prompt, session):
+    def validate(text):
+        value = extract_json(text)
+        if not isinstance(value, dict) or not isinstance(value.get("found"), bool):
+            raise InvalidOutput()
+        if value["found"] and not isinstance(value.get("excerpt"), str):
+            raise InvalidOutput()
+        return text
 
-
-def call_model(prompt):
-    client = _client()
-    for attempt in range(1, 16):
-        try:
-            reply = client.chat.completions.create(
-                model="stealth/ox-alpha",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=20000,
-            )
-            return reply.choices[0].message.content
-        except Exception as exc:
-            text = str(exc)
-            if "429" in text or "Provider returned error" in text or any(f"5{x}" in text[:4] for x in "01234"):
-                time.sleep(min(60, 6 * attempt))
-            else:
-                raise
-    raise RuntimeError("model call failed after 15 attempts")
+    return session.call([{"role": "user", "content": prompt}], validate=validate)
 
 
 def extract_json(text):
@@ -114,7 +87,7 @@ def _repair_target(target, source_dir, model, grounded, adapters):
     return _replacement(result, body, grounded)
 
 
-def _process_targets(targets, store, source_dir, report_id, model, grounded, adapters):
+def _process_targets(targets, store, source_dir, report_id, model, grounded, adapters, run_root, project):
     """Commit each completed target before continuing; aggregate model errors afterward.
 
     Persistence failures propagate immediately; replay reads the last durable
@@ -125,11 +98,21 @@ def _process_targets(targets, store, source_dir, report_id, model, grounded, ada
     for number, target in enumerate(targets, 1):
         if target.applied:
             continue
+        session = None
+        callback = model
+        if callback is None:
+            session = worker_session(
+                run_root, "repair", target.claim_id, [source_dir / target.claim["source_file"]], project
+            )
+            def callback(prompt):
+                return call_model(prompt, session)
         try:
-            action, excerpt, reason = _repair_target(target, source_dir, model, grounded, adapters)
+            action, excerpt, reason = _repair_target(target, source_dir, callback, grounded, adapters)
         except Exception as exc:
             errors.append(f"{target.claim_id}: model error {exc}")
             continue
+        if session:
+            target.packet.setdefault("execution", []).extend(session.records())
         event = store.commit(
             target,
             action=action,
@@ -149,7 +132,7 @@ def repair_claims(
     run_root: pathlib.Path,
     source_dir: pathlib.Path,
     report_path: pathlib.Path,
-    model=call_model,
+    model=None,
     *,
     field_root: pathlib.Path | None = None,
     acceptance: dict | None = None,
@@ -178,7 +161,9 @@ def repair_claims(
     report = Report.read(pathlib.Path(report_path), store.packets, source_dir)
     targets = report.targets(store.packets)
     preflight(field_root, project)
-    counts = _process_targets(targets, store, source_dir, report.report_id, model, grounded, adapters)
+    counts = _process_targets(
+        targets, store, source_dir, report.report_id, model, grounded, adapters, run_root, project
+    )
     fully_validated = revalidate(
         run_root,
         source_dir,

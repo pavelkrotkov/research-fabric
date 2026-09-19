@@ -12,12 +12,13 @@ import shutil
 import subprocess
 import sys
 
-from cao_workflow import ShimError, emit_output, get_inputs, run_step
+from cao_workflow import emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.claims import ClaimIdentityError, accept_packet, atomic_write_json
 from research_fabric.compilation import assert_run_branch, compile_with_recovery, normalize_generated_log
 from research_fabric.run_state import finalize_run, run_lifecycle
+from research_fabric.execution import configure, configured, resolve, history, packet_policy_defects
 from research_fabric.core import (
     book_task_from_project,
     extract_json,
@@ -44,10 +45,6 @@ from research_fabric.sources import (
 RESEARCH_ROOT = pathlib.Path(os.environ.get("RESEARCH_FABRIC_ROOT", "/home/pavel/research-fabric"))
 PROJECTS_DIR = pathlib.Path(os.environ.get("RESEARCH_FABRIC_PROJECTS", str(RESEARCH_ROOT / "projects")))
 DEFAULT_PROJECT = "odyssey"
-# The direct-API worker's model/provider (mirrors bin/direct_worker.py). Kept in
-# sync so run.json records the exact model that produced the claims.
-MODEL_REF = "z-ai/glm-5.3-flash"
-PROVIDER_REF = "openrouter"
 SOURCE_ADAPTERS = ADAPTERS
 
 INPUTS = {
@@ -57,6 +54,7 @@ INPUTS = {
     "question": {"type": "string", "required": True},
     "reuse_evidence_dir": {"type": "path", "required": False},
     "project": {"type": "string", "required": False},
+    "execution": {"type": "string", "required": False},
     "visual_preflight_spec": {"type": "path", "required": False},
     "visual_python": {"type": "path", "required": False},
 }
@@ -95,8 +93,10 @@ def collect_provenance(manifest_rows: list[dict]) -> dict:
     proj_path = PROJECTS_DIR / f"{project_name}.yaml"
     corpus_manifest = manifest_path
     return {
-        "model": MODEL_REF,
-        "provider": PROVIDER_REF,
+        "execution": history(run_root),
+        "advisory_execution": {"provider": "claude_code", "actual_model": None, "usage": None,
+                               "reason": "CAO does not expose effective model or usage at this seam"},
+        "native_lint_execution": {"actual_model": None, "usage": None, "budgeted": False},
         "engine_sha": _git_sha(RESEARCH_ROOT),
         "engine_tag": _git_tag(RESEARCH_ROOT),
         "project": project_name,
@@ -142,7 +142,7 @@ def _dir_sha(d: pathlib.Path) -> str | None:
     return h.hexdigest()
 
 
-def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator, source_dir, adapters=ADAPTERS):
+def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator, source_dir, adapters=ADAPTERS, policy=lambda packet: []):
     reused_sids = []
     for sid, _ in specs:
         src_packet = reuse_dir / f"worker-{sid}.json"
@@ -152,7 +152,7 @@ def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance
             src_data = json.loads(src_packet.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        defects = packet_source_defects(src_data, worker_provenance[sid], validator)
+        defects = packet_source_defects(src_data, worker_provenance[sid], validator) + policy(src_data)
         if defects:
             continue
         dst = destination_dir / src_packet.name
@@ -184,6 +184,16 @@ with run_lifecycle(run_root):
     project_name = inputs.get("project") or DEFAULT_PROJECT
     project = load_project_spec(PROJECTS_DIR, project_name)
     ACCEPTANCE = project.get("acceptance") or {}
+    from openkb.config import load_config
+    native_config = load_config(field_root / ".openkb/config.yaml")
+    previous_execution = configured(run_root)[1] if (run_root / "execution.sqlite3").exists() else None
+    execution = resolve(project, json.loads(inputs.get("execution") or "{}"),
+                        native_model=native_config["model"], previous=previous_execution)
+    configure(run_root, execution)
+    # Immutable provenance root of trust. Runs that do not carry their own
+    # source-manifest.jsonl fall back to the canonical copy derived from the
+    # project spec; digests are re-verified against the run's actual source bytes
+    # before anything is published.
     CANONICAL_SOURCE_MANIFEST = (RESEARCH_ROOT / "corpora" / project["corpus_dir"] / project["manifest_path"]).resolve()
     BOOK_RE = re.compile(project["snapshot_pattern"])
     WITNESSES = list((project.get("witnesses") or {}).keys())
@@ -255,10 +265,8 @@ with run_lifecycle(run_root):
 
     def _packet_defects(packet: dict, sid: str) -> list[str]:
         return packet_source_defects(
-            packet,
-            WORKER_PROVENANCE[sid],
-            lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
-        )
+            packet, WORKER_PROVENANCE[sid], lambda parsed: VALIDATOR(parsed, ACCEPTANCE)
+        ) + packet_policy_defects(packet, project)
 
     set_state(run_root, "PLANNING")
     visual_preparation = ""
@@ -294,7 +302,8 @@ with run_lifecycle(run_root):
 
     DIRECT_WORKER = str(RESEARCH_ROOT / "bin" / "direct_worker.py")
     AENEID_WORKER = str(RESEARCH_ROOT / "bin" / "aeneid_worker.py")
-    DIRECT_WORKER_PY = os.environ.get("RESEARCH_FABRIC_WORKER_PYTHON", "/home/pavel/.hermes/hermes-agent/venv/bin/python")
+    DIRECT_WORKER_PY = os.environ.get(
+        "RESEARCH_FABRIC_WORKER_PYTHON", sys.executable)
 
 
     def collect(spec):
@@ -305,60 +314,50 @@ with run_lifecycle(run_root):
         theme = theme_match.group(1) if theme_match else None
         worker_sources = WORKER_SOURCE_FILES[sid]
         book_label = worker_sources[0].name
-        attempts = []
-        for attempt in range(1, 3):
-            attempt_id = f"{sid}:attempt-{attempt}"
-            try:
-                if IS_MULTI:
-                    canon_label = book_label
-                    witness_args = []
-                    for w in WITNESSES:
-                        wfile = project["book_label_template"].format(n=b, w=w)
-                        wid = project["source_id_template"].format(n=b, w=w)
-                        witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
-                    cmd = [
-                        DIRECT_WORKER_PY,
-                        AENEID_WORKER,
-                        str(run_root),
-                        str(source_dir),
-                        str(b),
-                        canon_label,
-                        theme or "",
-                    ] + witness_args
-                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
-                else:
-                    proc = subprocess.run(
-                        [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
-                        capture_output=True,
-                        text=True,
-                        timeout=1500,
-                    )
-                packet = packet_dir / f"worker-{sid}.json"
-                if proc.returncode != 0 or not packet.exists():
-                    raise RuntimeError(
-                        f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
-                    )
-                packet_data = json.loads(packet.read_text(encoding="utf-8"))
-                defects = _packet_defects(packet_data, sid)
-                attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
-                if not defects:
-                    accepted = accept_packet(packet_data, sid, source_dir=source_dir, attempt_id=attempt_id,
-                                             adapters=SOURCE_ADAPTERS)
-                    atomic_write_json(packet, accepted)
-                    return sid, proc.stdout.strip(), None
-            except ClaimIdentityError as exc:
-                attempts.append({"attempt": attempt, "attempt_id": attempt_id, "error": str(exc)})
-                break
-            except ShimError as exc:
-                attempts.append({"attempt": attempt, "error": str(exc)})
-            except (subprocess.TimeoutExpired, RuntimeError) as exc:
-                attempts.append({"attempt": attempt, "error": str(exc)[:400]})
-            except Exception as exc:
-                attempts.append({"attempt": attempt, "error": f"unexpected: {exc}"})
-        write_json(packet_dir / f"worker-{sid}.json", {"worker": sid, "attempts": attempts, "parsed": None})
-        last = attempts[-1] if attempts else {}
-        reason = last.get("error") or "; ".join(last.get("defects", [])) or "unknown"
-        return sid, "", f"direct worker returned no valid evidence packet after attempts ({reason})"
+        try:
+            if IS_MULTI:
+                canon_label = book_label
+                witness_args = []
+                for w in WITNESSES:
+                    wfile = project["book_label_template"].format(n=b, w=w)
+                    wid = project["source_id_template"].format(n=b, w=w)
+                    witness_args += ["--witness", f"{w}:{wid}:{wfile}"]
+                cmd = [
+                    DIRECT_WORKER_PY,
+                    AENEID_WORKER,
+                    str(run_root),
+                    str(source_dir),
+                    str(b),
+                    canon_label,
+                    theme or "",
+                ] + witness_args
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
+            else:
+                proc = subprocess.run(
+                    [DIRECT_WORKER_PY, DIRECT_WORKER, str(run_root), str(source_dir), str(b), book_label, theme or ""],
+                    capture_output=True,
+                    text=True,
+                    timeout=1500,
+                )
+            packet = packet_dir / f"worker-{sid}.json"
+            if proc.returncode != 0 or not packet.exists():
+                raise RuntimeError(
+                    f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
+                )
+            packet_data = json.loads(packet.read_text(encoding="utf-8"))
+            defects = _packet_defects(packet_data, sid)
+            result = {"stdout": proc.stdout.strip()[-200:], "defects": defects}
+            if not defects:
+                accepted = accept_packet(packet_data, sid, source_dir=source_dir, attempt_id=f"{sid}:worker", adapters=SOURCE_ADAPTERS)
+                atomic_write_json(packet, accepted)
+                return sid, proc.stdout.strip(), None
+        except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            result = {"error": str(exc)[:400]}
+        except Exception as exc:
+            result = {"error": f"unexpected: {exc}"}
+        write_json(packet_dir / f"worker-{sid}.json", {"worker": sid, "attempts": [result], "parsed": None})
+        reason = result.get("error") or "; ".join(result.get("defects", [])) or "unknown"
+        return sid, "", f"direct worker returned no valid evidence packet ({reason})"
 
 
     if reuse_evidence_dir:
@@ -370,6 +369,7 @@ with run_lifecycle(run_root):
             lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
             source_dir,
             SOURCE_ADAPTERS,
+            lambda packet: packet_policy_defects(packet, project),
         )
         pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
         results = [(sid, "reused", None) for sid in reused_sids]
@@ -507,7 +507,7 @@ with run_lifecycle(run_root):
         dest.chmod(0o444)
         shutil.copy2(src, compiler_dir / src.name)
     compile_report = compile_with_recovery(
-        field_root, [compiler_dir / src.name for src in source_files], run_root / "verification" / "compile"
+        field_root, [compiler_dir / src.name for src in source_files], run_root / "verification" / "compile", execution_root=run_root
     )
     subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
     normalize_generated_log(field_root)
@@ -571,13 +571,16 @@ with run_lifecycle(run_root):
     (field_root / "evidence" / "claims.jsonl").write_text(
         "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n", encoding="utf-8"
     )
-    history = []
+    packet_execution = {}
+    claim_history = []
     for sid, _, _ in results:
         packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-        history.extend(packet.get("claim_history") or [])
-    if history:
-        write_json(field_root / "evidence" / "claim-history.json", history)
-        write_json(run_root / "verification" / "claim-history.json", history)
+        packet_execution[sid] = {"packet_revision": packet["packet_revision"], "execution": packet.get("execution")}
+        claim_history.extend(packet.get("claim_history") or [])
+    write_json(field_root / "evidence" / "packet-execution.json", packet_execution)
+    if claim_history:
+        write_json(field_root / "evidence" / "claim-history.json", claim_history)
+        write_json(run_root / "verification" / "claim-history.json", claim_history)
     manifest_out = []
     present_names = {p.name for p in source_files}
     for row in manifest_rows:
