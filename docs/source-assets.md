@@ -78,3 +78,9 @@ renderer tests skip explicitly if their executable is absent. Run
 `gs` for real prepare → native conversion → existing exporter validation. It uses
 two colliding synthetic works, fresh temporary trees and no model/network calls.
 EPUB pixels and standalone PDF ingestion are outside this Markdown slice.
+
+Publication now includes the byte-exact original source document as well as its
+assets, so original section citations are browser-exportable. Older published v1
+bundles lacking that document must be republished with `publish_bundle` from their
+verified staging bundle before export. Export fails with an actionable republish
+error; the immutable manifest and source hashes do not change.

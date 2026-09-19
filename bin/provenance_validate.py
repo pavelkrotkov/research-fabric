@@ -10,7 +10,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.sources import representation_for, source_attestation  # noqa: E402
+from research_fabric.sources import ReadingPlan, representation_for, source_attestation  # noqa: E402
 
 SOURCE_KEYS = {"source_id", "url", "title", "retrieved_at", "content_type", "sha256", "snapshot"}
 REPRESENTATION_KEYS = {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
@@ -95,6 +95,16 @@ def main() -> int:
         source_ids.add(sid)
         sources_by_id[sid] = row
         errors.extend(source_errors(root, row, sid))
+    if not errors:
+        try:
+            errors.extend(
+                f"reading claim invalid: {cid}: {why}"
+                for cid, why in ReadingPlan.published_claim_errors(
+                    root, [row for _, row in source_rows], [row for _, row in claim_rows], quotes=False
+                )
+            )
+        except (ValueError, RuntimeError, KeyError, TypeError) as exc:
+            errors.append(f"reading plan invalid: {exc}")
     claim_ids = set()
     for line, row in claim_rows:
         missing = CLAIM_KEYS - row.keys()

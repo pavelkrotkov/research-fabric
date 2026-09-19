@@ -91,7 +91,7 @@ def _reuse_evidence_packets(
     validator,
     source_dir,
     adapters=ADAPTERS,
-    policy=lambda packet: [],
+    policy=lambda packet, sid: [],
 ):
     reused_sids = []
     for sid, _ in specs:
@@ -102,7 +102,7 @@ def _reuse_evidence_packets(
             src_data = json.loads(src_packet.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        defects = packet_source_defects(src_data, worker_provenance[sid], validator) + policy(src_data)
+        defects = packet_source_defects(src_data, worker_provenance[sid], validator) + policy(src_data, sid)
         if defects:
             continue
         dst = destination_dir / src_packet.name
@@ -132,6 +132,7 @@ class ResearchRun:
     def __init__(self, config, agent_step, *, agent_provider=None):
         self.config, self.agent_step = config, agent_step
         self.agent_provider = agent_provider
+        self.reading_plan = None
         self.packet_dir = config.run_root / "evidence"
         self.snap_dest = config.field_root / "evidence/snapshots"
         self.compiler_dir = config.run_root / "compiler-sources"
@@ -181,7 +182,7 @@ class ResearchRun:
         self.canonical_manifest = (
             self.config.engine_root / "corpora" / self.project["corpus_dir"] / self.project["manifest_path"]
         ).resolve()
-        self.book_re = re.compile(self.project["snapshot_pattern"])
+        self.book_re = re.compile(self.project.get("snapshot_pattern", ""))
         self.witnesses = list((self.project.get("witnesses") or {}).keys())
         self.canonical = self.project.get("canonical_variant", "latin")
         self.is_multi = bool(self.witnesses)
@@ -192,6 +193,31 @@ class ResearchRun:
         return packet_defects(parsed, acceptance)
 
     def _sources(self):
+        if "reading" in self.project:
+            from .sources import prepare_reading_plan
+
+            self._bind_manifest(reading=True, bind=False)
+            self.reading_plan, self.bundles = prepare_reading_plan(
+                self.config.source_dir,
+                self.project,
+                self.manifest_rows,
+                self.config.run_root / "reading-plan.json",
+                self.compiler_dir,
+                question=self.config.question,
+            )
+            data = self.reading_plan.data
+            self.manifest_rows = list(data["sources"].values())
+            self.source_files = [self.config.source_dir / name for name in data["sources"]]
+            self.worker_specs = [(row["id"], self.config.question) for row in data["readings"]]
+            self.worker_sources = {
+                row["id"]: [self.config.source_dir / name for name in self.reading_plan.source_names(row["id"])]
+                for row in data["readings"]
+            }
+            self.worker_provenance = {
+                sid: source_provenance(paths, source_root=self.config.source_dir)
+                for sid, paths in self.worker_sources.items()
+            }
+            return
         self.source_files = discover_sources(self.config.source_dir, ADAPTERS)
         if not self.source_files:
             raise RuntimeError("no supported source snapshots found in source_dir")
@@ -224,7 +250,12 @@ class ResearchRun:
     def _packet_defects(self, packet: dict, sid: str) -> list[str]:
         return packet_source_defects(
             packet, self.worker_provenance[sid], lambda parsed: self._validator(parsed, self.acceptance)
-        ) + packet_policy_defects(packet, self.project)
+        ) + self._packet_policy(packet, sid)
+
+    def _packet_policy(self, packet, sid):
+        if self.reading_plan:
+            self.reading_plan.validate_packet(packet, sid, self.acceptance)
+        return packet_policy_defects(packet, self.project)
 
     def plan(self):
         visual_preparation = ""
@@ -247,6 +278,8 @@ class ResearchRun:
                 text=True,
             )
             visual_preparation = preparation_note(json.loads(visual_record.read_text()))
+        if self.reading_plan:
+            return  # The verified frozen source assignment is the research plan.
         if self.config.reuse_evidence_dir:
             write_json(
                 self.config.run_root / "plan.json", {"reused": True, "source": str(self.config.reuse_evidence_dir)}
@@ -267,6 +300,16 @@ class ResearchRun:
             write_json(self.config.run_root / "plan.json", {"raw": plan, "parsed": extract_json(plan)})
 
     def _worker_command(self, sid, task):
+        if self.reading_plan:
+            return [
+                self.config.worker_python,
+                str(self.config.engine_root / "bin/direct_worker.py"),
+                str(self.config.run_root),
+                str(self.config.source_dir),
+                "--reading",
+                sid,
+                str(self.config.project_path),
+            ]
         b = int(sid.split("-")[1])
         theme_match = re.search("Extract claim-level evidence about (.+?)\\\\. Use", task)
         theme = theme_match.group(1) if theme_match else None
@@ -337,7 +380,7 @@ class ResearchRun:
                 lambda parsed: self._validator(parsed, self.acceptance),
                 self.config.source_dir,
                 ADAPTERS,
-                lambda packet: packet_policy_defects(packet, self.project),
+                self._packet_policy,
             )
             pending_specs = [(sid, task) for sid, task in self.worker_specs if sid not in reused_sids]
             self.results = [(sid, "reused", None) for sid in reused_sids]
@@ -384,7 +427,9 @@ class ResearchRun:
                 {
                     "question": self.config.question,
                     "source_files": [str(p) for p in self.source_files],
-                    "packet": normalize_packet(packet.get("parsed") or {}),
+                    "packet": packet.get("parsed")
+                    if self.reading_plan
+                    else normalize_packet(packet.get("parsed") or {}),
                 },
             )
             verification_manifests.append(verification_path)
@@ -402,6 +447,9 @@ class ResearchRun:
             "pre-ingest.txt",
             "advisory-verifier.json",
         )
+        self._bind_manifest(reading=bool(self.reading_plan))
+
+    def _bind_manifest(self, reading=False, bind=True):
         run_manifest = self.config.run_root / "source-manifest.jsonl"
         self.manifest_path = run_manifest if run_manifest.exists() else self.canonical_manifest
         if not self.manifest_path.exists():
@@ -409,21 +457,44 @@ class ResearchRun:
         self.manifest_rows = [
             json.loads(line) for line in self.manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
-        self.manifest_rows = bind_manifest(self.source_files, self.manifest_rows, ADAPTERS)
+        if not bind:
+            return
+        if reading:
+            from ._source_assets import safe_path
+
+            paths = [safe_path(self.config.source_dir, name) for name in self.project["reading"]["sources"]]
+            self.manifest_rows = bind_manifest(paths, self.manifest_rows, source_root=self.config.source_dir)
+        else:
+            self.manifest_rows = bind_manifest(self.source_files, self.manifest_rows, ADAPTERS)
         run_manifest.write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in self.manifest_rows) + "\n", encoding="utf-8"
         )
 
     def _compile(self):
+        from .sources import preserve_original_bytes
+
+        preserve_original_bytes(self.config.field_root)
         self.snap_dest.mkdir(parents=True, exist_ok=True)
         self.compiler_dir.mkdir(exist_ok=True)
+        if self.reading_plan:
+            from openkb.schema import get_agents_md
+
+            policy_path = self.config.field_root / "wiki/AGENTS.md"
+            policy = get_agents_md(policy_path.parent).split("\n## Frozen research source citations\n")[0]
+            policy_path.write_text(policy + self.reading_plan.citation_policy(), encoding="utf-8")
         self.bundles = {}
         compiler_inputs = []
         for src in self.source_files:
-            copy_source_snapshot(src, self.snap_dest)
-            attestation = source_attestation(representation_for(src))
-            bundle = prepare_source_bundle(src, self.compiler_dir, attestation)
-            self.bundles[src.name] = bundle
+            source_root = self.config.source_dir if self.reading_plan else None
+            copy_source_snapshot(src, self.snap_dest, source_root=source_root)
+            rep = (
+                self.reading_plan.representations[src.relative_to(source_root).as_posix()]
+                if self.reading_plan
+                else representation_for(src)
+            )
+            attestation = source_attestation(rep, source_root)
+            bundle = prepare_source_bundle(src, self.compiler_dir, attestation, source_root=source_root)
+            self.bundles[attestation["source_file"]] = bundle
             compiler_inputs.append(self.compiler_dir / bundle["key"] / bundle["input_path"])
         self.compile_report = compile_with_recovery(
             self.config.field_root,
@@ -446,16 +517,22 @@ class ResearchRun:
         normalize_generated_log(self.config.field_root)
 
     def _materialize(self):
-        notes, sources = source_mappings(self.project, self.books)
+        if self.reading_plan:
+            sources = {name: row["source_id"] for name, row in self.reading_plan.data["sources"].items()}
+            notes = {}
+            write_json(self.config.field_root / "evidence/reading-plan.json", self.reading_plan.data)
+        else:
+            notes, sources = source_mappings(self.project, self.books)
         for filename, bundle in self.bundles.items():
             if bundle["source"]["adapter"] == "markdown":
                 notes[sources[filename]] = f"wiki/summaries/{pathlib.Path(bundle['input_path']).stem}.md"
-        present_names = {p.name for p in self.source_files}
+        source_root = self.config.source_dir if self.reading_plan else None
+        present_names = set(sources)
         source_rows = []
         for row in self.manifest_rows:
-            name = pathlib.Path(row["snapshot"]).name
+            name = row["source_file"] if self.reading_plan else pathlib.Path(row["snapshot"]).name
             if name in present_names:
-                relative = snapshot_relative(self.config.source_dir / name).as_posix()
+                relative = snapshot_relative(self.config.source_dir / name, source_root).as_posix()
                 source_rows.append(dict(row, snapshot="evidence/snapshots/" + relative))
         self.claims = materialize_evidence(
             self.config.field_root,
@@ -465,6 +542,7 @@ class ResearchRun:
             sources,
             source_rows,
             multi=self.is_multi,
+            reading_plan=self.reading_plan,
         )
 
     def _run_gate(self, script, artifact, *extra):
@@ -523,13 +601,16 @@ class ResearchRun:
         )
 
     def _finalize(self):
-        _cmt = (
-            self.project.get("commit_message") or "{project} evidence run ({claims} claims, Books {books}; run {run})"
+        default = (
+            "{project} evidence run ({claims} claims; run {run})"
+            if self.reading_plan
+            else "{project} evidence run ({claims} claims, Books {books}; run {run})"
         )
+        _cmt = self.project.get("commit_message") or default
         commit_msg = _cmt.format(
             project=self.config.project_path.stem.capitalize(),
             claims=len(self.claims),
-            books="-".join(map(str, (self.books[0], self.books[-1]))),
+            books="" if self.reading_plan else "-".join(map(str, (self.books[0], self.books[-1]))),
             run=self.config.run_root.name,
         )
         completion = finalize_run(

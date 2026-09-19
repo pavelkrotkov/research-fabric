@@ -202,7 +202,7 @@ gates.
 | **Provenance** | Soft — `sources:` frontmatter, `^[raw/…]` markers, raw sha256 drift check | Hard — every excerpt must be a **verbatim substring** of the immutable snapshot, machine-checked |
 | **Quality gate** | None — lint is advisory, surfaces `contested:` / `confidence: low` for humans | Fail-closed — grounding + provenance gates block publication outright |
 | **Contradictions** | Note both positions, mark `contested: true`, human resolves | Structured `conflicts` array in the packet, surfaced in the ledger |
-| **Synthesis** | Agent writes interlinked `[[wikilink]]` pages (2+ outbound links, 200-line split) | OpenKB compiles pages from the verified claim ledger; synthesis downstream of verification |
+| **Synthesis** | Agent writes interlinked `[[wikilink]]` pages (2+ outbound links, 200-line split) | OpenKB compiles source inputs independently; the evidence ledger is separately gated |
 | **Reproducibility** | Re-ingesting the same source may yield different pages | Same inputs → same deterministic gates; generated claims may differ, but accepted claims must satisfy identical grounding/provenance rules |
 | **Failure semantics** | None — agent judgment + human review | One deterministic terminal status per run |
 | **Scale model** | One agent session, personal KB (index nav rules for ~100–200 pages) | Batch runs, per-book workers, valid-packet carry-forward, per-claim repair loop |
@@ -219,3 +219,6 @@ originals, bounded PDF/EPS raster derivatives, and manifest-driven browser expor
 Optional source-image inspection is available through the
 [native OAuth visual preflight](docs/visual-preflight.md). It records derived,
 unreviewed notes and incomplete coverage; text-only runs do not require OAuth.
+
+Long Markdown works can use [source-mapped reading plans](docs/reading-plans.md),
+with frozen assignments, original section citations, and Work-level independence.

@@ -28,10 +28,13 @@ PROJECTS_DIR = FABRIC / "projects"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.claims import accept_packet, atomic_write_json  # noqa: E402
 from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
+from research_fabric.publication import ledger_rows  # noqa: E402
 from research_fabric.sources import (  # noqa: E402
+    ReadingPlan,
     bind_manifest,
     copy_source_snapshot,
     discover_sources,
+    preserve_original_bytes,
     snapshot_relative,
 )
 
@@ -43,12 +46,14 @@ def _load_project(name):
     return yaml.safe_load(path.read_text())
 
 
-def accept_and_persist_packet(packet_path, worker, source_dir, destination):
+def accept_and_persist_packet(packet_path, worker, source_dir, destination, reading_plan=None, acceptance=None):
     """Migrate one packet into the disposable publication destination."""
     packet_path = pathlib.Path(packet_path)
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
-    if not packet.get("packet_revision"):
+    if not packet.get("packet_revision") and reading_plan is None:
         normalize_packet(packet.get("parsed") or packet)
+    if reading_plan:
+        reading_plan.validate_packet(packet, worker, acceptance or {})
     accepted = accept_packet(packet, worker, source_dir=source_dir)
     destination = pathlib.Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
@@ -101,60 +106,34 @@ def _manifest(run_root: pathlib.Path, project: dict, source_files: list[pathlib.
     assert manifest_path.exists(), f"no manifest at {manifest_path}"
     print(f"[dryrun] manifest: {manifest_path}")
     rows = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
-    rows = bind_manifest(source_files, rows)
+    rows = bind_manifest(source_files, rows, source_root=run_root / "sources" if "reading" in project else None)
     print(f"[dryrun] manifest digests verified for {len(source_files)} sources")
     return rows
 
 
-def _publish_sources(field_root: pathlib.Path, source_files: list[pathlib.Path]):
+def _publish_sources(field_root: pathlib.Path, source_files: list[pathlib.Path], source_root=None):
+    preserve_original_bytes(field_root)
     snap_dest = field_root / "evidence" / "snapshots"
     snap_dest.mkdir(parents=True, exist_ok=True)
     for src in source_files:
-        copy_source_snapshot(src, snap_dest)
+        copy_source_snapshot(src, snap_dest, source_root=source_root)
     print(f"[dryrun] snapshots copied: {len(source_files)}")
     return snap_dest
 
 
-def _materialize_claims(packet_dir, field_root, note_by_source, source_by_file, source_dir):
-    claims, dropped, history = [], [], []
+def _materialize_claims(
+    packet_dir, field_root, note_by_source, source_by_file, source_dir, reading_plan=None, acceptance=None, multi=True
+):
+    packets, history = {}, []
     accepted_packets = field_root / "evidence" / "accepted-packets"
     for packet_path in sorted(packet_dir.glob("worker-*.json")):
-        sid = packet_path.stem.replace("worker-", "")
-        packet, _accepted_path = accept_and_persist_packet(packet_path, sid, source_dir, accepted_packets)
+        sid = packet_path.stem.removeprefix("worker-")
+        packet, _ = accept_and_persist_packet(packet_path, sid, source_dir, accepted_packets, reading_plan, acceptance)
+        packets[sid] = packet
         history.extend(packet.get("claim_history") or [])
-        parsed = packet.get("parsed") or {}
-        for idx, claim in enumerate(parsed.get("claims", []), 1):
-            source_file = pathlib.Path(claim.get("source_file", "")).name
-            source_id = source_by_file.get(source_file)
-            if not source_id:
-                dropped.append({"worker": sid, "index": idx, "source_file": claim.get("source_file", "")})
-                continue
-            note = note_by_source[source_id]
-            assert (field_root / note).is_file(), f"note target missing: {note}"
-            claims.append(
-                {
-                    "claim_id": claim["claim_id"],
-                    "worker": sid,
-                    "claim": claim.get("claim", ""),
-                    "note": note,
-                    "source_ids": [source_id],
-                    "source_file": claim.get("source_file", ""),
-                    "locator": claim.get("locator", ""),
-                    "excerpt": claim.get("excerpt", ""),
-                    "stance": claim.get("stance", "supports"),
-                    "confidence": claim.get("confidence", 0.0),
-                    "independence_group": claim.get("independence_group", sid),
-                    "verified_at": "pilot-verifier-pass",
-                    "packet_revision": packet.get("packet_revision"),
-                    "packet_state_revision": packet.get("packet_state_revision"),
-                    "source_revision": claim.get("source_revision"),
-                    "claim_type": claim.get("claim_type", ""),
-                    "english_witness": claim.get("english_witness"),
-                    "witnesses_consulted": claim.get("witnesses_consulted", []),
-                }
-            )
-            if claim.get("accepted_attempt_id"):
-                claims[-1]["accepted_attempt_id"] = claim["accepted_attempt_id"]
+    claims, dropped = ledger_rows(
+        field_root, packets, note_by_source, source_by_file, multi=multi, reading_plan=reading_plan
+    )
     if dropped:
         print(f"[dryrun] DROPPED {len(dropped)} claim(s): {json.dumps(dropped, indent=2)}")
         return None
@@ -173,15 +152,15 @@ def _write_claims(field_root: pathlib.Path, claims: list[dict]):
     print(f"[dryrun] distinct note targets: {notes_used}")
 
 
-def _write_sources_manifest(field_root, source_files, manifest_rows):
+def _write_sources_manifest(field_root, source_files, manifest_rows, source_root=None):
     manifest_out = []
-    present_names = {path.name for path in source_files}
+    paths = {path.relative_to(source_root).as_posix() if source_root else path.name: path for path in source_files}
     for row in manifest_rows:
-        if pathlib.Path(row["snapshot"]).name not in present_names:
+        name = row["source_file"] if source_root else pathlib.Path(row["snapshot"]).name
+        if name not in paths:
             continue
         row = dict(row)
-        source = next(path for path in source_files if path.name == pathlib.Path(row["snapshot"]).name)
-        row["snapshot"] = "evidence/snapshots/" + snapshot_relative(source).as_posix()
+        row["snapshot"] = "evidence/snapshots/" + snapshot_relative(paths[name], source_root).as_posix()
         manifest_out.append(json.dumps(row, ensure_ascii=False))
     (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n")
 
@@ -232,7 +211,7 @@ def _grounding_misses(snap_dest, source_by_file, claims):
 
 
 def _commit(field_root, project_name: str, claim_count: int) -> str:
-    subprocess.run(["git", "-C", str(field_root), "add", "--", "evidence"], check=True)
+    subprocess.run(["git", "-C", str(field_root), "add", "--", "evidence", ".gitattributes"], check=True)
     subprocess.run(["git", "-C", str(field_root), "diff", "--cached", "--check"], check=True)
     subprocess.run(
         [
@@ -258,36 +237,50 @@ def _commit(field_root, project_name: str, claim_count: int) -> str:
     return status
 
 
-def _published_notes(field_root, source_files, note_by_source, source_by_file):
+def _published_notes(field_root, source_files, note_by_source, source_by_file, source_root=None):
     """Derive native note identity from the published source bundle."""
     for source in source_files:
-        key = snapshot_relative(source).parent.name
+        key = snapshot_relative(source, source_root).parent.name
         bundle_path = field_root / "wiki" / "assets" / key / "bundle.json"
         if bundle_path.is_file():
             manifest = json.loads(bundle_path.read_text())
             doc_name = pathlib.Path(manifest["input_path"]).stem
             if doc_name != key or manifest["key"] != key:
                 raise ValueError("published native source identity drift")
-            note_by_source[source_by_file[source.name]] = f"wiki/summaries/{doc_name}.md"
+            note_by_source[
+                source_by_file[source.relative_to(source_root).as_posix() if source_root else source.name]
+            ] = f"wiki/summaries/{doc_name}.md"
 
 
 def main() -> int:
     args = _parse_args()
     run_root = pathlib.Path(args.run_root).resolve()
     project = _load_project(args.project)
-    source_files, mappings = _source_context(run_root, project)
-    note_by_source, source_by_file = mappings
+    reading_plan = None
+    source_root = run_root / "sources" if "reading" in project else None
+    if source_root:
+        from research_fabric._source_assets import safe_path
+
+        paths = {name: safe_path(source_root, name) for name in project["reading"]["sources"]}
+        reading_plan = ReadingPlan.load(run_root / "reading-plan.json", paths, project["reading"])
+        source_files = list(paths.values())
+        note_by_source = {}
+        source_by_file = {name: row["source_id"] for name, row in reading_plan.data["sources"].items()}
+    else:
+        source_files, (note_by_source, source_by_file) = _source_context(run_root, project)
     workdir, field_root = _clone(args.field_repo, args.branch)
     manifest_rows = _manifest(run_root, project, source_files)
-    snap_dest = _publish_sources(field_root, source_files)
-    _published_notes(field_root, source_files, note_by_source, source_by_file)
+    snap_dest = _publish_sources(field_root, source_files, source_root)
+    _published_notes(field_root, source_files, note_by_source, source_by_file, source_root)
     claims = _materialize_claims(
-        run_root / "evidence", field_root, note_by_source, source_by_file, run_root / "sources"
+        run_root / "evidence", field_root, note_by_source, source_by_file, run_root / "sources", reading_plan
     )
     if claims is None:
         return 1
+    if reading_plan:
+        atomic_write_json(field_root / "evidence/reading-plan.json", reading_plan.data)
     _write_claims(field_root, claims)
-    _write_sources_manifest(field_root, source_files, manifest_rows)
+    _write_sources_manifest(field_root, source_files, manifest_rows, source_root)
     if not _gate(field_root, "provenance_validate.py", "provenance"):
         return 1
     if not _gate(field_root, "excerpt_grounding.py", "grounding"):

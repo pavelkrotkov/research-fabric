@@ -123,6 +123,7 @@ def _event(packet, claim, action, before, old_excerpt, new_excerpt, reason, atte
     both excerpts and the packet states surrounding that single mutation.
     """
     return {
+        **({"reading": json.loads(json.dumps(claim["reading"]))} if "reading" in claim else {}),
         "event": action,
         "claim_id": claim["claim_id"],
         "packet_revision": packet["packet_revision"],
@@ -216,6 +217,8 @@ def _bind_sources(packet, claims, source_dir, attempt_id):
     for claim in claims:
         digest = source_file_revision(source_dir, claim.get("source_file", ""))
         binding = {"source_file": claim.get("source_file", ""), "source_revision": digest}
+        if "reading" in claim:
+            binding["reading"] = json.loads(json.dumps(claim["reading"]))
         cid = claim["claim_id"]
         require(bindings.get(cid, binding) == binding, f"claim source binding changed for {cid}")
         require(claim.get("source_revision", digest) == digest, f"source revision mismatch for claim {cid}")
@@ -258,7 +261,7 @@ def _attestation(packet, source_dir, adapters):
         name = row.get("source_file", "")
         source_file_revision(source_dir, name)
         paths.append(pathlib.Path(source_dir) / name)
-    errors = source_provenance_errors(rows, source_provenance(paths, adapters))
+    errors = source_provenance_errors(rows, source_provenance(paths, adapters, source_root=pathlib.Path(source_dir)))
     require(not errors, "; ".join(errors))
 
 

@@ -38,7 +38,7 @@ from research_fabric.claim_report import grounding_report_metadata
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric._source_adapter import HTMLAdapter  # noqa: E402
-from research_fabric.sources import representation_for  # noqa: E402
+from research_fabric.sources import ReadingPlan, representation_for  # noqa: E402
 
 # Punctuation folding table: typographic variants -> ASCII equivalents.
 _PUNCT = {
@@ -272,6 +272,9 @@ def main() -> int:
         snap = field_root / row["snapshot"]
         texts[row["source_id"]] = source_text(snap)
     failures = check(claims, texts)
+    for cid, why in ReadingPlan.published_claim_errors(field_root, sources, claims):
+        if not any(failed_id == cid for failed_id, _ in failures):
+            failures.append((cid, why))
     claim_ids = [claim.get("claim_id") for claim in claims]
     duplicate_ids = {cid for cid, count in Counter(claim_ids).items() if count > 1}
     if duplicate_ids:
