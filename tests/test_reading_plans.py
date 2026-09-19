@@ -364,8 +364,19 @@ def test_reuse_cannot_substitute_another_reading_of_the_same_source(tmp_path):
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("source_ids", [["b.md"], ["a.md", "b.md"]])
-def test_actual_gates_reject_identical_bytes_under_wrong_manifest_identity(tmp_path, source_ids):
+@pytest.mark.parametrize(
+    "mutation, expected",
+    [
+        ("wrong_source", "source IDs differ"),
+        ("extra_source", "source IDs differ"),
+        ("missing_binding", "reading"),
+        ("malformed_binding", "reading_id"),
+        ("missing_plan", "no verified frozen plan"),
+        ("malformed_plan", "sources"),
+        ("independence", "projection differs"),
+    ],
+)
+def test_actual_gates_reject_invalid_reading_publication(tmp_path, mutation, expected):
     import json
     import subprocess
     import sys
@@ -386,10 +397,20 @@ def test_actual_gates_reject_identical_bytes_under_wrong_manifest_identity(tmp_p
     }
     claim["reading"], _ = plan.claim(plan.data["readings"][0]["id"], claim)
     claim.update(plan.project_claim(claim))
-    claim["source_ids"] = source_ids
+    if mutation == "wrong_source":
+        claim["source_ids"] = ["b.md"]
+    elif mutation == "extra_source":
+        claim["source_ids"] = ["a.md", "b.md"]
+    elif mutation == "missing_binding":
+        del claim["reading"]
+    elif mutation == "malformed_binding":
+        claim["reading"] = {}
+    elif mutation == "independence":
+        claim["independence_group"] = "not-the-cited-work"
     evidence = tmp_path / "field/evidence"
     evidence.mkdir(parents=True)
-    (evidence / "reading-plan.json").write_text(json.dumps(plan.data))
+    if mutation != "missing_plan":
+        (evidence / "reading-plan.json").write_text(json.dumps({} if mutation == "malformed_plan" else plan.data))
     snapshots = evidence / "snapshots"
     snapshots.mkdir()
     for row in rows:
@@ -410,7 +431,11 @@ def test_actual_gates_reject_identical_bytes_under_wrong_manifest_identity(tmp_p
             text=True,
             capture_output=True,
         )
-        assert result.returncode != 0 and "source IDs differ" in result.stdout + result.stderr
+        assert result.returncode != 0 and expected in result.stdout + result.stderr
+        if script == "excerpt_grounding.py" and mutation != "malformed_plan":
+            metadata = json.loads(result.stdout.split("REPORT-META: ", 1)[1].splitlines()[0])
+            assert [row["claim_id"] for row in metadata["failures"]] == ["c-test"]
+            assert result.stderr.count("c-test:") == 1
 
 
 @pytest.mark.parametrize("generated", ["wiki/summaries/generated.md", "wiki/concepts/generated.md"])

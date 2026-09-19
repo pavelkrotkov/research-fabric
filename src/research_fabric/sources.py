@@ -629,19 +629,9 @@ class ReadingPlan:
         if "source_ids" in claim and claim["source_ids"] != [self.data["sources"][claim["source_file"]]["source_id"]]:
             raise ValueError("reading claim source IDs differ from frozen source identity")
         binding = claim["reading"]
-        reading = self.reading(binding["reading_id"])
-        spans = [self.data["sections"][key] for key in reading.get(binding["role"], [])]
-        expected = {
-            "plan_sha256": self.data["sha256"],
-            "reading_id": reading["id"],
-            "work_id": self.data["sources"][claim["source_file"]]["work_id"],
-            "role": binding["role"],
-            "lines": binding["lines"],
-        }
-        assigned = any(
-            span["source_file"] == claim["source_file"] and span["lines"] == binding["lines"] for span in spans
-        )
-        if binding["role"] not in {"primary", "context"} or binding != expected or not assigned:
+        if not any(
+            binding == expected for expected, _ in self._assignments(binding["reading_id"], claim["source_file"])
+        ):
             raise ValueError("accepted reading assignment differs from frozen plan")
 
     def reading(self, reading_id):
@@ -671,35 +661,59 @@ class ReadingPlan:
                 )
         return "".join(parts)
 
-    def claim(self, reading_id, claim):
-        """Resolve the quote once; context retains its cited work, not the reader's work."""
-        matches = []
+    def _assignments(self, reading_id, source_file):
+        """One authority for both quote acceptance and immutable assignment validation."""
         for role in ("primary", "context"):
             for key in self.reading(reading_id)[role]:
                 span = self.data["sections"][key]
-                if span["source_file"] == claim.get("source_file") and claim.get("excerpt") in _span_text(
-                    self.representations, span
-                ):
-                    matches.append((role, span))
+                if span["source_file"] == source_file:
+                    yield (
+                        {
+                            "plan_sha256": self.data["sha256"],
+                            "reading_id": reading_id,
+                            "work_id": self.data["sources"][source_file]["work_id"],
+                            "role": role,
+                            "lines": span["lines"],
+                        },
+                        span,
+                    )
+
+    def claim(self, reading_id, claim):
+        """Resolve the quote once; context retains its cited work, not the reader's work."""
+        matches = [
+            binding
+            for binding, span in self._assignments(reading_id, claim.get("source_file"))
+            if claim.get("excerpt") in _span_text(self.representations, span)
+        ]
         if len(matches) != 1:
             raise ValueError("reading quote is missing, ambiguous, or outside its assigned source spans")
-        role, span = matches[0]
-        binding = {
-            "plan_sha256": self.data["sha256"],
-            "reading_id": reading_id,
-            "work_id": self.data["sources"][span["source_file"]]["work_id"],
-            "role": role,
-            "lines": span["lines"],
-        }
-        return binding, reading_quote(self.representations[span["source_file"]], {**claim, "reading": binding})
+        binding = matches[0]
+        return binding, reading_quote(self.representations[claim["source_file"]], {**claim, "reading": binding})
 
-    def project_claim(self, claim):
+    def project_claim(self, claim, *, quotes=True):
         self.validate_claim(claim)
-        return {
+        projection = {
             "reading": claim["reading"],
-            "quote_span": reading_quote(self.representations[claim["source_file"]], claim),
             "independence_group": claim["reading"]["work_id"] if claim["reading"]["role"] == "primary" else None,
         }
+        if quotes:
+            projection["quote_span"] = reading_quote(self.representations[claim["source_file"]], claim)
+        return projection
+
+    @staticmethod
+    def published_claim_errors(field_root, source_rows, claims, *, quotes=True):
+        plan = published_reading_plan(field_root, source_rows)
+        for claim in claims:
+            if plan is None and "reading" not in claim:
+                continue
+            try:
+                if plan is None:
+                    raise ValueError("reading claim has no verified frozen plan")
+                projection = plan.project_claim(claim, quotes=quotes)
+                if any(claim.get(key) != value for key, value in projection.items()):
+                    raise ValueError("reading claim projection differs from frozen assignment/current excerpt")
+            except (ValueError, KeyError, TypeError) as exc:
+                yield claim.get("claim_id"), str(exc)
 
     def validate_packet(self, packet, reading_id, acceptance):
         """Use existing claim shape checks, then bind every quote to the frozen assignment."""
