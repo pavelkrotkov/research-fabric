@@ -167,6 +167,24 @@ def repair_claims(
     report = Report.read(pathlib.Path(report_path), store.packets, source_dir)
     targets = report.targets(store.packets)
     preflight(field_root, project)
+    reading_claims = [
+        claim
+        for packet in store.packets.values()
+        for claim in packet["claim_source_bindings"].values()
+        if "reading" in claim
+    ]
+    if reading_claims:
+        from research_fabric._source_assets import safe_path
+        from research_fabric.sources import ReadingPlan
+
+        if not project or "reading" not in project:
+            raise ClaimIdentityError("reading repair requires its source-mapped project")
+        plan = ReadingPlan.load(
+            run_root / "reading-plan.json",
+            {name: safe_path(source_dir, name) for name in project["reading"]["sources"]},
+        )
+        for claim in reading_claims:
+            plan.validate_claim(claim)
     counts = _process_targets(
         targets, store, source_dir, report.report_id, model, grounded, adapters, run_root, project
     )

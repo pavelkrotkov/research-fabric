@@ -358,7 +358,7 @@ def _span_text(representations, span):
     return rep.text[start:end]
 
 
-def _protected_boundaries(lines, tokens):
+def _protected_boundaries(lines, tokens, references):
     blocked = set()
     inert = set()
     for token in tokens:
@@ -366,6 +366,8 @@ def _protected_boundaries(lines, tokens):
             blocked.update(range(token.map[0] + 1, token.map[1]))
         if token.type in {"fence", "code_block"} and token.map:
             inert.update(range(*token.map))
+    for reference in references.values():
+        blocked.update(range(reference["map"][0] + 1, reference["map"][1]))
     opening = None
     for index, line in enumerate(lines):
         if index not in inert and line.strip() == "$$":
@@ -390,7 +392,7 @@ def _reading_structure(name, rep):
         raise ValueError(f"empty reading source: {name}")
     environment = {}
     tokens = _MARKDOWN.parse(rep.text, environment)
-    allowed = set(range(len(lines) + 1)) - _protected_boundaries(lines, tokens)
+    allowed = set(range(len(lines) + 1)) - _protected_boundaries(lines, tokens, environment.get("references", {}))
     starts = sorted(
         {
             0,
@@ -541,6 +543,10 @@ def _validate_ownership(readings, sections):
     from collections import Counter
 
     ids = [row["id"] for row in readings]
+    if any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value) for value in ids):
+        raise ValueError(
+            "reading ID must use 1-128 ASCII letters, digits, hyphens or underscores; start with a letter or digit"
+        )
     if not ids or len(ids) != len(set(ids)):
         raise ValueError("reading plan has missing or duplicate assignments")
     primary = Counter(key for reading in readings for key in reading["primary"])
@@ -559,6 +565,55 @@ class ReadingPlan:
 
     def __init__(self, data, representations, boundaries):
         self.data, self.representations, self.boundaries = data, representations, boundaries
+
+    @classmethod
+    def load(cls, path, source_paths):
+        """Load frozen assignments against exact current document paths, including published snapshots."""
+        import json
+
+        data = json.loads(pathlib.Path(path).read_text())
+        if set(source_paths) != set(data["sources"]):
+            raise ValueError("frozen reading plan source set drift")
+        representations, boundaries = {}, {}
+        for name, source in source_paths.items():
+            rep = representation_for(pathlib.Path(source))
+            expected = {**source_attestation(rep), "source_file": name}
+            if any(data["sources"][name].get(key) != value for key, value in expected.items()):
+                raise ValueError(f"frozen reading plan source drift: {name}")
+            _bind_representation(data["sources"][name], rep, rep.path)
+            representations[name] = rep
+            _, _, boundaries[name] = _reading_structure(name, rep)
+        plan = cls(data, representations, boundaries)
+        plan.validate()
+        return plan
+
+    def section(self, section_id):
+        """Resolve a section citation against the same span map used for quote projection."""
+        span = self.data["sections"][section_id]
+        rep = self.representations[span["source_file"]]
+        start, end = _span_range(rep, span)
+        return {
+            **span,
+            "original_bytes": [rep.original_byte_offset(start), rep.original_byte_offset(end)],
+        }
+
+    def validate_claim(self, claim):
+        """Check assignment identity without requiring a rejected excerpt to ground before repair."""
+        binding = claim["reading"]
+        reading = self.reading(binding["reading_id"])
+        spans = [self.data["sections"][key] for key in reading.get(binding["role"], [])]
+        expected = {
+            "plan_sha256": self.data["sha256"],
+            "reading_id": reading["id"],
+            "work_id": self.data["sources"][claim["source_file"]]["work_id"],
+            "role": binding["role"],
+            "lines": binding["lines"],
+        }
+        assigned = any(
+            span["source_file"] == claim["source_file"] and span["lines"] == binding["lines"] for span in spans
+        )
+        if binding["role"] not in {"primary", "context"} or binding != expected or not assigned:
+            raise ValueError("accepted reading assignment differs from frozen plan")
 
     def reading(self, reading_id):
         matches = [row for row in self.data["readings"] if row["id"] == reading_id]
@@ -689,7 +744,7 @@ def prepare_reading_plan(source_root, project, manifest_rows, destination, bundl
             raise ValueError("frozen reading plan source, bibliography, policy or tokenizer drift")
     else:
         reviewed = profile.get("reviewed_plan")
-        chosen = json.loads(pathlib.Path(reviewed).read_text()) if reviewed else {}
+        chosen = json.loads((source_root / reviewed).read_text()) if reviewed else {}
         sections = chosen.get("sections", sections)
         readings = chosen.get("readings") or _default_readings(
             sections, sources, reps, encoding, policy["target_tokens"]

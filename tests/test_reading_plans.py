@@ -137,7 +137,15 @@ def test_context_keeps_its_source_work_and_reading_role_after_acceptance(tmp_pat
     assert packet["claim_source_bindings"][cid]["reading"]["role"] == "context"
 
 
-@pytest.mark.parametrize("block", ["```md\ninside fence\n```\n", "| a | b |\n| - | - |\n| 1 | 2 |\n", "$$\nx=1\n$$\n"])
+@pytest.mark.parametrize(
+    "block",
+    [
+        "```md\ninside fence\n```\n",
+        "| a | b |\n| - | - |\n| 1 | 2 |\n",
+        "$$\nx=1\n$$\n",
+        '[ref]:\n  https://example.invalid\n  "Reference title"\n',
+    ],
+)
 def test_reviewed_plan_cannot_split_coherent_blocks(tmp_path, block):
     import json
 
@@ -207,3 +215,99 @@ def test_nested_bundle_keeps_existing_original_asset_closure(tmp_path):
     assert snapshot.read_bytes() == (parent / "paper.md").read_bytes()
     assert (snapshot.parent / "plot.png").read_bytes() == (parent / "plot.png").read_bytes()
     assert plan.data["readings"][0]["assets"] == [{"source_file": "nested/paper.md", "index": 0}]
+
+
+@pytest.mark.parametrize("reading_id", ["../escape", "a/b", "", "-option", 7, "a" * 129])
+def test_reviewed_reading_id_is_a_safe_worker_identity(tmp_path, reading_id):
+    from research_fabric.claims import stable_revision
+
+    plan, _, _, _, _ = prepare(tmp_path, {"a.md": "# A\n\nAlpha.\n"})
+    plan.data["readings"][0]["id"] = reading_id
+    plan.data["sha256"] = stable_revision({k: v for k, v in plan.data.items() if k != "sha256"})
+    with pytest.raises(ValueError, match="reading ID"):
+        plan.validate()
+
+
+def test_frozen_plan_loader_rejects_rehashed_context_and_current_source_drift(tmp_path):
+    import json
+
+    from research_fabric.claims import stable_revision
+    from research_fabric.sources import ReadingPlan
+
+    plan, _, root, _, _ = prepare(tmp_path, {"a.md": "# A\r\n\r\nAlpha.\r\n", "b.md": "# B\n\nBeta.\n"})
+    reading = plan.data["readings"][0]
+    claim = {"source_file": "a.md", "excerpt": "Alpha."}
+    claim["reading"], _ = plan.claim(reading["id"], claim)
+    paths = {name: root / name for name in plan.data["sources"]}
+    frozen = tmp_path / "reading-plan.json"
+    loaded = ReadingPlan.load(frozen, paths)
+    loaded.validate_claim(claim)
+    span = loaded.section(reading["primary"][0])
+    assert (root / "a.md").read_bytes()[slice(*span["original_bytes"])] == b"# A\r\n\r\nAlpha.\r\n"
+    plan.data["readings"][0]["context"] = [plan.data["readings"][1]["primary"][0]]
+    plan.data["sha256"] = stable_revision({k: v for k, v in plan.data.items() if k != "sha256"})
+    frozen.write_text(json.dumps(plan.data))
+    changed = ReadingPlan.load(frozen, paths)
+    with pytest.raises(ValueError, match="differs from frozen"):
+        changed.validate_claim(claim)
+    (root / "b.md").write_text("Changed non-cited context")
+    with pytest.raises(ValueError, match="source drift"):
+        ReadingPlan.load(frozen, paths)
+
+
+def test_rehashed_plan_cannot_retarget_actual_repair_before_model_or_write(tmp_path):
+    import json
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+    from repair_claims import repair_claims
+
+    from research_fabric.claim_report import grounding_report_metadata
+    from research_fabric.claims import accept_packet, atomic_write_json, stable_revision
+    from research_fabric.sources import source_provenance
+
+    plan, _, root, project, source_rows = prepare(
+        tmp_path, {"nested/α paper.md": "# A\n\nFirst line\nsecond line.\n", "b.md": "# B\n\nContext.\n"}
+    )
+    reading = plan.data["readings"][0]
+    claim = {
+        "source_file": "nested/α paper.md",
+        "excerpt": "First line\nsecond line.",
+        "claim": "An argument",
+        "stance": "supports",
+        "locator": "L3-4",
+    }
+    claim["reading"], _ = plan.claim(reading["id"], claim)
+    claim["excerpt"] = "Rejected quotation"
+    packet = accept_packet(
+        {
+            "parsed": {"claims": [claim]},
+            "source_provenance": source_provenance([root / name for name in plan.data["sources"]], source_root=root),
+        },
+        reading["id"],
+        source_dir=root,
+    )
+    packet_path = tmp_path / "evidence" / f"worker-{reading['id']}.json"
+    atomic_write_json(packet_path, packet)
+    before = packet_path.read_bytes()
+    metadata = grounding_report_metadata(
+        [
+            {
+                **claim,
+                "worker": reading["id"],
+                "packet_revision": packet["packet_revision"],
+                "packet_state_revision": packet["packet_state_revision"],
+            }
+        ],
+        source_rows,
+        [(claim["claim_id"], "excerpt")],
+    )
+    report = tmp_path / "report.txt"
+    report.write_text("REPORT-META: " + json.dumps(metadata))
+    reading["context"] = plan.data["readings"][1]["primary"][:]
+    plan.data["sha256"] = stable_revision({k: v for k, v in plan.data.items() if k != "sha256"})
+    atomic_write_json(tmp_path / "reading-plan.json", plan.data)
+    with pytest.raises(ValueError, match="differs from frozen"):
+        repair_claims(tmp_path, root, report, project=project, model=lambda _: pytest.fail("stale plan reached model"))
+    assert packet_path.read_bytes() == before
