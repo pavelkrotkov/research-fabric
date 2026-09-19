@@ -32,7 +32,6 @@ from research_fabric.sources import (  # noqa: E402
     bind_manifest,
     copy_source_snapshot,
     discover_sources,
-    representation_for,
     snapshot_relative,
 )
 
@@ -221,7 +220,7 @@ def _grounding_misses(snap_dest, source_by_file, claims):
         json.loads(line) for line in filter(str.strip, (snap_dest.parent / "sources.jsonl").read_text().splitlines())
     ]
     snapshots = {row["source_id"]: snap_dest.parent.parent / row["snapshot"] for row in rows}
-    snaps = {source_id: representation_for(path).text for source_id, path in snapshots.items()}
+    snaps = {source_id: excerpt_grounding.source_text(path) for source_id, path in snapshots.items()}
     misses = []
     for claim in claims:
         if not excerpt_grounding.grounded(claim["excerpt"], snaps[claim["source_ids"][0]]):
