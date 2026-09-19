@@ -255,11 +255,7 @@ def source_text(snapshot: pathlib.Path) -> str:
     """Convert source syntax once; only EPUB's generated markers are elidable."""
     if snapshot.suffix.lower() == ".txt":  # Legacy plain-text ledgers.
         return snapshot.read_text(encoding="utf-8")
-    rep = representation_for(snapshot)
-    if rep.adapter == "epub":
-        # Before entity folding: escaped visible marker-like text stays evidence.
-        return re.sub(r"<!--@@(?:chapter |section |asset |formula)[^>]*-->", " ", rep.text)
-    return rep.text
+    return representation_for(snapshot).grounding_text
 
 
 def main() -> int:

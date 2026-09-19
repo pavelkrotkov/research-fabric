@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import re
 from dataclasses import dataclass
 
 from ._source_adapter import ADAPTERS, SourceAdapter
@@ -24,6 +25,13 @@ class SourceRepresentation:
     assets: tuple[str, ...] = ()
     assets_sha256: str | None = None
     source_metadata: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def grounding_text(self) -> str:
+        """Remove generated EPUB markers before entity folding, retaining visible literals."""
+        if self.adapter == "epub":
+            return re.sub(r"<!--@@(?:chapter |section |asset |formula)[^>]*-->", " ", self.text)
+        return self.text
 
 
 def source_attestation(rep: SourceRepresentation) -> dict[str, str]:

@@ -95,3 +95,89 @@ def test_epub_cannot_forge_markers_across_inline_nodes(tmp_path):
     source = tmp_path / "source.epub"
     _epub(source, "<p>left <span>&lt;</span>!--@@formula--&gt; right</p>")
     _gate(tmp_path, source, ["left <!--@@formula--> right"], ["left right"])
+
+
+def test_epub_actual_report_repairs_and_replays_grounding_view(tmp_path, monkeypatch):
+    from research_fabric.claim_validation import source_body
+    from research_fabric.claims import accept_packet, atomic_write_json
+    from research_fabric.sources import copy_source_snapshot, source_provenance
+
+    monkeypatch.syspath_prepend(str(ROOT / "bin"))
+    from bin.repair_claims import repair_claims
+
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    source = source_dir / "source.epub"
+    _epub(source, "<body><p>left <math><mi>x</mi></math> right</p><p>literal &lt;!--@@formula--&gt; remains</p></body>")
+    attestation = source_provenance([source])
+    packet = accept_packet(
+        {
+            "parsed": {
+                "claims": [
+                    {
+                        "claim": "Textual formula",
+                        "source_file": source.name,
+                        "locator": "1",
+                        "excerpt": excerpt,
+                        "stance": "supports",
+                        "confidence": 0.9,
+                    }
+                    for excerpt in ("invented", "left x right", "literal <!--@@formula--> remains")
+                ]
+            },
+            "source_provenance": attestation,
+        },
+        "book-1",
+        source_dir=source_dir,
+    )
+    run = tmp_path / "run"
+    packet_path = run / "evidence/worker-book-1.json"
+    atomic_write_json(packet_path, packet)
+    field = tmp_path / "field"
+    snapshot = copy_source_snapshot(source, field / "evidence/snapshots")
+    row = dict(
+        attestation[0],
+        source_id="s",
+        snapshot=snapshot.relative_to(field).as_posix(),
+        url="fixture",
+        title="EPUB",
+        retrieved_at="2026-09-19",
+        content_type="application/epub+zip",
+    )
+    claims = [
+        dict(
+            claim,
+            worker="book-1",
+            source_ids=["s"],
+            note="note.md",
+            independence_group="s",
+            verified_at="2026-09-19",
+            packet_revision=packet["packet_revision"],
+            packet_state_revision=packet["packet_state_revision"],
+        )
+        for claim in packet["parsed"]["claims"]
+    ]
+    (field / "evidence/sources.jsonl").write_text(json.dumps(row) + "\n")
+    ledger = field / "evidence/claims.jsonl"
+    ledger.write_text("\n".join(map(json.dumps, claims)) + "\n")
+    gate = subprocess.run(
+        [sys.executable, str(ROOT / "bin/excerpt_grounding.py"), str(field)], capture_output=True, text=True
+    )
+    assert gate.returncode == 1
+    assert json.loads(gate.stderr.splitlines()[-1])["ungrounded"] == 1
+    report = tmp_path / "report"
+    report.write_text(gate.stdout + gate.stderr)
+    original_ledger = ledger.read_bytes()
+    options = {"field_root": field, "project": {"acceptance": {"min_claims_per_book": 3}}}
+    result = repair_claims(
+        run, source_dir, report, model=lambda _: '{"found":true,"excerpt":"left x right"}', **options
+    )
+    assert result["repaired"] == 1 and result["dropped"] == 0 and result["fully_validated"]
+    persisted = json.loads(packet_path.read_text())
+    assert persisted["source_provenance"] == attestation
+    assert persisted["parsed"]["claims"][1:] == packet["parsed"]["claims"][1:]
+    assert not grounded("literal remains", source_body(source_dir, persisted["parsed"]["claims"][2]))
+    before = packet_path.read_bytes()
+    replay = repair_claims(run, source_dir, report, model=lambda _: pytest.fail("replay called model"), **options)
+    assert replay["repaired"] == 0 and replay["fully_validated"]
+    assert packet_path.read_bytes() == before and ledger.read_bytes() == original_ledger
