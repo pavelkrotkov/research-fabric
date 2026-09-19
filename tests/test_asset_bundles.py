@@ -182,7 +182,8 @@ def test_original_and_policy_drift_fail(tmp_path):
         assets.verify_bundle(root, manifest)
 
 
-def test_exporter_only_copies_manifest_closure_and_rejects_drift(tmp_path):
+@pytest.mark.parametrize("field,value", [("key", "wrong"), ("input_path", "prepared/wrong.md")])
+def test_exporter_only_copies_manifest_closure_and_rejects_drift(tmp_path, field, value):
     source = tmp_path / "paper.md"
     png(tmp_path / "figure.png")
     source.write_text("![Figure](figure.png)")
@@ -212,9 +213,9 @@ def test_exporter_only_copies_manifest_closure_and_rejects_drift(tmp_path):
         assets.export_assets(wiki, tmp_path / "fresh-docs")
     receipt = next(wiki.glob("assets/*/bundle.json"))
     data = json.loads(receipt.read_text())
-    data["input_path"] = "prepared/wrong.md"
+    data[field] = value
     receipt.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="identity mismatch"):
+    with pytest.raises(ValueError, match="identity"):
         assets.export_assets(wiki, tmp_path / "fresh-docs")
 
 

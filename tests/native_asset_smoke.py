@@ -72,14 +72,24 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
             assert digest(copied.read_bytes()) == row["derivative_sha256"]
             with Image.open(copied) as image:
                 image.load()  # Native read-image consumes the same raster formats.
+    html_source = root / "chapter.html"
+    html_source.write_text("<h1>HTML chapter</h1><p>Original HTML evidence.</p>")
+    manifest = prepare_source_bundle(html_source, root / "bundles", source_attestation(representation_for(html_source)))
+    bundle_root = root / "bundles" / manifest["key"]
+    converted = convert_document(bundle_root / manifest["input_path"], root)
+    assert converted.doc_name == "chapter"
+    publish_bundle(bundle_root, manifest, root / "wiki", converted.doc_name)
     docs = root / "site/docs"
     subprocess.run(
         [sys.executable, str(ENGINE / "tools/wiki/build_wiki.py"), "--vault", str(root / "wiki"), "--docs", str(docs)],
         check=True,
     )
     pages = list((docs / "sources").glob("*.md"))
-    assert len(pages) == 3
+    assert len(pages) == 4
     for page in pages:
+        if page.stem == "chapter":
+            assert "Original HTML evidence." in page.read_text()
+            continue
         assert SCIENCE in page.read_text()
         if "# Experiment" in page.read_text():
             assert CAPTION in page.read_text()
