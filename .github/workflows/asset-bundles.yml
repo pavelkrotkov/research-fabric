@@ -24,8 +24,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y poppler-utils ghostscript
       - name: Install project and pinned native converter
         run: |
-          uv sync --dev
-          uv pip install openkb==0.4.5 litellm==1.87.2 openai-agents==0.17.3 openai==2.44.0
+          uv venv
+          uv pip install -e . pytest ruff -r tests/native-requirements.txt openai-agents==0.17.3 openai==2.44.0
       - name: Portable behavior and real renderer regressions
         run: .venv/bin/python -m pytest
       - name: Real native conversion and browser export, no model calls
