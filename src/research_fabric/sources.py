@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from itertools import accumulate
 
 from ._source_adapter import ADAPTERS, SourceAdapter, _lines
+from .reading import (
+    ReadingPlan as ReadingPlan,
+    exact_excerpt as exact_excerpt,
+    prepare_reading_plan as prepare_reading_plan,
+    published_reading_plan as published_reading_plan,
+    reading_quote as reading_quote,
+    reading_source_text as reading_source_text,
+)
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 ASSET_HASH_FIELD = "assets_sha256"
@@ -339,12 +347,3 @@ def preserve_original_bytes(field_root):
     if current != original:
         atomic_write_text(path, current)
 
-
-from .reading import (  # noqa: E402
-    ReadingPlan as ReadingPlan,
-    exact_excerpt as exact_excerpt,
-    prepare_reading_plan as prepare_reading_plan,
-    published_reading_plan as published_reading_plan,
-    reading_quote as reading_quote,
-    reading_source_text as reading_source_text,
-)
