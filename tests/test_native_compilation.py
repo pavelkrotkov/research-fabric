@@ -192,9 +192,8 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
     import runpy
     import subprocess
     import sys
-    import types
 
-    from research_fabric import compilation
+    from research_fabric.engine import ResearchRun, RunConfig
 
     root = Path(__file__).resolve().parents[1]
     if collect_new:
@@ -293,20 +292,7 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
     returned_model = (
         "forbidden-B" if policy == "restricted-fresh" else "allowed-C" if policy else "actual-evidence-model"
     )
-    shim = types.ModuleType("cao_workflow")
-    shim.ShimError = RuntimeError
-    shim.get_inputs = lambda: {
-        "field_root": str(kb),
-        "run_root": str(run),
-        "source_dir": str(sources),
-        "question": "What happened?",
-        "reuse_evidence_dir": None if collect_new else str(reused),
-    }
     outputs = []
-    shim.emit_output = outputs.append
-    shim.run_step = lambda **kwargs: SimpleNamespace(output="VERDICT: FAIL - advisory fixture")
-    monkeypatch.setitem(sys.modules, "cao_workflow", shim)
-    monkeypatch.setenv("RESEARCH_FABRIC_ROOT", str(root))
     if collected:
         wrapper = tmp_path / "worker-python"
         wrapper.write_text(
@@ -348,16 +334,32 @@ cli.cli()
 """)
     lint.chmod(0o755)
     monkeypatch.setenv("PATH", str(executables) + os.pathsep + os.environ["PATH"])
-    production_compile = compilation.compile_with_recovery
-    command = [sys.executable, str(root / "tests/fixtures/scripted_openkb.py"), str(tmp_path / "calls.json")]
-    monkeypatch.setattr(
-        compilation,
-        "compile_with_recovery",
-        lambda kb, src, diag, **kwargs: production_compile(kb, src, diag, command=command, **kwargs),
-    )
+
+    def launch():
+        config = RunConfig(
+            engine_root=root,
+            project_path=Path(os.environ.get("RESEARCH_FABRIC_PROJECTS", root / "projects")) / "odyssey.yaml",
+            field_root=kb,
+            run_root=run,
+            source_dir=sources,
+            question="What happened?",
+            reuse_evidence_dir=None if collect_new else reused,
+            worker_python=os.environ.get("RESEARCH_FABRIC_WORKER_PYTHON", sys.executable),
+            compiler_command=(
+                sys.executable,
+                str(root / "tests/fixtures/scripted_openkb.py"),
+                str(tmp_path / "calls.json"),
+            ),
+        )
+        result = ResearchRun(
+            config, lambda **_: "VERDICT: FAIL - advisory fixture", agent_provider="scripted"
+        ).execute()
+        outputs.append(result)
+        return result
+
     if policy == "restricted-fresh":
         with pytest.raises(RuntimeError, match="evidence workers failed"):
-            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+            launch()
         assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
         assert ex.history(run)["attempts"][0]["actual_model"] == "forbidden-B"
         assert not (tmp_path / "calls.json").exists()
@@ -367,7 +369,7 @@ cli.cli()
         # The unavailable executable makes that required collection fail offline.
         monkeypatch.setenv("RESEARCH_FABRIC_WORKER_PYTHON", str(tmp_path / "missing-worker"))
         with pytest.raises(RuntimeError, match="one or more evidence workers failed"):
-            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+            launch()
         assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
         assert outputs == []
         assert not (tmp_path / "calls.json").exists()
@@ -375,12 +377,12 @@ cli.cli()
         return
     if ignored:
         with pytest.raises(CompilationError, match="ignored/untracked"):
-            runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+            launch()
         assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
         assert outputs == []
         assert subprocess.check_output(["git", "-C", str(kb), "rev-list", "--count", "HEAD"]).strip() == b"1"
         return
-    runpy.run_path(str(root / "workflows/research.py"), run_name="__main__")
+    launch()
     result = json.loads((run / "run.json").read_text())
     assert result["state"] == "READY_FOR_REVIEW"
     assert (
@@ -536,3 +538,197 @@ def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tm
     assert all(row["profile"]["provider"] == "chatgpt" for row in records)
     assert all(row["actual_model"] is None for row in records)
     assert set(model["models"]) == {"chatgpt/gpt-5"}
+
+
+@pytest.fixture
+def engine_run(kb, tmp_path, monkeypatch):
+    """Production engine with only model I/O scripted; all gates and Git remain real."""
+    import hashlib
+    import subprocess
+    import sys
+
+    from research_fabric.engine import RunConfig
+
+    root = Path(__file__).resolve().parents[1]
+    for args in (
+        ("init", "-b", "main"),
+        ("config", "user.email", "test@example.invalid"),
+        ("config", "user.name", "Test"),
+        ("add", "."),
+        ("commit", "-m", "baseline"),
+        ("switch", "-c", "agent/engine"),
+    ):
+        subprocess.run(["git", "-C", str(kb), *args], check=True, capture_output=True)
+    sources, run = tmp_path / "sources", tmp_path / "run"
+    sources.mkdir()
+    run.mkdir()
+    rows = []
+    for book in (1, 2):
+        path = sources / f"odyssey-book-{book}.html"
+        path.write_text(f"<p>Book {book}: Athena spoke to Telemachus.</p>")
+        rows.append(
+            {
+                "source_id": f"s-odyssey-{book}-theoi",
+                "snapshot": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "url": "https://example.invalid/source",
+                "title": f"Synthetic {book}",
+                "retrieved_at": "2026-01-01",
+                "content_type": "text/html",
+            }
+        )
+    (run / "source-manifest.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    fault = tmp_path / "fault"
+    fault.write_text("")
+    worker = tmp_path / "worker-python"
+    worker.write_text(
+        f"#!{sys.executable}\n"
+        + f"fault_path={str(fault)!r}\n"
+        + """
+import json, pathlib, runpy, sys
+import httpx
+import openai
+original = openai.OpenAI
+filename = sys.argv[5]
+def respond(request):
+    body = json.loads(request.content)
+    fault = pathlib.Path(fault_path).read_text()
+    with pathlib.Path(fault_path).with_name("worker-calls.jsonl").open("a") as out:
+        out.write(json.dumps({"file": filename, "model": body["model"]}) + "\\n")
+    if fault == "worker" or (fault == "resume" and "book-2" in filename and body["model"] == "B"):
+        return httpx.Response(503, json={"error": {"message": "scripted provider failure"}})
+    excerpt = "Invented ungrounded quotation" if fault == "grounding" else "Athena spoke to Telemachus."
+    packet = {"claims": [{"claim": f"Athena speaks, observation {i}", "source_file": filename,
+                         "locator": "Book", "excerpt": excerpt, "stance": "supports", "confidence": 0.9}
+                        for i in range(5)], "conflicts": [], "coverage_notes": []}
+    return httpx.Response(200, json={"id": "scripted", "object": "chat.completion", "created": 1,
+        "model": body["model"], "choices": [{"index": 0, "finish_reason": "stop",
+        "message": {"role": "assistant", "content": json.dumps(packet)}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}})
+def client(**kwargs):
+    return original(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond)))
+openai.OpenAI = client
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+    )
+    worker.chmod(0o755)
+    lint = tmp_path / "offline-openkb"
+    lint.write_text(
+        f"#!{sys.executable}\n"
+        + """
+from openkb import cli
+from openkb.agent import linter
+async def advisory(*args, **kwargs):
+    return "Offline advisory"
+linter.run_knowledge_lint = advisory
+cli.cli()
+"""
+    )
+    lint.chmod(0o755)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-fixture")
+    config = RunConfig(
+        root,
+        root / "projects/odyssey.yaml",
+        kb,
+        run,
+        sources,
+        "What happened?",
+        worker_python=str(worker),
+        openkb_command=(str(lint),),
+        compiler_command=(
+            sys.executable,
+            str(root / "tests/fixtures/scripted_openkb.py"),
+            str(tmp_path / "compiler-calls.json"),
+        ),
+        execution={"roles": {"extraction": {"model": "B"}}},
+    )
+    return config, fault
+
+
+@pytest.mark.parametrize(
+    "fault,stage",
+    [
+        ("worker", "RESEARCHING"),
+        ("compile", "COMPILING"),
+        ("grounding", "MATERIALIZING_LEDGER"),
+        ("commit", "VERIFYING_DIFF"),
+    ],
+)
+def test_engine_failure_never_publishes_ready(engine_run, fault, stage):
+    import subprocess
+    import sys
+    from dataclasses import replace
+
+    from research_fabric.engine import ResearchRun
+
+    config, fault_path = engine_run
+    fault_path.write_text(fault)
+    if fault == "compile":
+        script = fault_path.with_name("failed-compiler.py")
+        script.write_text(
+            "import pathlib,runpy,sys\npathlib.Path(sys.argv[1]).unlink(missing_ok=True)\n"
+            + f"runpy.run_path({config.compiler_command[1]!r},run_name='__main__')\n"
+        )
+        config = replace(config, compiler_command=(sys.executable, str(script), config.compiler_command[2]))
+    if fault == "commit":
+        hook = config.field_root / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+    before = subprocess.check_output(["git", "-C", str(config.field_root), "rev-parse", "main"])
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    state = json.loads((config.run_root / "run.json").read_text())
+    assert state["state"] == "FAILED" and state["failed_stage"] == stage
+    assert state["artifacts"] == str(config.run_root.resolve())
+    assert "commit" not in state
+    for ref in ("HEAD", "main"):
+        assert subprocess.check_output(["git", "-C", str(config.field_root), "rev-parse", ref]) == before
+    if fault == "compile":
+        assert len(list((config.run_root / "verification/compile").glob("*/failure-*.json"))) == 2
+        assert not (config.field_root / "wiki/concepts/one.md").exists()
+    if fault == "grounding":
+        assert "excerpt not found" in (config.run_root / "verification/excerpt-grounding.txt").read_text()
+
+
+def test_engine_resume_switch_preserves_completed_packet_and_shared_budget(engine_run):
+    import subprocess
+    from dataclasses import replace
+
+    from research_fabric.engine import ResearchRun
+    from research_fabric.execution import history
+
+    config, fault = engine_run
+    fault.write_text("resume")
+    config = replace(config, execution={"roles": {"extraction": {"model": "B"}}, "budget": {"requests": 4}})
+    with pytest.raises(RuntimeError, match="evidence workers failed"):
+        ResearchRun(config, lambda **_: "{}").execute()
+    accepted_path = config.run_root / "evidence/worker-book-1.json"
+    original_packet = json.loads(accepted_path.read_text())
+    attempts = history(config.run_root)["attempts"]
+    assert len(attempts) == 4
+    assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
+    # Switching profiles does not replenish the exhausted run-wide budget.
+    config = replace(
+        config, reuse_evidence_dir=config.run_root / "evidence", execution={"roles": {"extraction": {"model": "C"}}}
+    )
+    with pytest.raises(RuntimeError, match="evidence workers failed"):
+        ResearchRun(config, lambda **_: "{}").execute()
+    assert history(config.run_root)["attempts"] == attempts
+    # The operator explicitly increases the limit; prior attempts remain charged.
+    config = replace(config, execution={"budget": {"requests": 100}})
+    result = ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    assert result["state"] == "READY_FOR_REVIEW"
+    current = history(config.run_root)
+    assert current["attempts"][:4] == attempts
+    extracted = [row for row in current["attempts"] if row["role"] == "extraction"]
+    assert extracted[-1]["profile"]["model"] == "C" and extracted[-1]["revision"] == 3
+    assert json.loads(accepted_path.read_text()) == original_packet
+    calls = [json.loads(line) for line in fault.with_name("worker-calls.jsonl").read_text().splitlines()]
+    assert len([call for call in calls if "book-1" in call["file"]]) == 1
+    published = json.loads((config.field_root / "evidence/packet-execution.json").read_text())
+    assert published["book-1"]["execution"] == original_packet["execution"]
+    assert published["book-2"]["execution"][-1]["profile"]["model"] == "C"
+    assert (config.run_root / "verification/provenance.txt").is_file()
+    assert (config.run_root / "verification/excerpt-grounding.txt").is_file()
+    assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""

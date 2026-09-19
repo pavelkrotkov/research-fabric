@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import importlib.util
 import json
@@ -404,33 +403,17 @@ def test_model_error_is_reported_after_prior_history_is_written(tmp_path):
 
 
 def _workflow_ledger(packet_dir, field_root):
-    """Execute the production ledger loop without importing CAO orchestration."""
-    tree = ast.parse((ROOT / "workflows" / "research.py").read_text())
-    loop = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.For)
-        and isinstance(node.iter, ast.Name)
-        and node.iter.id == "results"
-        and any(isinstance(child, ast.Name) and child.id == "ledger_claim" for child in ast.walk(node))
-    )
+    """Call the actual engine ledger projection without parsing production Python."""
+    from research_fabric.engine import ResearchRun, RunConfig
+
     note = field_root / "note.md"
     note.write_text("Native compiler output is outside this identity test.")
-    scope = {
-        "json": json,
-        "pathlib": pathlib,
-        "results": [("book-1", "", None)],
-        "packet_dir": packet_dir,
-        "field_root": field_root,
-        "SOURCE_BY_FILE": {"source.html": "s-1"},
-        "NOTE_BY_SOURCE": {"s-1": "note.md"},
-        "claims": [],
-        "dropped": [],
-        "IS_MULTI": True,
-    }
-    exec(compile(ast.Module(body=[loop], type_ignores=[]), str(ROOT / "workflows" / "research.py"), "exec"), scope)
-    assert not scope["dropped"]
-    return scope["claims"]
+    config = RunConfig(ROOT, ROOT / "projects/odyssey.yaml", field_root, packet_dir.parent, field_root, "Identity")
+    run = ResearchRun(config, lambda **_: "")
+    run.results, run.is_multi = [("book-1", "", None)], True
+    claims, dropped = run._ledger_rows({"s-1": "note.md"}, {"source.html": "s-1"})
+    assert not dropped
+    return claims
 
 
 @pytest.mark.parametrize("fault", [None, "snapshot", "bounds", "witness_schema", "witness_grounding"])
@@ -674,25 +657,11 @@ def test_persisted_identity_rejects_corrupt_mapping_or_missing_binding(tmp_path,
 
 def _workflow_reuse(source_dir, reuse_dir, destination):
     """Run the actual production reuse loop, including its acceptance/write seam."""
-    tree = ast.parse((ROOT / "workflows" / "research.py").read_text())
-    from research_fabric.sources import packet_source_defects, source_provenance
+    from research_fabric.engine import _reuse_evidence_packets
+    from research_fabric.sources import source_provenance
 
-    function = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_reuse_evidence_packets"
-    )
     expected = source_provenance([source_dir / "source.html"])
-    scope = {
-        "json": json,
-        "packet_source_defects": packet_source_defects,
-        "ADAPTERS": __import__("research_fabric.sources", fromlist=["ADAPTERS"]).ADAPTERS,
-        "accept_packet": accept_packet,
-        "atomic_write_json": atomic_write_json,
-        "ClaimIdentityError": ClaimIdentityError,
-    }
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "workflow reuse", "exec"), scope)
-    scope["_reuse_evidence_packets"](
-        reuse_dir, destination, [("book-1", "")], {"book-1": expected}, lambda *_: [], source_dir
-    )
+    _reuse_evidence_packets(reuse_dir, destination, [("book-1", "")], {"book-1": expected}, lambda *_: [], source_dir)
 
 
 @pytest.mark.parametrize("seam", ["reuse", "rehearsal", "ledger"])

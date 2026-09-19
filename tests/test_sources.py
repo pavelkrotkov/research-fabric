@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import pathlib
-import shutil
 import subprocess
 import sys
 
@@ -273,22 +271,7 @@ def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path
     source = _html(tmp_path / "book-1.html")
     expected = source_provenance([source])
 
-    workflow = ast.parse((ROOT / "workflows" / "research.py").read_text(encoding="utf-8"))
-    reuse_function = next(
-        node for node in workflow.body if isinstance(node, ast.FunctionDef) and node.name == "_reuse_evidence_packets"
-    )
-    from research_fabric.claims import ClaimIdentityError, accept_packet, atomic_write_json
-
-    namespace = {
-        "json": json,
-        "shutil": shutil,
-        "packet_source_defects": packet_source_defects,
-        "ADAPTERS": __import__("research_fabric.sources", fromlist=["ADAPTERS"]).ADAPTERS,
-        "accept_packet": accept_packet,
-        "atomic_write_json": atomic_write_json,
-        "ClaimIdentityError": ClaimIdentityError,
-    }
-    exec(compile(ast.Module(body=[reuse_function], type_ignores=[]), "workflows/research.py", "exec"), namespace)
+    from research_fabric.engine import _reuse_evidence_packets
 
     valid = {"parsed": {"claims": [{"source_file": "book-1.html", "excerpt": "ok"}]}, "source_provenance": expected}
     stale = {
@@ -308,7 +291,7 @@ def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path
     (reuse_dir / "worker-book-2.json").write_text(json.dumps(stale), encoding="utf-8")
     (reuse_dir / "worker-book-3.json").write_text(json.dumps(unattested), encoding="utf-8")
     specs = [("book-1", ""), ("book-2", ""), ("book-3", ""), ("book-4", "")]
-    reused = namespace["_reuse_evidence_packets"](
+    reused = _reuse_evidence_packets(
         reuse_dir,
         destination_dir,
         specs,
