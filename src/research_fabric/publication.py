@@ -1,13 +1,12 @@
 """Materialize accepted evidence; gates and terminal publication remain separate."""
 
 import json
-from pathlib import Path
 
 from research_fabric.compilation import write_json
 
 
-def _claim_row(field_root, worker, packet, claim, notes, sources, multi):
-    source_id = sources.get(Path(claim.get("source_file", "")).name)
+def _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading_plan):
+    source_id = sources.get(claim.get("source_file", ""))
     if not source_id:
         return None
     note = notes[source_id]
@@ -41,14 +40,16 @@ def _claim_row(field_root, worker, packet, claim, notes, sources, multi):
             english_witness=claim.get("english_witness"),
             witnesses_consulted=claim.get("witnesses_consulted", []),
         )
+    if reading_plan:
+        row.update(reading_plan.project_claim(claim))
     return row
 
 
-def ledger_rows(field_root, packets, notes, sources, *, multi=False):
+def ledger_rows(field_root, packets, notes, sources, *, multi=False, reading_plan=None):
     claims, dropped = [], []
     for worker, packet in packets.items():
         for index, claim in enumerate((packet.get("parsed") or {}).get("claims", []), 1):
-            row = _claim_row(field_root, worker, packet, claim, notes, sources, multi)
+            row = _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading_plan)
             if row is None:
                 dropped.append({"worker": worker, "index": index, "source_file": claim.get("source_file", "")})
             else:
@@ -67,13 +68,15 @@ def _packet_history(field_root, packets):
         write_json(field_root / "evidence/claim-history.json", history)
 
 
-def materialize_evidence(field_root, run_root, worker_ids, notes, sources, source_rows, *, multi=False):
+def materialize_evidence(
+    field_root, run_root, worker_ids, notes, sources, source_rows, *, multi=False, reading_plan=None
+):
     """Project accepted packets and bound source rows without gating or committing."""
     packets = {
         worker: json.loads((run_root / "evidence" / f"worker-{worker}.json").read_text(encoding="utf-8"))
         for worker in worker_ids
     }
-    claims, dropped = ledger_rows(field_root, packets, notes, sources, multi=multi)
+    claims, dropped = ledger_rows(field_root, packets, notes, sources, multi=multi, reading_plan=reading_plan)
     if dropped:
         write_json(run_root / "verification/dropped-claims.json", dropped)
         raise RuntimeError(f"{len(dropped)} claim(s) could not be mapped to a manifest source; see dropped-claims.json")

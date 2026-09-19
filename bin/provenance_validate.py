@@ -10,7 +10,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.sources import representation_for, source_attestation  # noqa: E402
+from research_fabric.sources import published_reading_plan, representation_for, source_attestation  # noqa: E402
 
 SOURCE_KEYS = {"source_id", "url", "title", "retrieved_at", "content_type", "sha256", "snapshot"}
 REPRESENTATION_KEYS = {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
@@ -95,8 +95,26 @@ def main() -> int:
         source_ids.add(sid)
         sources_by_id[sid] = row
         errors.extend(source_errors(root, row, sid))
+    reading_plan = None
+    if not errors:
+        try:
+            reading_plan = published_reading_plan(root, [row for _, row in source_rows])
+        except (ValueError, RuntimeError, KeyError) as exc:
+            errors.append(f"reading plan invalid: {exc}")
     claim_ids = set()
     for line, row in claim_rows:
+        if "reading" in row:
+            try:
+                if reading_plan is None:
+                    raise ValueError("reading claim has no verified frozen plan")
+                reading_plan.validate_claim(row)
+                expected_group = row["reading"]["work_id"] if row["reading"]["role"] == "primary" else None
+                if row.get("independence_group") != expected_group:
+                    raise ValueError("reading claim independence group differs from assigned role/work")
+            except (ValueError, KeyError) as exc:
+                errors.append(f"reading claim invalid: {exc}")
+        elif reading_plan:
+            errors.append("claim has no frozen reading assignment")
         missing = CLAIM_KEYS - row.keys()
         if missing:
             errors.append(f"claims.jsonl:{line}: missing {sorted(missing)}")

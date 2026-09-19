@@ -167,6 +167,7 @@ def repair_claims(
     report = Report.read(pathlib.Path(report_path), store.packets, source_dir)
     targets = report.targets(store.packets)
     preflight(field_root, project)
+    plan = None
     reading_claims = [
         claim
         for packet in store.packets.values()
@@ -182,6 +183,7 @@ def repair_claims(
         plan = ReadingPlan.load(
             run_root / "reading-plan.json",
             {name: safe_path(source_dir, name) for name in project["reading"]["sources"]},
+            project["reading"],
         )
         for claim in reading_claims:
             plan.validate_claim(claim)
@@ -197,6 +199,7 @@ def repair_claims(
         alignment_path,
         grounded,
         adapters,
+        reading_plan=plan,
     )
     return {
         "repaired": counts["repair"],

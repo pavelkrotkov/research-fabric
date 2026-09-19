@@ -188,6 +188,8 @@ def main():
     n = 0
     for md in SRC.rglob("*.md"):
         rel = md.relative_to(SRC)
+        if rel.as_posix() in ASSET_PATHS:
+            continue  # Already copied byte-exactly from the attested bundle closure.
         dest = DST / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(

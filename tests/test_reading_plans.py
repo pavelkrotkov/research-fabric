@@ -57,7 +57,7 @@ def test_coherent_blocks_definitions_and_context_are_mapped(tmp_path):
     plan, _, _, _, _ = prepare(tmp_path, {"chapter.md": text})
     assert len(plan.data["sections"]) == 2
     reading = plan.data["readings"][0]
-    assert reading["budget_excess"]["primary"]
+    assert reading["token_counts"]["primary"] > plan.data["policy"]["soft_limit_tokens"]
     assert reading["context"] == [list(plan.data["sections"])[1]]
     body = plan.input(reading["id"])
     assert "$$\n# formula text\nx=1\n$$" in body and "```md\n# fenced heading\n```" in body
@@ -115,6 +115,9 @@ def test_context_keeps_its_source_work_and_reading_role_after_acceptance(tmp_pat
     binding, before = plan.claim(reading["id"], claim)
     assert binding["work_id"] == "B" and binding["role"] == "context"
     claim["reading"] = binding
+    assert plan.project_claim(claim)["independence_group"] is None
+    with pytest.raises(ValueError, match="too few primary"):
+        plan.validate_packet({"worker": reading["id"], "parsed": {"claims": [claim]}}, reading["id"], {})
     packet = accept_packet(
         {
             "parsed": {"claims": [claim]},
@@ -311,3 +314,254 @@ def test_rehashed_plan_cannot_retarget_actual_repair_before_model_or_write(tmp_p
     with pytest.raises(ValueError, match="differs from frozen"):
         repair_claims(tmp_path, root, report, project=project, model=lambda _: pytest.fail("stale plan reached model"))
     assert packet_path.read_bytes() == before
+
+
+def test_reuse_cannot_substitute_another_reading_of_the_same_source(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from research_fabric.engine import ResearchRun, _reuse_evidence_packets
+    from research_fabric.sources import source_provenance
+
+    plan, _, root, project, _ = prepare(
+        tmp_path,
+        {"a.md": "# First\n\nFirst unique argument.\n\n# Second\n\nSecond unique argument.\n"},
+        policy={"target_tokens": 1},
+    )
+    first, second = plan.data["readings"]
+    claim = {
+        "source_file": "a.md",
+        "excerpt": "Second unique argument.",
+        "claim": "Second",
+        "stance": "supports",
+        "locator": "second",
+    }
+    claim["reading"], _ = plan.claim(second["id"], claim)
+    packet = {
+        "worker": second["id"],
+        "parsed": {"claims": [claim]},
+        "source_provenance": source_provenance([root / "a.md"], source_root=root),
+    }
+    reused = tmp_path / "reuse"
+    reused.mkdir()
+    (reused / f"worker-{first['id']}.json").write_text(json.dumps(packet))
+    run = ResearchRun(SimpleNamespace(run_root=tmp_path / "run", field_root=tmp_path / "field"), None)
+    run.reading_plan, run.project, run.acceptance, run.is_multi = plan, project, {}, False
+    run.worker_provenance = {first["id"]: packet["source_provenance"]}
+    destination = tmp_path / "destination"
+    with pytest.raises(ValueError, match="dispatched assignment"):
+        run._packet_defects(packet, first["id"])
+    with pytest.raises(ValueError, match="dispatched assignment"):
+        _reuse_evidence_packets(
+            reused,
+            destination,
+            [(first["id"], "")],
+            run.worker_provenance,
+            lambda parsed: [],
+            root,
+            policy=run._packet_policy,
+        )
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("source_ids", [["b.md"], ["a.md", "b.md"]])
+def test_actual_gates_reject_identical_bytes_under_wrong_manifest_identity(tmp_path, source_ids):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    plan, _, root, _, rows = prepare(tmp_path, {"a.md": "# A\n\nSame bytes.\n", "b.md": "# A\n\nSame bytes.\n"})
+    claim = {
+        "source_file": "a.md",
+        "excerpt": "Same bytes.",
+        "claim": "Evidence",
+        "claim_id": "c-test",
+        "locator": "L3",
+        "stance": "supports",
+        "confidence": 0.9,
+        "source_ids": ["a.md"],
+        "note": "wiki/summaries/a.md",
+        "verified_at": "test",
+    }
+    claim["reading"], _ = plan.claim(plan.data["readings"][0]["id"], claim)
+    claim.update(plan.project_claim(claim))
+    claim["source_ids"] = source_ids
+    evidence = tmp_path / "field/evidence"
+    evidence.mkdir(parents=True)
+    (evidence / "reading-plan.json").write_text(json.dumps(plan.data))
+    snapshots = evidence / "snapshots"
+    snapshots.mkdir()
+    for row in rows:
+        name = row["source_file"]
+        (snapshots / name).write_bytes((root / name).read_bytes())
+        row.update(
+            snapshot="evidence/snapshots/" + name,
+            url="https://example.invalid",
+            title="Synthetic",
+            retrieved_at="2026-01-01",
+            content_type="text/markdown",
+        )
+    (evidence / "sources.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    (evidence / "claims.jsonl").write_text(json.dumps(claim) + "\n")
+    for script in ("provenance_validate.py", "excerpt_grounding.py"):
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "bin" / script), str(evidence.parent)],
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode != 0 and "source IDs differ" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("generated", ["wiki/summaries/generated.md", "wiki/concepts/generated.md"])
+def test_original_git_bytes_and_whitespace_policy_are_scoped(tmp_path, generated):
+    import subprocess
+
+    from research_fabric.run_state import _publication_outputs
+    from research_fabric.sources import preserve_original_bytes
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True)
+
+    assert git("init").returncode == 0
+    git("config", "core.autocrlf", "true")
+    attributes = tmp_path / ".gitattributes"
+    attributes.write_bytes(
+        b"# Existing policy\r\n*.bin -text\r\nevidence/snapshots/** -text -whitespace\r\n*.md text whitespace\r\n"
+    )
+    preserve_original_bytes(tmp_path)
+    first = attributes.read_bytes()
+    preserve_original_bytes(tmp_path)
+    assert attributes.read_bytes() == first and first.startswith(b"# Existing policy\n*.bin -text\n")
+    original = b"Hard break  \r\n\t\r\nLast line\r\n"
+    for relative in (
+        "evidence/snapshots/key/a.md",
+        "wiki/assets/key/original/nested/a.md",
+        "raw/a.md",
+        "wiki/sources/a.md",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(original)
+    assert git("add", ".").returncode == 0
+    assert git("diff", "--cached", "--check").returncode == 0
+    for relative in (
+        "evidence/snapshots/key/a.md",
+        "wiki/assets/key/original/nested/a.md",
+        "raw/a.md",
+        "wiki/sources/a.md",
+    ):
+        assert git("show", ":" + relative).stdout == original
+    assert git("show", ":.gitattributes").stdout == first
+    assert ".gitattributes" in _publication_outputs(tmp_path)
+    page = tmp_path / generated
+    page.parent.mkdir(parents=True)
+    page.write_text("Generated trailing whitespace \n")
+    git("add", generated)
+    result = git("diff", "--cached", "--check")
+    assert result.returncode != 0 and generated.encode() in result.stdout
+
+
+def test_actual_reading_report_repairs_reprojects_and_replays(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+    from repair_claims import repair_claims
+
+    from research_fabric.claim_validation import sync_ledger_rows
+    from research_fabric.claims import accept_packet, atomic_write_json
+    from research_fabric.sources import source_provenance
+
+    plan, _, root, project, source_rows = prepare(
+        tmp_path, {"nested/α paper.md": "# A\r\n\r\nOld quote. Better quote. Surviving quote.\r\n"}
+    )
+    reading = plan.data["readings"][0]
+    claims = []
+    for excerpt in ("Old quote.", "Surviving quote."):
+        claim = {
+            "source_file": "nested/α paper.md",
+            "excerpt": excerpt,
+            "claim": "Finding",
+            "locator": "L3",
+            "stance": "supports",
+            "confidence": 0.9,
+        }
+        claim["reading"], _ = plan.claim(reading["id"], claim)
+        claims.append(claim)
+    old_span = plan.project_claim(claims[0])["quote_span"]
+    claims[0]["excerpt"] = "Rejected quotation"
+    packet = accept_packet(
+        {
+            "worker": reading["id"],
+            "parsed": {"claims": claims},
+            "source_provenance": source_provenance([root / "nested/α paper.md"], source_root=root),
+        },
+        reading["id"],
+        source_dir=root,
+    )
+    atomic_write_json(tmp_path / "evidence" / f"worker-{reading['id']}.json", packet)
+    evidence = tmp_path / "field/evidence"
+    evidence.mkdir(parents=True)
+    atomic_write_json(evidence / "reading-plan.json", plan.data)
+    snapshot = evidence / "snapshots/original.md"
+    snapshot.parent.mkdir()
+    snapshot.write_bytes((root / "nested/α paper.md").read_bytes())
+    source_rows[0].update(
+        snapshot="evidence/snapshots/original.md",
+        title="Synthetic",
+        url="https://example.invalid",
+        retrieved_at="2026-01-01",
+        content_type="text/markdown",
+    )
+    (evidence / "sources.jsonl").write_text(json.dumps(source_rows[0]) + "\n")
+    rows = [
+        {
+            **claim,
+            "worker": reading["id"],
+            "source_ids": [source_rows[0]["source_id"]],
+            "note": "wiki/summaries/source.md",
+            "verified_at": "fixture",
+            "independence_group": "work",
+            "quote_span": old_span if i == 0 else plan.project_claim(claim)["quote_span"],
+            "packet_revision": packet["packet_revision"],
+            "packet_state_revision": packet["packet_state_revision"],
+        }
+        for i, claim in enumerate(claims)
+    ]
+    ledger = evidence / "claims.jsonl"
+    ledger.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    before = ledger.read_bytes()
+    gate = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "bin/excerpt_grounding.py"), str(evidence.parent)],
+        text=True,
+        capture_output=True,
+    )
+    assert gate.returncode == 1 and "REPORT-META:" in gate.stdout
+    report = tmp_path / "report.txt"
+    report.write_text(gate.stdout + gate.stderr)
+    result = repair_claims(
+        tmp_path,
+        root,
+        report,
+        project=project,
+        field_root=evidence.parent,
+        model=lambda _: '{"found": true, "excerpt": "Better quote."}',
+    )
+    assert result["repaired"] == 1 and result["fully_validated"]
+    accepted = json.loads((tmp_path / "evidence" / f"worker-{reading['id']}.json").read_text())
+    projected = sync_ledger_rows(rows, {reading["id"]: accepted}, plan)
+    assert projected[0]["quote_span"] != old_span and projected[0]["reading"] == rows[0]["reading"]
+    assert projected[1]["claim_id"] == rows[1]["claim_id"]
+    assert ledger.read_bytes() == before
+    replay = repair_claims(
+        tmp_path,
+        root,
+        report,
+        project=project,
+        field_root=evidence.parent,
+        model=lambda _: pytest.fail("replay called model"),
+    )
+    assert replay["repaired"] == 0 and replay["fully_validated"]

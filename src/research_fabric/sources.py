@@ -47,7 +47,9 @@ class SourceRepresentation:
 def source_attestation(rep: SourceRepresentation, source_root: pathlib.Path | None = None) -> dict:
     """Return the exact source input attestation consumed by a worker."""
     return {
-        "source_file": rep.path.relative_to(source_root).as_posix() if source_root is not None else rep.path.name,
+        "source_file": rep.path.resolve().relative_to(source_root.resolve()).as_posix()
+        if source_root is not None
+        else rep.path.name,
         "sha256": rep.original_sha256,
         **_representation_metadata(rep),
     }
@@ -474,7 +476,7 @@ def _reading_context(reading, data, representations, references):
     return list(dict.fromkeys(key for key in context if key not in reading["primary"]))
 
 
-def _reading_budget(reading, sections, representations, encoding, policy):
+def _reading_budget(reading, sections, representations, encoding):
     counts = {
         role: sum(
             len(encoding.encode(_span_text(representations, sections[key]), disallowed_special=()))
@@ -482,13 +484,7 @@ def _reading_budget(reading, sections, representations, encoding, policy):
         )
         for role in ("primary", "context")
     }
-    return {
-        "token_counts": counts,
-        "budget_excess": {
-            role: counts[role] > policy[limit]
-            for role, limit in (("primary", "soft_limit_tokens"), ("context", "context_budget_tokens"))
-        },
-    }
+    return {"token_counts": counts}
 
 
 def _reading_assets(reading, sections, bundles):
@@ -519,7 +515,9 @@ def _validate_sections(sections, representations, boundaries):
             raise ValueError("reviewed reading boundary splits a coherent source block")
         if section["disposition"] not in {"primary", "context", "excluded"}:
             raise ValueError("unknown reading section disposition")
-        if section["disposition"] != "primary" and not section.get("reason"):
+        if section["disposition"] != "primary" and not (
+            isinstance(section.get("reason"), str) and section["reason"].strip()
+        ):
             raise ValueError("non-primary reading section needs an explicit reason")
 
 
@@ -567,11 +565,17 @@ class ReadingPlan:
         self.data, self.representations, self.boundaries = data, representations, boundaries
 
     @classmethod
-    def load(cls, path, source_paths):
+    def load(cls, path, source_paths, profile=None):
         """Load frozen assignments against exact current document paths, including published snapshots."""
         import json
 
         data = json.loads(pathlib.Path(path).read_text())
+        if profile is not None and (
+            data["policy"] != _reading_policy(profile)
+            or data["works"] != profile["works"]
+            or {name: row["work_id"] for name, row in data["sources"].items()} != profile["sources"]
+        ):
+            raise ValueError("frozen reading plan project policy or work assignment drift")
         if set(source_paths) != set(data["sources"]):
             raise ValueError("frozen reading plan source set drift")
         representations, boundaries = {}, {}
@@ -592,13 +596,38 @@ class ReadingPlan:
         span = self.data["sections"][section_id]
         rep = self.representations[span["source_file"]]
         start, end = _span_range(rep, span)
+        from urllib.parse import quote
+
+        key = self.data["sources"][span["source_file"]]["bundle_key"]
         return {
             **span,
+            "target": f"assets/{key}/original/{quote(span['source_file'])}#L{span['lines'][0]}-L{span['lines'][1] - 1}",
             "original_bytes": [rep.original_byte_offset(start), rep.original_byte_offset(end)],
         }
 
+    def citation_policy(self):
+        """Compact original-section mapping for native OpenKB's supported per-KB policy."""
+        import json
+
+        records = []
+        for section_id in self.data["sections"]:
+            section = self.section(section_id)
+            heading = _span_text(self.representations, section).splitlines()[0]
+            records.append(json.dumps({"section": section_id, "heading": heading, **section}, ensure_ascii=False))
+        return (
+            "\n## Frozen research source citations\n"
+            f"Reading plan SHA256: {self.data['sha256']}\n"
+            "Cite original source sections using the targets below (paths relative to wiki root; "
+            "from summaries/concepts use ../assets/...). Prepared document line numbers are not original lines. "
+            "Retain mathematical qualifications, definitions, uncertainty and conflicting results. "
+            "Context is not independent primary evidence. Bibliographic unknowns remain unknown. "
+            "These mappings identify original ranges; they do not prove semantic support.\n" + "\n".join(records) + "\n"
+        )
+
     def validate_claim(self, claim):
         """Check assignment identity without requiring a rejected excerpt to ground before repair."""
+        if "source_ids" in claim and claim["source_ids"] != [self.data["sources"][claim["source_file"]]["source_id"]]:
+            raise ValueError("reading claim source IDs differ from frozen source identity")
         binding = claim["reading"]
         reading = self.reading(binding["reading_id"])
         spans = [self.data["sections"][key] for key in reading.get(binding["role"], [])]
@@ -620,6 +649,12 @@ class ReadingPlan:
         if len(matches) != 1:
             raise ValueError(f"unknown or ambiguous reading assignment: {reading_id}")
         return matches[0]
+
+    def source_names(self, reading_id):
+        reading = self.reading(reading_id)
+        return sorted(
+            {self.data["sections"][key]["source_file"] for role in ("primary", "context") for key in reading[role]}
+        )
 
     def input(self, reading_id):
         """Generated labels have no source range and can never ground an excerpt."""
@@ -657,6 +692,35 @@ class ReadingPlan:
             "lines": span["lines"],
         }
         return binding, reading_quote(self.representations[span["source_file"]], {**claim, "reading": binding})
+
+    def project_claim(self, claim):
+        self.validate_claim(claim)
+        return {
+            "reading": claim["reading"],
+            "quote_span": reading_quote(self.representations[claim["source_file"]], claim),
+            "independence_group": claim["reading"]["work_id"] if claim["reading"]["role"] == "primary" else None,
+        }
+
+    def validate_packet(self, packet, reading_id, acceptance):
+        """Use existing claim shape checks, then bind every quote to the frozen assignment."""
+        from .core import packet_defects
+
+        if packet.get("worker") != reading_id:
+            raise ValueError("reading packet worker differs from dispatched assignment")
+        defects = packet_defects(packet.get("parsed"))
+        if defects:
+            raise ValueError("; ".join(defects))
+        primary = 0
+        for claim in packet["parsed"]["claims"]:
+            binding, _ = self.claim(reading_id, claim)
+            if claim.get("reading") != binding:
+                raise ValueError("accepted reading assignment differs from frozen plan")
+            primary += binding["role"] == "primary"
+        if primary < acceptance.get("min_claims_per_reading", 1):
+            raise ValueError("reading packet has too few primary evidence claims")
+        limit = acceptance.get("max_claims_per_reading")
+        if limit is not None and len(packet["parsed"]["claims"]) > limit:
+            raise ValueError("reading packet exceeds maximum evidence claims")
 
     def validate(self):
         from .claims import stable_revision
@@ -721,7 +785,7 @@ def _reading_sources(source_root, profile, manifest_rows, bundle_directory):
     return sources, bundles, reps
 
 
-def prepare_reading_plan(source_root, project, manifest_rows, destination, bundle_directory):
+def prepare_reading_plan(source_root, project, manifest_rows, destination, bundle_directory, *, question=None):
     """Verify sources, then create or validate the frozen assignment before generation."""
     import json
 
@@ -737,11 +801,18 @@ def prepare_reading_plan(source_root, project, manifest_rows, destination, bundl
     for name, rep in reps.items():
         source_sections, references[name], boundaries[name] = _reading_structure(name, rep)
         sections.update(source_sections)
-    base = {"version": 1, "policy": policy, "tokenizer": tokenizer, "works": profile["works"], "sources": sources}
+    base = {
+        "version": 1,
+        "question": question,
+        "policy": policy,
+        "tokenizer": tokenizer,
+        "works": profile["works"],
+        "sources": sources,
+    }
     if destination.exists():
         data = json.loads(destination.read_text())
         if any(data.get(key) != value for key, value in base.items()):
-            raise ValueError("frozen reading plan source, bibliography, policy or tokenizer drift")
+            raise ValueError("frozen reading plan question, source, bibliography, policy or tokenizer drift")
     else:
         reviewed = profile.get("reviewed_plan")
         chosen = json.loads((source_root / reviewed).read_text()) if reviewed else {}
@@ -752,7 +823,7 @@ def prepare_reading_plan(source_root, project, manifest_rows, destination, bundl
         data = {**base, "sections": sections, "readings": readings}
         for reading in readings:
             reading.setdefault("context", _reading_context(reading, data, reps, references))
-            reading.update(_reading_budget(reading, sections, reps, encoding, policy))
+            reading.update(_reading_budget(reading, sections, reps, encoding))
             reading["assets"] = _reading_assets(reading, sections, bundles)
         data["sha256"] = stable_revision(data)
     plan = ReadingPlan(data, reps, boundaries)
@@ -760,3 +831,37 @@ def prepare_reading_plan(source_root, project, manifest_rows, destination, bundl
     if not destination.exists():
         atomic_write_json(destination, data)
     return plan, bundles
+
+
+def published_reading_plan(field_root, source_rows):
+    """Resolve logical source names through the published ledger, never physical basenames."""
+    from ._source_assets import safe_path
+
+    path = field_root / "evidence/reading-plan.json"
+    if not path.exists():
+        return None
+    paths = {row["source_file"]: safe_path(field_root, row["snapshot"]) for row in source_rows}
+    if len(paths) != len(source_rows):
+        raise ValueError("ambiguous published reading source identity")
+    return ReadingPlan.load(path, paths)
+
+
+def preserve_original_bytes(field_root):
+    """Original snapshots and native raw input copies are data, with readable Git diffs."""
+    from .claims import atomic_write_text
+
+    path = field_root / ".gitattributes"
+    original = path.read_bytes().decode("utf-8") if path.exists() else ""
+    current = original.replace("\r\n", "\n").replace("\r", "\n")
+    rules = (
+        "evidence/snapshots/** -text -whitespace",
+        "wiki/assets/**/original/** -text -whitespace",
+        "raw/** -text -whitespace",
+        "wiki/sources/** -text -whitespace",
+    )
+    block = "\n".join(rules) + "\n"
+    if not current.endswith(block):
+        separator = "" if not current or current.endswith("\n") else "\n"
+        current += separator + block
+    if current != original:
+        atomic_write_text(path, current)

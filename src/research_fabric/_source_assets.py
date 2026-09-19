@@ -282,7 +282,10 @@ def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
             raise ValueError("published bundle directory identity drift")
         doc_name = pathlib.Path(manifest["input_path"]).stem
         for relative, expected in publication_files(manifest, doc_name).items():
-            data = _read(safe_path(wiki, relative))
+            published = safe_path(wiki, relative)
+            if not published.is_file():
+                raise ValueError(f"published bundle incomplete; republish from verified staging: {relative}")
+            data = _read(published)
             if digest(data) != expected:
                 raise ValueError(f"published asset drift: {relative}")
             _write(docs, relative, data)
@@ -302,7 +305,7 @@ def publication_files(manifest: dict, doc_name: str) -> dict[str, str]:
     expected_name = manifest["key"] if source["adapter"] == "markdown" else pathlib.Path(source["source_file"]).stem
     if not doc_name == pathlib.Path(manifest["input_path"]).stem == expected_name:
         raise ValueError("native asset document identity mismatch")
-    files = {}
+    files = {f"assets/{manifest['key']}/original/{source['source_file']}": source["sha256"]}
     for row in manifest["assets"]:
         if "original_path" in row:
             files[f"assets/{manifest['key']}/{row['original_path']}"] = row["original_sha256"]
