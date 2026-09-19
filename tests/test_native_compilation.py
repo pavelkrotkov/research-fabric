@@ -300,6 +300,11 @@ cli.cli()
     )
     assert result["provenance"]["source_adapters"] == ["html@1"]
     assert result["claims"] == 5
+    accepted = json.loads((run / "evidence/worker-book-1.json").read_text())
+    ledger = [json.loads(line) for line in (kb / "evidence/claims.jsonl").read_text().splitlines()]
+    assert [row["claim_id"] for row in ledger] == accepted["claim_identity"]["claim_ids"]
+    assert all(row["packet_revision"] == accepted["packet_revision"] for row in ledger)
+    assert json.loads((kb / "evidence/claim-history.json").read_text()) == accepted["claim_history"]
     assert outputs[-1]["commit"] == result["commit"]
     assert (run / "verification/provenance.txt").exists()
     assert (run / "verification/excerpt-grounding.txt").exists()

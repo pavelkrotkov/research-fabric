@@ -15,6 +15,7 @@ import sys
 from cao_workflow import ShimError, emit_output, get_inputs, run_step
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+from research_fabric.claims import ClaimIdentityError, accept_packet, atomic_write_json
 from research_fabric.compilation import assert_run_branch, compile_with_recovery, normalize_generated_log
 from research_fabric.run_state import finalize_run, run_lifecycle
 from research_fabric.core import (
@@ -141,7 +142,7 @@ def _dir_sha(d: pathlib.Path) -> str | None:
     return h.hexdigest()
 
 
-def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator):
+def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance, validator, source_dir, adapters=ADAPTERS):
     reused_sids = []
     for sid, _ in specs:
         src_packet = reuse_dir / f"worker-{sid}.json"
@@ -155,7 +156,11 @@ def _reuse_evidence_packets(reuse_dir, destination_dir, specs, worker_provenance
         if defects:
             continue
         dst = destination_dir / src_packet.name
-        shutil.copy2(src_packet, dst) if src_packet.resolve() != dst.resolve() else None
+        try:
+            accepted = accept_packet(src_data, sid, source_dir=source_dir, adapters=adapters)
+        except ClaimIdentityError as exc:
+            raise RuntimeError(f"reused packet {sid} failed claim identity validation: {exc}") from exc
+        atomic_write_json(dst, accepted)
         reused_sids.append(sid)
     return reused_sids
 
@@ -302,6 +307,7 @@ with run_lifecycle(run_root):
         book_label = worker_sources[0].name
         attempts = []
         for attempt in range(1, 3):
+            attempt_id = f"{sid}:attempt-{attempt}"
             try:
                 if IS_MULTI:
                     canon_label = book_label
@@ -336,7 +342,13 @@ with run_lifecycle(run_root):
                 defects = _packet_defects(packet_data, sid)
                 attempts.append({"attempt": attempt, "stdout": proc.stdout.strip()[-200:], "defects": defects})
                 if not defects:
+                    accepted = accept_packet(packet_data, sid, source_dir=source_dir, attempt_id=attempt_id,
+                                             adapters=SOURCE_ADAPTERS)
+                    atomic_write_json(packet, accepted)
                     return sid, proc.stdout.strip(), None
+            except ClaimIdentityError as exc:
+                attempts.append({"attempt": attempt, "attempt_id": attempt_id, "error": str(exc)})
+                break
             except ShimError as exc:
                 attempts.append({"attempt": attempt, "error": str(exc)})
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
@@ -356,6 +368,8 @@ with run_lifecycle(run_root):
             worker_specs,
             WORKER_PROVENANCE,
             lambda parsed: VALIDATOR(parsed, ACCEPTANCE),
+            source_dir,
+            SOURCE_ADAPTERS,
         )
         pending_specs = [(sid, task) for sid, task in worker_specs if sid not in reused_sids]
         results = [(sid, "reused", None) for sid in reused_sids]
@@ -515,20 +529,30 @@ with run_lifecycle(run_root):
             if not (field_root / note).is_file():
                 set_state(run_root, "FAILED", failure="claim note target missing")
                 raise RuntimeError(f"claim note target does not exist: {note}")
-            claims.append(
-                {
-                    "claim_id": f"c-{sid}-{idx}",
+            claim_id = claim.get("claim_id")
+            if not isinstance(claim_id, str) or not claim_id:
+                dropped.append({"worker": sid, "index": idx, "source_file": claim.get("source_file", "")})
+                continue
+            ledger_claim = {
+                    "claim_id": claim_id,
+                    "worker": sid,
                     "claim": claim.get("claim", ""),
                     "note": note,
                     "source_ids": [source_id],
+                    "source_file": claim.get("source_file", ""),
                     "locator": claim.get("locator", ""),
                     "excerpt": claim.get("excerpt", ""),
                     "stance": claim.get("stance", "supports"),
                     "confidence": claim.get("confidence", 0.0),
                     "independence_group": claim.get("independence_group", sid),
                     "verified_at": "pilot-verifier-pass",
+                    "packet_revision": packet.get("packet_revision"),
+                    "packet_state_revision": packet.get("packet_state_revision"),
+                    "source_revision": claim.get("source_revision"),
                 }
-            )
+            if claim.get("accepted_attempt_id"):
+                ledger_claim["accepted_attempt_id"] = claim["accepted_attempt_id"]
+            claims.append(ledger_claim)
             if IS_MULTI:
                 claims[-1].update(
                     {
@@ -547,6 +571,13 @@ with run_lifecycle(run_root):
     (field_root / "evidence" / "claims.jsonl").write_text(
         "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n", encoding="utf-8"
     )
+    history = []
+    for sid, _, _ in results:
+        packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
+        history.extend(packet.get("claim_history") or [])
+    if history:
+        write_json(field_root / "evidence" / "claim-history.json", history)
+        write_json(run_root / "verification" / "claim-history.json", history)
     manifest_out = []
     present_names = {p.name for p in source_files}
     for row in manifest_rows:
