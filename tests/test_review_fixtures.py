@@ -65,7 +65,7 @@ def test_existing_compile_byte_check_rejects_changed_candidate(candidate):
 
 @pytest.mark.parametrize("variant", ["qualifier", "count", "relocation", "broken-page", "broken-asset"])
 def test_current_evidence_gates_do_not_audit_fixture_wiki_prose_or_links(candidate, variant):
-    _git(candidate, "apply", str(FIXTURE / "variants" / f"{variant}.patch"))
+    _git(candidate, "apply", "--unidiff-zero", str(FIXTURE / "variants" / f"{variant}.patch"))
     for gate in ("provenance_validate.py", "excerpt_grounding.py"):
         result = subprocess.run(
             [sys.executable, str(ROOT / "bin" / gate), str(candidate)],

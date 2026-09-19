@@ -4,7 +4,8 @@
 `after/` is a small candidate with a modified entity, new concept, two source
 summaries, immutable synthetic snapshots and the existing evidence-ledger format.
 The snapshots and all advisory responses are authored fixtures, not empirical
-model results. Apply one `variants/*.patch` to a fresh `after/` copy.
+model results. Apply one `variants/*.patch` to a fresh `after/` copy with
+`git apply --unidiff-zero`.
 
 | Variant | Deliberate difference | Human-review question |
 | --- | --- | --- |

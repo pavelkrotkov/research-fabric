@@ -1,8 +1,5 @@
 --- a/wiki/concepts/drift.md
 +++ b/wiki/concepts/drift.md
-@@ -2,3 +2,5 @@
- 
- The studies have different scopes; enrollment alone is not evidence about drift.
- See [[sensor]] for the source-specific results and limitations.
+@@ -4,0 +5,2 @@
 +
 +![Sensor plot](../assets/missing-plot.png)
