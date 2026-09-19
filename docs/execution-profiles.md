@@ -82,6 +82,12 @@ summary fallback retains its existing meaning. No in-candidate model retry is
 introduced. Correcting a credential without changing the profile can resume;
 old failed attempts remain recorded but do not poison the new invocation.
 
+The journal stores each call once; a guarded transaction completes its pending
+row exactly once, and completed identities/outcomes cannot be rewritten. Older
+pre-release journals using separate starts/outcomes tables are rejected without
+modification; preserve their diagnostics and start a new run rather than resetting
+their budget.
+
 A profile revision cannot be recorded while a request is outstanding. A killed
 process leaves an explicit started request without an outcome and blocks a switch.
 There is deliberately no automatic cancellation inference: verify cancellation
@@ -111,9 +117,12 @@ configuration revision and requested route. Each outcome records normalized
 reason, returned model when reported, elapsed duration and known/unknown usage.
 Prompts, image payloads, raw provider errors and credentials are excluded. A
 fingerprint identifies attempted inputs only; it never authorizes source reuse.
-Packets and published claims carry their original execution records; a mixed-model
-run has histories rather than a misleading top-level model constant. Legacy
-packets without execution records remain explicitly unknown.
+Packets retain their original execution records. Publication writes them once to
+`evidence/packet-execution.json`, keyed by worker with the immutable packet revision.
+Each claim already carries that worker and revision; it does not duplicate the
+entire packet history. Reused packet records remain self-contained even when
+attempt numbers overlap another run. Legacy packets without records remain
+explicitly unknown. The run journal separately accounts for calls made in this run.
 
 CAO planning/advisory calls do not expose effective model or usage through the
 existing workflow seam. Native knowledge-lint advisory calls also remain native.

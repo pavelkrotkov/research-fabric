@@ -37,11 +37,6 @@ if __package__ in (None, ""):
 
 from research_fabric._openkb045 import POLICY, CompilationError, native_compile
 from research_fabric.execution import configured, history
-from research_fabric.execution_native import (
-    _attempt_limit,
-    _compile_checkpoint,
-    _execution_arguments,
-)
 
 
 def _execution_identity(root):
@@ -53,8 +48,7 @@ def _execution_identity(root):
         "revision": revision,
         "config": config,
         "code": {
-            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ("execution.py", "execution_native.py", "_execution_profiles.py", "_execution_journal.py")
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ("execution.py",)
         },
     }
 
@@ -166,7 +160,8 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
     kb, diagnostics = Path(kb).resolve(), Path(diagnostics).resolve()
     sources = tuple(Path(p).resolve() for p in sources)
     command = tuple(command or (sys.executable, str(Path(__file__).resolve())))
-    attempts = _attempt_limit(execution_root, attempts)
+    if execution_root is not None:
+        attempts = min(attempts, configured(execution_root)[1]["budget"]["attempts"])
     identity, session, baseline = _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_root)
     for attempt in range(1, attempts + 1):
         if _identity(kb, sources, command, execution_root) != identity:
@@ -175,8 +170,10 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
         shutil.copytree(baseline, candidate)
         result_file = session / f"result-{attempt}.json"
         argv = [*command, "--kb", str(candidate), "--result", str(result_file), "--sources", *map(str, sources)]
-        argv.extend(_execution_arguments(execution_root, attempt))
-        checkpoint = _compile_checkpoint(execution_root)
+        checkpoint = 0
+        if execution_root is not None:
+            argv.extend(["--execution-root", str(Path(execution_root).resolve()), "--profile-index", str(attempt - 1)])
+            checkpoint = max((r["id"] for r in history(execution_root)["attempts"]), default=0)
         try:
             with (session / f"attempt-{attempt}.log").open("w") as log:
                 result = subprocess.run(

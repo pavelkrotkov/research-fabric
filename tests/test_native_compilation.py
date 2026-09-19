@@ -381,10 +381,12 @@ cli.cli()
         packet_execution = json.loads((run / "evidence/worker-book-1.json").read_text())["execution"]
         assert packet_execution[0]["actual_model"] == returned_model
         ledger = json.loads((kb / "evidence/claims.jsonl").read_text().splitlines()[0])
-        assert ledger["execution"] == packet_execution
+        published = json.loads((kb / "evidence/packet-execution.json").read_text())[ledger["worker"]]
+        assert published == {"packet_revision": ledger["packet_revision"], "execution": packet_execution}
     if policy == "compatible-reuse":
         ledger = json.loads((kb / "evidence/claims.jsonl").read_text().splitlines()[0])
-        assert ledger["execution"] == reused_packet["execution"]
+        published = json.loads((kb / "evidence/packet-execution.json").read_text())[ledger["worker"]]
+        assert published == {"packet_revision": ledger["packet_revision"], "execution": reused_packet["execution"]}
     assert result["provenance"]["advisory_execution"]["actual_model"] is None
     accepted = json.loads((run / "evidence/worker-book-1.json").read_text())
     ledger = [json.loads(line) for line in (kb / "evidence/claims.jsonl").read_text().splitlines()]
@@ -454,12 +456,7 @@ def test_native_fallback_uses_fresh_candidate_and_shared_accounting(kb, tmp_path
     assert not (failed / "wiki/concepts/one.md").exists()
     identity = json.loads(next((tmp_path / "diagnostics").glob("*/identity.json")).read_text())
     assert identity["execution"]["revision"] == 1
-    assert set(identity["execution"]["code"]) == {
-        "execution.py",
-        "execution_native.py",
-        "_execution_profiles.py",
-        "_execution_journal.py",
-    }
+    assert set(identity["execution"]["code"]) == {"execution.py"}
 
 
 def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, model, tmp_path):

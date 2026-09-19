@@ -88,7 +88,6 @@ def main():
         json.dumps(
             {
                 "worker": f"book-{BOOK}",
-                "attempts": SESSION.records(),
                 "execution": SESSION.records(),
                 "source_provenance": [source_attestation(representation)],
                 "parsed": parsed,

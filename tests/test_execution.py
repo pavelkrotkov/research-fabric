@@ -265,7 +265,7 @@ def test_source_attempt_identity_preserves_duplicate_basenames(tmp_path, source)
 
 
 def test_fixed_credentials_same_profile_dont_poison_new_candidate(tmp_path, source):
-    from research_fabric.compilation import _check_retry_allowed, _compile_checkpoint
+    from research_fabric.compilation import _check_retry_allowed
 
     config = ex.resolve(native_model="openai/B", environ={})
     ex.configure(tmp_path, config)
@@ -274,7 +274,7 @@ def test_fixed_credentials_same_profile_dont_poison_new_candidate(tmp_path, sour
     session.finish(first, None, "authentication", 0.01)
     with pytest.raises(RuntimeError, match="operator"):
         _check_retry_allowed(tmp_path, 0)
-    checkpoint = _compile_checkpoint(tmp_path)
+    checkpoint = first
     assert ex.configure(tmp_path, config) == 1
     second, _ = session.begin(session.profiles()[0])
     session.finish(second, None, "transient", 0.01)
@@ -478,3 +478,29 @@ def test_model_restriction_exact_membership_and_empty_semantics(allowed, accepte
         with pytest.raises(ex.ExecutionError, match="project_model_restriction"):
             ex.resolve(project, override, environ={})
     assert bool(ex.packet_policy_defects({"execution": [row]}, project)) is not accepted
+
+
+def test_completion_is_one_time_and_preserves_original_record(tmp_path, source):
+    ex.configure(tmp_path, configuration())
+    session = ex.Session(tmp_path, "extraction", "book-1", [source])
+    attempt, _ = session.begin(session.profiles()[0])
+    session.finish(attempt, None, "transient", 0.1)
+    recorded = ex.history(tmp_path)
+    with pytest.raises(ex.ExecutionError, match="already_completed"):
+        session.finish(attempt, None, "accepted", 0.2)
+    assert ex.history(tmp_path) == recorded
+
+
+def test_legacy_journal_is_rejected_without_reset_or_mutation(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "execution.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            "CREATE TABLE revisions(id INTEGER); CREATE TABLE starts(id INTEGER);"
+            "CREATE TABLE outcomes(id INTEGER); INSERT INTO starts VALUES(7);"
+        )
+    original = path.read_bytes()
+    with pytest.raises(ex.ExecutionError, match="unsupported_execution_journal"):
+        ex.configure(tmp_path, configuration())
+    assert path.read_bytes() == original

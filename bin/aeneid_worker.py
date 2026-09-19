@@ -232,7 +232,6 @@ def main():
     claims = collect_claims(canonical, witnesses)
     packet = {
         "worker": f"book-{BOOK}",
-        "attempts": SESSION.records(),
         "execution": SESSION.records(),
         "source_provenance": sorted(
             [source_attestation(canonical)] + [source_attestation(w["representation"]) for w in witnesses],

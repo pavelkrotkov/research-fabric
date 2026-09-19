@@ -549,7 +549,6 @@ with run_lifecycle(run_root):
                     "packet_revision": packet.get("packet_revision"),
                     "packet_state_revision": packet.get("packet_state_revision"),
                     "source_revision": claim.get("source_revision"),
-                    "execution": packet.get("execution"),
                 }
             if claim.get("accepted_attempt_id"):
                 ledger_claim["accepted_attempt_id"] = claim["accepted_attempt_id"]
@@ -572,10 +571,13 @@ with run_lifecycle(run_root):
     (field_root / "evidence" / "claims.jsonl").write_text(
         "\n".join(json.dumps(c, ensure_ascii=False) for c in claims) + "\n", encoding="utf-8"
     )
+    packet_execution = {}
     claim_history = []
     for sid, _, _ in results:
         packet = json.loads((packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
+        packet_execution[sid] = {"packet_revision": packet["packet_revision"], "execution": packet.get("execution")}
         claim_history.extend(packet.get("claim_history") or [])
+    write_json(field_root / "evidence" / "packet-execution.json", packet_execution)
     if claim_history:
         write_json(field_root / "evidence" / "claim-history.json", claim_history)
         write_json(run_root / "verification" / "claim-history.json", claim_history)
