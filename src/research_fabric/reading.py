@@ -10,8 +10,13 @@ import json
 import pathlib
 
 from ._reading_inputs import _assets, _bibliography, _budget, _context, _default_readings, _source_records
-from ._reading_plan import ReadingPlan, published_reading_plan
-from ._reading_span import exact_excerpt, reading_quote, reading_source_text, structure
+from ._reading_plan import ReadingPlan, published_reading_plan as published_reading_plan
+from ._reading_span import (
+    exact_excerpt as exact_excerpt,
+    reading_quote as reading_quote,
+    reading_source_text as reading_source_text,
+    structure,
+)
 from ._reading_validation import policy
 from .claims import atomic_write_json, stable_revision
 

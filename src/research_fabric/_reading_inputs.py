@@ -190,7 +190,7 @@ def _bundle_record(root, profile, row, rep, bundle_directory):
 
     The reading plan stores only the bundle key and verified logical source identity.
     """
-    name, work_id = row["source_file"], profile["sources"][row["source_file"]]
+    work_id = profile["sources"][row["source_file"]]
     if work_id not in profile["works"] or not row.get("source_id"):
         raise ValueError("reading source needs a known work and manifest source ID")
     bundle = prepare_source_bundle(rep.path, bundle_directory, source_attestation(rep, root), source_root=root)
@@ -225,7 +225,10 @@ def _budget(reading, sections, representations, encoding):
     The configured budgets are planning hypotheses; coherent evidence may exceed them.
     """
     return {
-        role: sum(len(encoding.encode(span_text(representations, sections[key]), disallowed_special=())) for key in reading[role])
+        role: sum(
+            len(encoding.encode(span_text(representations, sections[key]), disallowed_special=()))
+            for key in reading[role]
+        )
         for role in ("primary", "context")
     }
 

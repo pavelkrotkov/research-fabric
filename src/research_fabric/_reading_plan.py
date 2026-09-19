@@ -87,7 +87,9 @@ class ReadingPlan:
         expected = (policy(profile), profile["works"], profile["sources"]) if profile is not None else None
         if expected is not None and _profile_identity(data, profile) != expected:
             raise ValueError("frozen reading plan project policy or work assignment drift")
-        if set(source_paths) != set(data.get("sources", {})):
+        if not isinstance(data.get("sources"), dict):
+            raise ValueError("frozen reading plan sources missing or invalid")
+        if set(source_paths) != set(data["sources"]):
             raise ValueError("frozen reading plan source set drift")
         reps, boundaries = _load_sources(data, source_paths)
         plan = cls(data, reps, boundaries)

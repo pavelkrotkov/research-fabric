@@ -340,11 +340,11 @@ def preserve_original_bytes(field_root):
         atomic_write_text(path, current)
 
 
-from .reading import (
-    ReadingPlan,
-    exact_excerpt,
-    prepare_reading_plan,
-    published_reading_plan,
-    reading_quote,
-    reading_source_text,
+from .reading import (  # noqa: E402
+    ReadingPlan as ReadingPlan,
+    exact_excerpt as exact_excerpt,
+    prepare_reading_plan as prepare_reading_plan,
+    published_reading_plan as published_reading_plan,
+    reading_quote as reading_quote,
+    reading_source_text as reading_source_text,
 )
