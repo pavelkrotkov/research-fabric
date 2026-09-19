@@ -27,8 +27,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
-from bin.excerpt_grounding import grounded  # noqa: E402
-from research_fabric.sources import representation_for  # noqa: E402
+from bin.excerpt_grounding import grounded, source_text  # noqa: E402
 
 
 def _aligned_books(alignment_path: pathlib.Path) -> dict:
@@ -120,7 +119,7 @@ def check(claims, sources_by_id, snap_text_by_id, alignment):
 
 def _source_text(field_root: pathlib.Path, row: dict) -> str:
     snapshot = field_root / row["snapshot"]
-    return representation_for(snapshot).text if row.get("adapter") else snapshot.read_text(encoding="utf-8")
+    return source_text(snapshot)
 
 
 def main() -> int:
@@ -140,9 +139,7 @@ def main() -> int:
         print(json.dumps({"claims": len(claims), "multi_witness": 0, "valid": True}))
         return 0
     sources_by_id = {r["source_id"]: r for r in sources}
-    snap_text_by_id = {
-        r["source_id"]: _source_text(field_root, r) for r in sources if r.get("role") == "translation"
-    }
+    snap_text_by_id = {r["source_id"]: _source_text(field_root, r) for r in sources if r.get("role") == "translation"}
     if alignment_path is None:
         for cand in (
             field_root / "evidence" / "alignment.jsonl",

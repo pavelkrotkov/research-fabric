@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
+import re
 from dataclasses import dataclass
 
 from ._source_adapter import ADAPTERS, SourceAdapter
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 ASSET_HASH_FIELD = "assets_sha256"
+SOURCE_METADATA_FIELD = "source_metadata"
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,14 @@ class SourceRepresentation:
     representation_sha256: str
     assets: tuple[str, ...] = ()
     assets_sha256: str | None = None
+    source_metadata: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def grounding_text(self) -> str:
+        """Remove generated EPUB markers before entity folding, retaining visible literals."""
+        if self.adapter == "epub":
+            return re.sub(r"<!--@@(?:chapter |section |asset |formula)[^>]*-->", " ", self.text)
+        return self.text
 
 
 def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
@@ -65,6 +75,10 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
     decoded = adapter.decode(raw)
     text = adapter.extract_text(decoded)
     assets = adapter.assets(decoded)
+    metadata = adapter.metadata(path)
+    source_metadata = tuple(
+        sorted((key, value) for key, value in metadata.items() if key not in {"content_type", "filename"})
+    )
     return SourceRepresentation(
         path=path,
         adapter=adapter.name,
@@ -74,6 +88,7 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
         representation_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         assets=assets,
         assets_sha256=_assets_sha256(path, assets),
+        source_metadata=source_metadata,
     )
 
 
@@ -137,8 +152,8 @@ def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ..
     return found
 
 
-def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
-    metadata = {
+def _representation_metadata(rep: SourceRepresentation) -> dict[str, object]:
+    metadata: dict[str, object] = {
         "adapter": rep.adapter,
         "adapter_version": rep.adapter_version,
         "representation_encoding": "utf-8",
@@ -146,6 +161,8 @@ def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
     }
     if rep.assets_sha256:
         metadata[ASSET_HASH_FIELD] = rep.assets_sha256
+    if rep.source_metadata:
+        metadata[SOURCE_METADATA_FIELD] = dict(rep.source_metadata)
     return metadata
 
 
@@ -153,6 +170,8 @@ def _metadata_keys(row: dict, rep: SourceRepresentation) -> set[str]:
     keys = set(REPRESENTATION_FIELDS)
     if rep.assets_sha256 or ASSET_HASH_FIELD in row:
         keys.add(ASSET_HASH_FIELD)
+    if rep.source_metadata or SOURCE_METADATA_FIELD in row:
+        keys.add(SOURCE_METADATA_FIELD)
     return keys
 
 

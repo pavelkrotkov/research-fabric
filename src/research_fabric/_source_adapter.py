@@ -12,6 +12,8 @@ from urllib.parse import unquote, urlsplit
 from markdown_it import MarkdownIt
 from markdown_it.rules_inline import html_inline, image
 
+from ._epub_adapter import EPUBAdapter
+
 
 class SourceAdapter(Protocol):
     """Minimal contract every source format must implement."""
@@ -20,13 +22,13 @@ class SourceAdapter(Protocol):
     version: str
     suffixes: tuple[str, ...]
 
-    def decode(self, raw: bytes) -> str: ...
+    def decode(self, raw: bytes) -> str | bytes: ...
 
-    def extract_text(self, decoded: str) -> str: ...
+    def extract_text(self, decoded: str | bytes) -> str: ...
 
     def map_locator(self, locator: str) -> str: ...
 
-    def assets(self, decoded: str) -> tuple[str, ...]: ...
+    def assets(self, decoded: str | bytes) -> tuple[str, ...]: ...
 
     def metadata(self, path: pathlib.Path) -> dict[str, str]: ...
 
@@ -276,4 +278,4 @@ class MarkdownAdapter:
         return {"content_type": "text/markdown", "filename": path.name}
 
 
-ADAPTERS: tuple[SourceAdapter, ...] = (HTMLAdapter(), MarkdownAdapter())
+ADAPTERS: tuple[SourceAdapter, ...] = (HTMLAdapter(), MarkdownAdapter(), EPUBAdapter())

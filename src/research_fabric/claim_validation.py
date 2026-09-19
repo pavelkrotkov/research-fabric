@@ -40,7 +40,7 @@ def source_body(source_dir, claim, adapters=ADAPTERS):
     # Containment is checked before the adapter opens a packet-controlled path.
     source_file_revision(source_dir, claim.get("source_file", ""))
     try:
-        return representation_for(source_dir / claim["source_file"], adapters).text
+        return representation_for(source_dir / claim["source_file"], adapters).grounding_text
     except ValueError as exc:
         raise ClaimIdentityError(str(exc)) from exc
 
