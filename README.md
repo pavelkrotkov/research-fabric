@@ -60,7 +60,8 @@ reason at any point).
 ## Layout
 
 ```
-workflows/research.py      the full pipeline (CAO workflow script)
+src/research_fabric/engine.py importable research run and explicit configuration
+workflows/research.py      thin CAO launch/reporting adapter
 bin/direct_worker.py       evidence worker: HTML → text → configured API call → validated packet
 bin/repair_claims.py       claim-level repair: re-ground failed claims, then re-run all acceptance gates
 bin/excerpt_grounding.py   gate: every excerpt must be a verbatim substring of its snapshot
@@ -147,7 +148,7 @@ KB commit (message includes run-id)
          └─ engine Git SHA + tag
          └─ project name + project-spec SHA
          └─ corpus manifest SHA + corpus sources content-hash
-         └─ per-attempt model/provider/usage histories + openkb/CAO/python versions
+         └─ per-attempt model/provider/usage histories + openkb/python versions
 ```
 
 The KB commit message ends with `run <run-id>` (e.g. "…Books 1-24; run
@@ -166,14 +167,15 @@ portable requirements:
 - Install the engine and its declared runtime dependencies with `uv sync`.
   Claim persistence uses boltons for atomic replacement; no OAuth or model
   credentials are needed for these filesystem operations.
-- `openkb` (pinned 0.4.5) and `cao` (CAO 2.4.1 + lifecycle patches), plus a
-  local CAO server, for the orchestration layer.
+- `openkb` (pinned 0.4.5) for native compilation. CAO (2.4.1 + lifecycle
+  patches) and its local server are needed only for the CAO adapter.
+  See [direct engine invocation and resume](docs/research-engine.md).
   The compile adapter also pins LiteLLM 1.87.2 and checks native compiler bytes;
   see [compile qualification and recovery](docs/compilation-attempts.md).
 - An OpenRouter-capable API key for the worker model (set via the
   `OPENROUTER_API_KEY` environment variable; the worker falls back to
   reading it from the host's Hermes env file if unset).
-- 2-core host: collection is deliberately serialized (`max_workers=1`).
+- 2-core host: collection is deliberately serialized.
 
 ## Architecture decisions
 

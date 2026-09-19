@@ -146,9 +146,9 @@ VERDICT_CONTRACT = (
 class ResearchRun:
     """One explicit invocation, with existing source, execution and publication owners."""
 
-    def __init__(self, config, agent_step, *, agent_provider=None, adapters=ADAPTERS):
+    def __init__(self, config, agent_step, *, agent_provider=None):
         self.config, self.agent_step = config, agent_step
-        self.agent_provider, self.adapters = agent_provider, adapters
+        self.agent_provider = agent_provider
         self.packet_dir = config.run_root / "evidence"
         self.snap_dest = config.field_root / "evidence/snapshots"
         self.compiler_dir = config.run_root / "compiler-sources"
@@ -209,7 +209,7 @@ class ResearchRun:
         return packet_defects(parsed, acceptance)
 
     def _sources(self):
-        self.source_files = discover_sources(self.config.source_dir, self.adapters)
+        self.source_files = discover_sources(self.config.source_dir, ADAPTERS)
         if not self.source_files:
             raise RuntimeError("no supported source snapshots found in source_dir")
         matched = [(p, self._book_of(p)) for p in self.source_files]
@@ -230,9 +230,7 @@ class ResearchRun:
             (f"book-{b}", book_task_from_project(b, self.project, self.config.project_path.stem)) for b in self.books
         ]
         self.worker_sources = {sid: self._worker_source_files(int(sid.split("-")[1])) for sid, _ in self.worker_specs}
-        self.worker_provenance = {
-            sid: source_provenance(paths, self.adapters) for sid, paths in self.worker_sources.items()
-        }
+        self.worker_provenance = {sid: source_provenance(paths, ADAPTERS) for sid, paths in self.worker_sources.items()}
 
     def _book_of(self, p):
         m = self.book_re.search(p.name)
@@ -307,55 +305,66 @@ class ResearchRun:
             )
             write_json(self.config.run_root / "plan.json", {"raw": plan, "parsed": extract_json(plan)})
 
-    def _collect_one(self, spec):
-        """Collect one book's evidence packet through the shared source adapter."""
-        sid, task = spec
+    def _worker_command(self, sid, task):
         b = int(sid.split("-")[1])
         theme_match = re.search("Extract claim-level evidence about (.+?)\\\\. Use", task)
         theme = theme_match.group(1) if theme_match else None
-        worker_sources = self.worker_sources[sid]
-        book_label = worker_sources[0].name
+        book_label = self.worker_sources[sid][0].name
+
+        worker = "aeneid_worker.py" if self.is_multi else "direct_worker.py"
+        cmd = [
+            self.config.worker_python,
+            str(self.config.engine_root / "bin" / worker),
+            str(self.config.run_root),
+            str(self.config.source_dir),
+            str(b),
+            book_label,
+            theme or "",
+        ]
+        for w in self.witnesses:
+            wfile = self.project["book_label_template"].format(n=b, w=w)
+            wid = self.project["source_id_template"].format(n=b, w=w)
+            cmd += ["--witness", f"{w}:{wid}:{wfile}"]
+        return cmd
+
+    def _collect_one(self, spec):
+        """Run a worker and persist either accepted evidence or failure diagnostics."""
+        sid, task = spec
         try:
-            worker = "aeneid_worker.py" if self.is_multi else "direct_worker.py"
-            cmd = [
-                self.config.worker_python,
-                str(self.config.engine_root / "bin" / worker),
-                str(self.config.run_root),
-                str(self.config.source_dir),
-                str(b),
-                book_label,
-                theme or "",
-            ]
-            for w in self.witnesses:
-                wfile = self.project["book_label_template"].format(n=b, w=w)
-                wid = self.project["source_id_template"].format(n=b, w=w)
-                cmd += ["--witness", f"{w}:{wid}:{wfile}"]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400 if self.is_multi else 1500)
+            proc = subprocess.run(
+                self._worker_command(sid, task),
+                capture_output=True,
+                text=True,
+                timeout=2400 if self.is_multi else 1500,
+            )
             packet = self.packet_dir / f"worker-{sid}.json"
             if proc.returncode != 0 or not packet.exists():
                 raise RuntimeError(
                     f"worker failed (rc={proc.returncode}): {proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
                 )
-            packet_data = json.loads(packet.read_text(encoding="utf-8"))
-            defects = self._packet_defects(packet_data, sid)
-            result = {"stdout": proc.stdout.strip()[-200:], "defects": defects}
-            if not defects:
-                accepted = accept_packet(
-                    packet_data,
-                    sid,
-                    source_dir=self.config.source_dir,
-                    attempt_id=f"{sid}:worker",
-                    adapters=self.adapters,
-                )
-                atomic_write_json(packet, accepted)
-                return (sid, proc.stdout.strip(), None)
+            self._accept_worker_packet(packet, sid)
+            return (sid, proc.stdout.strip(), None)
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
             result = {"error": str(exc)[:400]}
         except Exception as exc:
             result = {"error": f"unexpected: {exc}"}
         write_json(self.packet_dir / f"worker-{sid}.json", {"worker": sid, "attempts": [result], "parsed": None})
-        reason = result.get("error") or "; ".join(result.get("defects", [])) or "unknown"
+        reason = result["error"]
         return (sid, "", f"direct worker returned no valid evidence packet ({reason})")
+
+    def _accept_worker_packet(self, packet, sid):
+        packet_data = json.loads(packet.read_text(encoding="utf-8"))
+        defects = self._packet_defects(packet_data, sid)
+        if defects:
+            raise RuntimeError("; ".join(defects))
+        accepted = accept_packet(
+            packet_data,
+            sid,
+            source_dir=self.config.source_dir,
+            attempt_id=f"{sid}:worker",
+            adapters=ADAPTERS,
+        )
+        atomic_write_json(packet, accepted)
 
     def _collect(self):
         if self.config.reuse_evidence_dir:
@@ -366,7 +375,7 @@ class ResearchRun:
                 self.worker_provenance,
                 lambda parsed: self._validator(parsed, self.acceptance),
                 self.config.source_dir,
-                self.adapters,
+                ADAPTERS,
                 lambda packet: packet_policy_defects(packet, self.project),
             )
             pending_specs = [(sid, task) for sid, task in self.worker_specs if sid not in reused_sids]
@@ -377,12 +386,6 @@ class ResearchRun:
         self.results.extend(map(self._collect_one, pending_specs))
         if any((err for _, _, err in self.results)):
             raise RuntimeError("one or more evidence workers failed")
-        if self.config.reuse_evidence_dir:
-            for sid, _ in self.worker_specs:
-                packet = json.loads((self.packet_dir / f"worker-{sid}.json").read_text(encoding="utf-8"))
-                defects = self._packet_defects(packet, sid)
-                if defects:
-                    raise RuntimeError(f"reused packet {sid} failed validation: {'; '.join(defects)}")
 
     def run_verifier(self, step_id, prompt, artifact):
         """Run a verifier step, retrying once when the reply is not a usable verdict."""
@@ -441,7 +444,7 @@ class ResearchRun:
         self.manifest_rows = [
             json.loads(line) for line in self.manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
-        self.manifest_rows = bind_manifest(self.source_files, self.manifest_rows, self.adapters)
+        self.manifest_rows = bind_manifest(self.source_files, self.manifest_rows, ADAPTERS)
         run_manifest.write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in self.manifest_rows) + "\n", encoding="utf-8"
         )
