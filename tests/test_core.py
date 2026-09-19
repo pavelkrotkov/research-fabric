@@ -14,6 +14,7 @@ from research_fabric.core import (
     multisource_packet_defects,
     normalize_packet,
     packet_defects,
+    read_verdict,
     source_mappings,
 )
 
@@ -241,3 +242,18 @@ def test_aeneid_witness_cited_as_authoritative_rejected():
     cs[0]["source_file"] = "aeneid-book-1-kline.html"
     p = {"claims": cs, "conflicts": [], "coverage_notes": []}
     assert any("translation witness" in d for d in multisource_packet_defects(p, proj, VALID_ACCEPTANCE))
+
+
+@pytest.mark.parametrize(
+    "reply,expected",
+    [
+        ("VERDICT: PASS\nVERDICT: FAIL - missing quotation", "FAIL"),
+        ("verified clean\nVERDICT: FAIL", None),
+        ("verified sound", "PASS"),
+        ("verified clean but a blocking defect remains", None),
+        ("verified clean but failure", None),
+        ("inconclusive", None),
+    ],
+)
+def test_advisory_wire_verdict_preserves_explicit_precedence_and_fallback(reply, expected):
+    assert read_verdict(reply)[0] == expected

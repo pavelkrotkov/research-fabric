@@ -274,12 +274,11 @@ def test_live_oauth_smoke(tmp_path):
     assert record["assets"][0]["inspected"]
 
 
-def test_workflow_preparation_uses_record_without_changing_sources(tmp_path, replay):
-    """Exercise actual workflow planning statements; replay only process and supervisor boundaries."""
-    import ast
+def test_workflow_preparation_uses_record_without_changing_sources(tmp_path, replay, monkeypatch):
+    """Call production planning; replace only the child and advisory boundaries."""
     import pathlib
-    import sys
-    from types import SimpleNamespace
+
+    from research_fabric.engine import ResearchRun, RunConfig
 
     outputs, _ = replay
     outputs.extend([[call()], [message()]])
@@ -287,22 +286,6 @@ def test_workflow_preparation_uses_record_without_changing_sources(tmp_path, rep
     spec_path = tmp_path / "visual.json"
     spec_path.write_text(json.dumps(original))
     root = pathlib.Path(__file__).resolve().parents[1]
-    module = ast.parse((root / "workflows/research.py").read_text())
-    lifecycle = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.With)
-        and isinstance(node.items[0].context_expr, ast.Call)
-        and isinstance(node.items[0].context_expr.func, ast.Name)
-        and node.items[0].context_expr.func.id == "run_lifecycle"
-    )
-    nodes = lifecycle.body
-    start = next(
-        i
-        for i, n in enumerate(nodes)
-        if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "visual_preparation" for t in n.targets)
-    )
     captured = []
 
     def child(command, **kwargs):
@@ -311,26 +294,21 @@ def test_workflow_preparation_uses_record_without_changing_sources(tmp_path, rep
 
     def supervisor(**kwargs):
         captured.append(kwargs["prompt"])
-        return SimpleNamespace(output="{}")
+        return "{}"
 
-    namespace = {
-        "inputs": {"visual_preflight_spec": str(spec_path)},
-        "pathlib": pathlib,
-        "sys": sys,
-        "subprocess": SimpleNamespace(run=child),
-        "RESEARCH_ROOT": root,
-        "run_root": tmp_path / "run",
-        "source_dir": tmp_path,
-        "json": json,
-        "reuse_evidence_dir": None,
-        "question": "Research",
-        "source_files": [tmp_path / "chapter.md"],
-        "run_step": supervisor,
-        "output_text": lambda h: h.output,
-        "extract_json": json.loads,
-        "write_json": lambda *args: None,
-    }
-    exec(compile(ast.Module(body=nodes[start : start + 3], type_ignores=[]), "workflow-planning", "exec"), namespace)
+    config = RunConfig(
+        root,
+        root / "projects/odyssey.yaml",
+        tmp_path / "kb",
+        tmp_path / "run",
+        tmp_path,
+        "Research",
+        visual_preflight_spec=spec_path,
+    )
+    run = ResearchRun(config, supervisor)
+    run.source_files = [tmp_path / "chapter.md"]
+    monkeypatch.setattr("research_fabric.engine.subprocess.run", child)
+    run.plan()
     assert "DERIVED VISUAL NOTES" in captured[0] and "NOT verbatim source evidence" in captured[0]
     assert "chapter.md#equation" in captured[0]
     assert (tmp_path / "chapter.md").read_text() == "Original Markdown without a transcription."
