@@ -212,6 +212,8 @@ research-fabric is right for fixed, authoritative corpora (primary texts,
 specs, legal documents) where a single hallucinated quote is poison and the
 corpus must be re-verifiable years later without the original session.
 
+Markdown visual assets use [validated source bundles](docs/source-assets.md): byte-exact
+originals, bounded PDF/EPS raster derivatives, and manifest-driven browser export.
 Optional source-image inspection is available through the
 [native OAuth visual preflight](docs/visual-preflight.md). It records derived,
 unreviewed notes and incomplete coverage; text-only runs do not require OAuth.

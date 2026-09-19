@@ -33,10 +33,17 @@ from research_fabric.core import (
 from research_fabric.sources import (
     ADAPTERS,
     bind_manifest,
+    copy_source_snapshot,
+    prepare_source_bundle,
+    representation_for,
+    snapshot_relative,
+    source_attestation,
     discover_sources,
     packet_source_defects,
     source_provenance,
 )
+
+from research_fabric._source_assets import publish_bundle
 
 # Project specs live in projects/<name>.yaml and describe how a corpus is read
 # into claims + notes (snapshot regex, themes, source-id/note templates,
@@ -496,24 +503,29 @@ with run_lifecycle(run_root):
     snap_dest = field_root / "evidence" / "snapshots"
     snap_dest.mkdir(parents=True, exist_ok=True)
     compiler_dir = run_root / "compiler-sources"
-    if compiler_dir.exists():
-        shutil.rmtree(compiler_dir)
-    compiler_dir.mkdir()
+    compiler_dir.mkdir(exist_ok=True)
+    bundles = {}
+    compiler_inputs = []
     for src in source_files:
-        dest = snap_dest / src.name
-        if dest.exists():
-            dest.chmod(0o644)
-        shutil.copy2(src, dest)
-        dest.chmod(0o444)
-        shutil.copy2(src, compiler_dir / src.name)
+        copy_source_snapshot(src, snap_dest)
+        attestation = source_attestation(representation_for(src))
+        bundle = prepare_source_bundle(src, compiler_dir, attestation)
+        bundles[src.name] = bundle
+        compiler_inputs.append(compiler_dir / bundle["key"] / bundle["input_path"])
     compile_report = compile_with_recovery(
-        field_root, [compiler_dir / src.name for src in source_files], run_root / "verification" / "compile", execution_root=run_root
+        field_root, compiler_inputs, run_root / "verification" / "compile", execution_root=run_root
     )
+    for bundle in bundles.values():
+        if bundle["source"]["adapter"] == "markdown":
+            publish_bundle(compiler_dir / bundle["key"], bundle, field_root / "wiki", pathlib.Path(bundle["input_path"]).stem)
     subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)
     normalize_generated_log(field_root)
 
     set_state(run_root, "MATERIALIZING_LEDGER")
     NOTE_BY_SOURCE, SOURCE_BY_FILE = source_mappings(project, BOOKS)
+    for filename, bundle in bundles.items():
+        if bundle["source"]["adapter"] == "markdown":
+            NOTE_BY_SOURCE[SOURCE_BY_FILE[filename]] = f"wiki/summaries/{pathlib.Path(bundle['input_path']).stem}.md"
     claims = []
     dropped = []
     for sid, _, _ in results:
@@ -587,7 +599,7 @@ with run_lifecycle(run_root):
         if pathlib.Path(row["snapshot"]).name not in present_names:
             continue
         row = dict(row)
-        row["snapshot"] = "evidence/snapshots/" + pathlib.Path(row["snapshot"]).name
+        row["snapshot"] = "evidence/snapshots/" + snapshot_relative(source_dir / pathlib.Path(row["snapshot"]).name).as_posix()
         manifest_out.append(json.dumps(row, ensure_ascii=False))
     (field_root / "evidence" / "sources.jsonl").write_text("\n".join(manifest_out) + "\n", encoding="utf-8")
 

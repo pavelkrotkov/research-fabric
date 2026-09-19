@@ -167,22 +167,24 @@ def test_production_native_retry_starts_from_baseline(kb, model, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "ignored,collect_new,policy,attestation",
+    "ignored,collect_new,policy,attestation,source_format",
     [
-        (None, False, None, "valid"),
-        ("wiki/concepts/", False, None, "valid"),
-        ("evidence/snapshots/", False, None, "valid"),
-        (None, True, None, "valid"),
-        (None, False, "restricted-reuse", "valid"),
-        (None, True, "restricted-fresh", "valid"),
-        (None, False, "compatible-reuse", "valid"),
-        (None, False, "legacy-restricted", "valid"),
-        (None, False, None, "missing"),
-        (None, False, None, "stale"),
+        (None, False, None, "valid", "html"),
+        ("wiki/concepts/", False, None, "valid", "html"),
+        ("evidence/snapshots/", False, None, "valid", "html"),
+        (None, True, None, "valid", "html"),
+        (None, False, "restricted-reuse", "valid", "html"),
+        (None, True, "restricted-fresh", "valid", "html"),
+        (None, False, "compatible-reuse", "valid", "html"),
+        (None, False, "legacy-restricted", "valid", "html"),
+        (None, False, None, "missing", "html"),
+        (None, False, None, "stale", "html"),
+        (None, False, None, "valid", "markdown"),
+        (None, True, None, "valid", "markdown"),
     ],
 )
 def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
-    kb, tmp_path, monkeypatch, ignored, collect_new, policy, attestation
+    kb, tmp_path, monkeypatch, ignored, collect_new, policy, attestation, source_format
 ):
     """CAO transport and provider are synthetic; workflow, compiler and gates are real."""
     import hashlib
@@ -209,9 +211,20 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         subprocess.run(["git", "-C", str(kb), *args], check=True, capture_output=True)
     sources = tmp_path / "sources"
     sources.mkdir()
-    src = sources / "odyssey-book-1.html"
+    suffix = "md" if source_format == "markdown" else "html"
+    src = sources / f"odyssey-book-1.{suffix}"
     excerpt = "The glaucous-eyed goddess Athena spoke to Telemachus."
     src.write_text(f"<html><body><p>{excerpt}</p></body></html>")
+    if source_format == "markdown":
+        from PIL import Image
+
+        excerpt = "The sample temperature is $T = 21$ degrees."
+        src.write_text(
+            "---\ntitle: Measurement\n---\n\n# Measurement\n\n"
+            + excerpt
+            + "\n\n| T | 21 |\n| --- | --- |\n\n```text\nrecorded = 21\n```\n\n![Plot](plot.png)\n"
+        )
+        Image.new("RGB", (16, 16), "red").save(sources / "plot.png")
     run = tmp_path / "workflow-run"
     run.mkdir()
     manifest = {
@@ -223,6 +236,10 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         "retrieved_at": "2026-01-01",
         "content_type": "text/html",
     }
+    if source_format == "markdown":
+        from research_fabric.sources import representation_for
+
+        manifest.update(content_type="text/markdown", assets_sha256=representation_for(src).assets_sha256)
     (run / "source-manifest.jsonl").write_text(json.dumps(manifest) + "\n")
     reused = tmp_path / "reuse"
     reused.mkdir()
@@ -257,16 +274,19 @@ def test_real_workflow_reaches_ready_with_native_compile_and_real_gates(
         attempt, _ = session.begin(session.profiles()[0])
         session.finish(attempt, SimpleNamespace(model="forbidden-B"), "accepted", 0.01)
         reused_packet["execution"] = session.records()
-    if policy:
+    if policy or source_format == "markdown":
         projects = tmp_path / "projects"
         projects.mkdir()
-        restriction = "" if policy == "compatible-reuse" else "allowed_models: [allowed-C]\n"
+        restriction = "" if not policy or policy == "compatible-reuse" else "allowed_models: [allowed-C]\n"
         (projects / "odyssey.yaml").write_text(
             (root / "projects/odyssey.yaml").read_text()
             + "\n"
             + restriction
             + "execution:\n  roles:\n    extraction: {model: allowed-C}\n    repair: {model: allowed-C}\n"
         )
+        if source_format == "markdown":
+            project_path = projects / "odyssey.yaml"
+            project_path.write_text(project_path.read_text().replace(r"\.html$", r"\.md$").replace(".html", ".md"))
         monkeypatch.setenv("RESEARCH_FABRIC_PROJECTS", str(projects))
     (reused / "worker-book-1.json").write_text(json.dumps(reused_packet))
     collected = collect_new or policy in ("restricted-reuse", "legacy-restricted")
@@ -367,7 +387,7 @@ cli.cli()
         result["provenance"]["corpus_manifest_sha"]
         == hashlib.sha256((run / "source-manifest.jsonl").read_bytes()).hexdigest()
     )
-    assert result["provenance"]["source_adapters"] == ["html@1"]
+    assert result["provenance"]["source_adapters"] == (["markdown@2"] if source_format == "markdown" else ["html@1"])
     assert result["claims"] == 5
     execution = result["provenance"]["execution"]
     assert execution["attempts"]
@@ -394,6 +414,23 @@ cli.cli()
     assert all(row["packet_revision"] == accepted["packet_revision"] for row in ledger)
     assert json.loads((kb / "evidence/claim-history.json").read_text()) == accepted["claim_history"]
     assert outputs[-1]["commit"] == result["commit"]
+    assert subprocess.check_output(["git", "-C", str(kb), "rev-parse", "HEAD"]).decode().strip() == result["commit"]
+    assert subprocess.check_output(["git", "-C", str(kb), "status", "--porcelain"]) == b""
+    source_row = json.loads((kb / "evidence/sources.jsonl").read_text().splitlines()[0])
+    snapshot = kb / source_row["snapshot"]
+    assert snapshot.read_bytes() == src.read_bytes()
+    if source_format == "markdown":
+        assert (snapshot.parent / "plot.png").read_bytes() == (sources / "plot.png").read_bytes()
+        from research_fabric._source_assets import export_assets
+
+        assert len(export_assets(kb / "wiki", tmp_path / "docs")) == 2
+        import shutil
+
+        shutil.copytree(sources, run / "sources")
+        rehearsal = runpy.run_path(str(root / "bin/dryrun_publication.py"))
+        rehearsal["main"].__globals__.update(FABRIC=root, PROJECTS_DIR=projects)
+        monkeypatch.setattr(sys, "argv", ["dryrun_publication.py", str(run), str(kb), "--branch", "agent/workflow"])
+        assert rehearsal["main"]() == 0
     assert (run / "verification/provenance.txt").exists()
     assert (run / "verification/excerpt-grounding.txt").exists()
     assert subprocess.check_output(["git", "-C", str(kb), "status", "--porcelain"]) == b""

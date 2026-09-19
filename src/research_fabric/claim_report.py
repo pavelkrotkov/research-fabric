@@ -15,10 +15,11 @@ a claim from its current list position.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 from dataclasses import dataclass
 
-from .claims import require, source_revision, stable_revision
+from .claims import require, source_file_revision, source_revision, stable_revision
 
 META_PREFIX = "REPORT-META:"
 REVISION_FIELDS = ("packet_revision", "packet_state_revision")
@@ -56,7 +57,24 @@ def grounding_report_metadata(claims, sources, failures):
         for cid, reason in failures
     ]
     metadata = {"version": 1, "source_revision": source_revision(sources), "packets": packets, "failures": rows}
+    names = [row.get("source_file") or pathlib.PurePosixPath(row.get("snapshot", "")).name for row in sources]
+    if names and all(names):
+        require(len(names) == len(set(names)), "grounding report source filenames are ambiguous")
+        metadata["source_files"] = names
     return dict(metadata, report_id=stable_revision(metadata))
+
+
+def _report_source_revision(metadata, source_dir):
+    # Older reports without document names retain their strict whole-directory check.
+    if "source_files" not in metadata:
+        return source_revision(source_dir)
+    names = metadata["source_files"]
+    require(
+        isinstance(names, list) and names and all(isinstance(name, str) and name for name in names),
+        "grounding report source filenames are invalid",
+    )
+    require(len(names) == len(set(names)), "grounding report source filenames are ambiguous")
+    return source_revision([{"sha256": source_file_revision(source_dir, name)} for name in names])
 
 
 @dataclass(frozen=True)
@@ -128,7 +146,8 @@ class Report:
         require(isinstance(metadata, dict), "grounding report metadata is not an object")
         require(metadata.get("version") == 1, "unsupported grounding report version")
         require(
-            metadata.get("source_revision") == source_revision(source_dir), "grounding report source revision is stale"
+            metadata.get("source_revision") == _report_source_revision(metadata, source_dir),
+            "grounding report source revision is stale",
         )
         report_id = metadata.pop("report_id", None)
         require(report_id == stable_revision(metadata), "grounding report identity is invalid")

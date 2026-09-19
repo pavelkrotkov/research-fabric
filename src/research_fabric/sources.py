@@ -8,11 +8,8 @@ from dataclasses import dataclass
 
 from ._source_adapter import ADAPTERS, SourceAdapter
 
-# A source is trusted only when both the original bytes and worker representation match.
-# Legacy rows have none of these fields; resumed rows must have all of them and match.
-
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
-SOURCE_PROVENANCE_FIELDS = frozenset({"source_file", "sha256", *REPRESENTATION_FIELDS})
+ASSET_HASH_FIELD = "assets_sha256"
 
 
 @dataclass(frozen=True)
@@ -23,6 +20,8 @@ class SourceRepresentation:
     text: str
     original_sha256: str
     representation_sha256: str
+    assets: tuple[str, ...] = ()
+    assets_sha256: str | None = None
 
 
 def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
@@ -30,10 +29,7 @@ def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
     return {
         "source_file": rep.path.name,
         "sha256": rep.original_sha256,
-        "adapter": rep.adapter,
-        "adapter_version": rep.adapter_version,
-        "representation_encoding": "utf-8",
-        "representation_sha256": rep.representation_sha256,
+        **_representation_metadata(rep),
     }
 
 
@@ -45,10 +41,30 @@ def adapter_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTE
     return matches[0]
 
 
+def _asset_path(source: pathlib.Path, relative: str) -> pathlib.Path:
+    from ._source_assets import safe_path
+
+    return safe_path(source.parent, relative)
+
+
+def _assets_sha256(source: pathlib.Path, assets: tuple[str, ...]) -> str | None:
+    if not assets:
+        return None
+    digest = hashlib.sha256()
+    for asset in assets:
+        path = _asset_path(source, asset)
+        if not path.is_file():
+            raise FileNotFoundError(f"missing source asset for {source.name}: {asset}")
+        digest.update(asset.encode("utf-8") + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] = ADAPTERS) -> SourceRepresentation:
     raw = path.read_bytes()
     adapter = adapter_for(path, adapters)
-    text = adapter.extract_text(adapter.decode(raw))
+    decoded = adapter.decode(raw)
+    text = adapter.extract_text(decoded)
+    assets = adapter.assets(decoded)
     return SourceRepresentation(
         path=path,
         adapter=adapter.name,
@@ -56,7 +72,16 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
         text=text,
         original_sha256=hashlib.sha256(raw).hexdigest(),
         representation_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        assets=assets,
+        assets_sha256=_assets_sha256(path, assets),
     )
+
+
+def source_bundle(path: pathlib.Path) -> tuple[tuple[pathlib.Path, pathlib.Path], ...]:
+    """Return source + local referenced assets as (input, relative-output) pairs."""
+    rep = representation_for(path)
+    assets = tuple((_asset_path(path, asset), pathlib.Path(asset)) for asset in rep.assets)
+    return ((path, pathlib.Path(path.name)), *assets)
 
 
 def source_provenance(
@@ -80,7 +105,7 @@ def source_provenance_errors(actual, expected: list[dict[str, str]]) -> list[str
     if len(actual_rows) != len(expected_rows):
         return ["packet source provenance input count mismatch"]
     for actual_row, expected_row in zip(actual_rows, expected_rows):
-        if set(actual_row) != SOURCE_PROVENANCE_FIELDS or actual_row != expected_row:
+        if actual_row != expected_row:
             return [f"packet source provenance mismatch for {expected_row['source_file']}"]
     return []
 
@@ -113,27 +138,45 @@ def discover_sources(source_dir: pathlib.Path, adapters: tuple[SourceAdapter, ..
 
 
 def _representation_metadata(rep: SourceRepresentation) -> dict[str, str]:
-    return {
+    metadata = {
         "adapter": rep.adapter,
         "adapter_version": rep.adapter_version,
         "representation_encoding": "utf-8",
         "representation_sha256": rep.representation_sha256,
     }
+    if rep.assets_sha256:
+        metadata[ASSET_HASH_FIELD] = rep.assets_sha256
+    return metadata
+
+
+def _metadata_keys(row: dict, rep: SourceRepresentation) -> set[str]:
+    keys = set(REPRESENTATION_FIELDS)
+    if rep.assets_sha256 or ASSET_HASH_FIELD in row:
+        keys.add(ASSET_HASH_FIELD)
+    return keys
 
 
 def _bind_representation(row: dict, rep: SourceRepresentation, source: pathlib.Path) -> dict:
-    # Existing representation metadata is an attestation, not a cache: never rewrite drift.
     expected = _representation_metadata(rep)
     present = REPRESENTATION_FIELDS & row.keys()
+    if row.get(ASSET_HASH_FIELD) != rep.assets_sha256:
+        raise RuntimeError(f"source assets_sha256 missing or mismatched for {source.name}")
     if not present:
         return {**row, **expected}
     if present != REPRESENTATION_FIELDS:
         missing = sorted(REPRESENTATION_FIELDS - present)
         raise RuntimeError(f"source representation metadata incomplete for {source.name}: {missing}")
-    drift = sorted(key for key in REPRESENTATION_FIELDS if row.get(key) != expected[key])
+    drift = sorted(key for key in _metadata_keys(row, rep) if row.get(key) != expected.get(key))
     if drift:
         raise RuntimeError(f"source representation drift for {source.name}: {drift}")
     return dict(row)
+
+
+def _manifest_representation(source: pathlib.Path, adapters: tuple[SourceAdapter, ...]) -> SourceRepresentation:
+    try:
+        return representation_for(source, adapters)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"source representation invalid for {source.name}: {exc}") from exc
 
 
 def bind_manifest(
@@ -153,8 +196,44 @@ def bind_manifest(
         row = by_name.get(source.name)
         if row is None:
             raise RuntimeError(f"source manifest has no entry for {source.name}")
-        rep = representation_for(source, adapters)
+        rep = _manifest_representation(source, adapters)
         if rep.original_sha256 != row.get("sha256"):
             raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
         bound.append(_bind_representation(row, rep, source))
     return bound
+
+
+def prepare_source_bundle(source: pathlib.Path, destination: pathlib.Path, attestation: dict) -> dict:
+    """Extend the existing source attestation with a frozen visual asset closure."""
+    from ._source_assets import prepare_bundle
+
+    if source_attestation(representation_for(source)) != attestation:
+        raise ValueError(f"source bundle attestation drift: {source.name}")
+    return prepare_bundle(source, destination, attestation)
+
+
+def snapshot_relative(source: pathlib.Path) -> pathlib.Path:
+    from ._source_assets import bundle_key
+
+    attestation = source_attestation(representation_for(source))
+    return pathlib.Path(bundle_key(attestation)) / source.name
+
+
+def copy_source_snapshot(source: pathlib.Path, snapshots: pathlib.Path) -> pathlib.Path:
+    """The original document and local assets share one collision-free namespace."""
+    import shutil
+
+    from ._source_assets import safe_path
+
+    relative = snapshot_relative(source)
+    for original, asset_relative in source_bundle(source):
+        destination = safe_path(snapshots, (relative.parent / asset_relative).as_posix())
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if destination.read_bytes() != original.read_bytes():
+                raise ValueError(f"source snapshot drift: {destination}")
+            destination.chmod(0o444)
+            continue
+        shutil.copy2(original, destination)
+        destination.chmod(0o444)
+    return snapshots / relative

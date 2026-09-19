@@ -1020,3 +1020,88 @@ def test_post_replace_failure_resumes_from_durable_packet(tmp_path, monkeypatch)
     audit = json.loads(path.read_text())["claim_history"]
     assert [event["event"] for event in audit] == ["accepted"] * 3 + ["drop", "repair"]
     assert list(path.parent.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("drift", [None, "asset", "context"])
+def test_markdown_asset_gate_report_repairs_and_replays_exact_documents(tmp_path, drift):
+    from research_fabric.sources import copy_source_snapshot, representation_for, source_attestation, source_provenance
+
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    source = source_dir / "source.md"
+    source.write_text("good A good B good C\n\n![Figure](figure.html)\n")
+    # An asset may have a registered document suffix; extension filtering is not a source ledger.
+    asset = source_dir / "figure.html"
+    asset.write_bytes(b"immutable local asset")
+    context = source_dir / "context.md"
+    context.write_bytes(source.read_bytes())  # Preserve duplicate document digest multiplicity.
+    packet = _packet()
+    for claim in packet["parsed"]["claims"]:
+        claim["source_file"] = source.name
+    packet["source_provenance"] = source_provenance([source])
+    packet = accept_packet(packet, "book-1", source_dir=source_dir)
+    run = tmp_path / "run"
+    packet_path = run / "evidence/worker-book-1.json"
+    atomic_write_json(packet_path, packet)
+    field = tmp_path / "field"
+    rows = []
+    for path in (source, context):
+        snapshot = copy_source_snapshot(path, field / "evidence/snapshots")
+        rows.append(
+            dict(
+                source_attestation(representation_for(path)),
+                source_id=path.stem,
+                snapshot=snapshot.relative_to(field).as_posix(),
+            )
+        )
+    (field / "evidence/sources.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    claims = [
+        dict(
+            claim,
+            worker="book-1",
+            source_ids=["source"],
+            packet_revision=packet["packet_revision"],
+            packet_state_revision=packet["packet_state_revision"],
+        )
+        for claim in packet["parsed"]["claims"]
+    ]
+    (field / "evidence/claims.jsonl").write_text("\n".join(map(json.dumps, claims)) + "\n")
+    gate = subprocess.run(
+        [sys.executable, str(ROOT / "bin/excerpt_grounding.py"), str(field)], capture_output=True, text=True
+    )
+    assert gate.returncode == 1 and "REPORT-META:" in gate.stdout
+    report = tmp_path / "report.txt"
+    report.write_text(gate.stdout + gate.stderr)
+    before = packet_path.read_bytes()
+    if drift:
+        (asset if drift == "asset" else context).write_text("changed")
+        with pytest.raises(ClaimIdentityError, match="source"):
+            repair_claims.repair_claims(run, source_dir, report, model=lambda _: pytest.fail("drift reached model"))
+        assert packet_path.read_bytes() == before
+        return
+    result = repair_claims.repair_claims(
+        run,
+        source_dir,
+        report,
+        model=lambda prompt: json.dumps({"found": True, "excerpt": "good A" if "c-book-1-1" in prompt else "good B"}),
+    )
+    assert result["repaired"] == 2
+    before = packet_path.read_bytes()
+    replay = repair_claims.repair_claims(run, source_dir, report, model=lambda _: pytest.fail("replay reached model"))
+    assert replay["repaired"] == 0 and packet_path.read_bytes() == before
+
+
+def test_report_source_names_reject_ambiguous_and_escaping_documents(tmp_path):
+    from research_fabric.claim_report import Report, grounding_report_metadata
+
+    with pytest.raises(ClaimIdentityError, match="ambiguous"):
+        grounding_report_metadata(
+            [], [{"snapshot": "one/a.md", "sha256": "a"}, {"snapshot": "two/a.md", "sha256": "b"}], []
+        )
+    source_dir = _source(tmp_path)
+    metadata = grounding_report_metadata([], [{"snapshot": "source.html", "sha256": "unknown"}], [])
+    metadata["source_files"] = ["../escape.html"]
+    report = tmp_path / "report.txt"
+    report.write_text("REPORT-META: " + json.dumps(metadata))
+    with pytest.raises(ClaimIdentityError, match="escapes"):
+        Report.read(report, {}, source_dir)

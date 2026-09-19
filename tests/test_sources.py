@@ -18,6 +18,7 @@ from research_fabric.sources import (
     discover_sources,
     packet_source_defects,
     representation_for,
+    source_bundle,
     source_provenance,
     source_provenance_errors,
 )
@@ -29,6 +30,194 @@ PROVENANCE = ROOT / "bin" / "provenance_validate.py"
 def _html(path: pathlib.Path, body="<p>Hello <b>world</b></p>") -> pathlib.Path:
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def _md(path: pathlib.Path, body="# Hello\n\nworld\n") -> pathlib.Path:
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _manifest_row(source: pathlib.Path) -> dict:
+    rep = representation_for(source)
+    row = {
+        "snapshot": source.name,
+        "sha256": rep.original_sha256,
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+    }
+    if rep.assets_sha256:
+        row["assets_sha256"] = rep.assets_sha256
+    return row
+
+
+@pytest.mark.parametrize("suffix", [".html", ".md"])
+def test_invalid_utf8_fails_closed(tmp_path, suffix):
+    source = tmp_path / f"bad{suffix}"
+    source.write_bytes(b"ok\xff")
+    with pytest.raises(UnicodeDecodeError):
+        representation_for(source)
+
+
+def test_missing_manifest_entry_fails(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    with pytest.raises(RuntimeError, match="no entry"):
+        bind_manifest([source], [])
+
+
+def test_discovery_rejects_ambiguous_same_stem(tmp_path):
+    _html(tmp_path / "book-1.html")
+    _md(tmp_path / "book-1.md")
+    with pytest.raises(RuntimeError, match="ambiguous duplicate"):
+        discover_sources(tmp_path)
+
+
+def test_html_path_locator_and_representation_mapping(tmp_path):
+    source = _html(tmp_path / "book-1.html")
+    adapter = adapter_for(source)
+    rep = representation_for(source)
+    assert adapter.metadata(source) == {"content_type": "text/html", "filename": "book-1.html"}
+    assert adapter.map_locator("  Book 1 [1]-[4]  ") == "Book 1 [1]-[4]"
+    assert rep.text == "Hello world"
+    assert rep.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert rep.representation_sha256 == hashlib.sha256(b"Hello world").hexdigest()
+
+
+def test_markdown_preserves_structure_math_and_assets(tmp_path):
+    paths = [
+        tmp_path / "chart.png",
+        tmp_path / "assets" / "chart(1).png",
+        tmp_path / "assets" / "ref.png",
+        tmp_path / "assets" / "shortcut.png",
+        tmp_path / "assets" / "nested.png",
+    ]
+    (tmp_path / "assets").mkdir()
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    raw = (
+        "---\r\ntitle: Sample\r\n---\r\n# Heading\r\n\r\n"
+        "Paragraph with **bold**, *emphasis*, [link](https://example.com), and $x^2$.\r\n\r\n"
+        "| a | b |\r\n| - | - |\r\n| 1 | 2 |\r\n\r\n$$\r\nE = mc^2\r\n$$\r\n\r\n"
+        "````md\r\n```\r\n![not-an-asset](missing.png)\r\n```\r\n````\r\n\r\n"
+        "`![inline-example](missing-inline.png)`\r\n\r\n"
+        "    ![indented-example](missing-indented.png)\r\n\r\n"
+        "<!-- ![commented](missing-comment.png) -->\r\n\r\n"
+        "- item\r\n\r\n    ![Nested](assets/nested.png)\r\n\r\n"
+        "![A \\] chart](chart.png)\r\n![Paren](assets/chart(1).png)\r\n![Ref][plot]\r\n![Shortcut]\r\n\r\n"
+        "[plot]: assets/ref.png\r\n[shortcut]: assets/shortcut.png\r\n"
+        "![Remote](https://example.com/chart.png)\r\n"
+    )
+    source = tmp_path / "book-1.md"
+    source.write_bytes(raw.encode())
+    adapter = adapter_for(source)
+    rep = representation_for(source)
+    expected_assets = (
+        "assets/nested.png",
+        "chart.png",
+        "assets/chart(1).png",
+        "assets/ref.png",
+        "assets/shortcut.png",
+    )
+    expected_paths = [paths[4], *paths[:4]]
+    expected_bundle = ((source, pathlib.Path("book-1.md")), *zip(expected_paths, map(pathlib.Path, expected_assets)))
+    assert adapter.metadata(source) == {"content_type": "text/markdown", "filename": "book-1.md"}
+    assert adapter.map_locator("  Heading > table row 1  ") == "Heading > table row 1"
+    assert rep.text == raw.replace("\r\n", "\n")
+    assert rep.assets == expected_assets
+    assert source_bundle(source) == expected_bundle
+
+
+def test_markdown_missing_or_unsafe_assets_fail_closed(tmp_path):
+    missing = _md(tmp_path / "missing.md", "![Chart](assets/missing.png)\n")
+    with pytest.raises(FileNotFoundError, match="missing source asset"):
+        representation_for(missing)
+    missing_row = {"snapshot": missing.name, "sha256": hashlib.sha256(missing.read_bytes()).hexdigest()}
+    with pytest.raises(RuntimeError, match="source representation invalid"):
+        bind_manifest([missing], [missing_row])
+    unsafe = _md(tmp_path / "unsafe.md", "![Chart](../chart.png)\n")
+    with pytest.raises(ValueError, match="unsafe source asset path"):
+        representation_for(unsafe)
+
+
+def test_markdown_asset_change_invalidates_provenance(tmp_path):
+    asset = tmp_path / "chart.png"
+    asset.write_bytes(b"one")
+    source = _md(tmp_path / "book-1.md", "![Chart](chart.png)\n")
+    row = _manifest_row(source)
+    assert bind_manifest([source], [row]) == [row]
+    asset.write_bytes(b"two")
+    with pytest.raises(RuntimeError, match="assets_sha256"):
+        bind_manifest([source], [row])
+
+
+@pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])
+def test_bind_manifest_rejects_existing_representation_drift(tmp_path, field, value):
+    source = _html(tmp_path / "book-1.html")
+    row = _manifest_row(source)
+    row[field] = value
+    with pytest.raises(RuntimeError, match="representation drift"):
+        bind_manifest([source], [row])
+
+
+def test_markdown_formula_change_invalidates_representation(tmp_path):
+    source = _md(tmp_path / "book-1.md", "# Equation\n\n$x = 1$\n")
+    row = _manifest_row(source)
+    source.write_text("# Equation\n\n$x = 2$\n", encoding="utf-8")
+    row["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    with pytest.raises(RuntimeError, match="representation drift"):
+        bind_manifest([source], [row])
+
+
+def _ledger(tmp_path: pathlib.Path, **overrides) -> pathlib.Path:
+    root = tmp_path / "kb"
+    snapshots = root / "evidence" / "snapshots"
+    snapshots.mkdir(parents=True)
+    source = _html(snapshots / "book-1.html")
+    rep = representation_for(source)
+    source_row = {
+        "source_id": "s-1",
+        "url": "u",
+        "title": "t",
+        "retrieved_at": "2026-01-01",
+        "content_type": "text/html",
+        "sha256": rep.original_sha256,
+        "snapshot": "evidence/snapshots/book-1.html",
+        "adapter": rep.adapter,
+        "adapter_version": rep.adapter_version,
+        "representation_encoding": "utf-8",
+        "representation_sha256": rep.representation_sha256,
+        **overrides,
+    }
+    claim = {
+        "claim_id": "c-1",
+        "claim": "claim",
+        "note": "wiki/x.md",
+        "source_ids": ["s-1"],
+        "locator": "Book 1",
+        "excerpt": "Hello world",
+        "stance": "supports",
+        "confidence": 0.9,
+        "independence_group": "g",
+        "verified_at": "test",
+    }
+    (root / "evidence" / "sources.jsonl").write_text(json.dumps(source_row) + "\n", encoding="utf-8")
+    (root / "evidence" / "claims.jsonl").write_text(json.dumps(claim) + "\n", encoding="utf-8")
+    return root
+
+
+def test_converter_version_drift_fails_closed(tmp_path):
+    root = _ledger(tmp_path, adapter_version="old")
+    result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "adapter_version mismatch" in result.stderr
+
+
+def test_representation_digest_tamper_fails_closed(tmp_path):
+    root = _ledger(tmp_path, representation_sha256="0" * 64)
+    result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "representation_sha256 mismatch" in result.stderr
 
 
 class _TextAdapter:
@@ -50,37 +239,6 @@ class _TextAdapter:
 
     def metadata(self, path: pathlib.Path) -> dict[str, str]:
         return {"content_type": "text/plain", "filename": path.name}
-
-
-def test_invalid_utf8_fails_closed(tmp_path):
-    source = tmp_path / "bad.html"
-    source.write_bytes(b"<p>ok</p>\xff")
-    with pytest.raises(UnicodeDecodeError):
-        representation_for(source)
-
-
-def test_missing_manifest_entry_fails(tmp_path):
-    source = _html(tmp_path / "book-1.html")
-    with pytest.raises(RuntimeError, match="no entry"):
-        bind_manifest([source], [])
-
-
-def test_discovery_rejects_ambiguous_same_stem(tmp_path):
-    _html(tmp_path / "book-1.html")
-    _html(tmp_path / "book-1.htm")
-    with pytest.raises(RuntimeError, match="ambiguous duplicate"):
-        discover_sources(tmp_path)
-
-
-def test_html_path_locator_and_representation_mapping(tmp_path):
-    source = _html(tmp_path / "book-1.html")
-    adapter = adapter_for(source)
-    rep = representation_for(source)
-    assert adapter.metadata(source) == {"content_type": "text/html", "filename": "book-1.html"}
-    assert adapter.map_locator("  Book 1 [1]-[4]  ") == "Book 1 [1]-[4]"
-    assert rep.text == "Hello world"
-    assert rep.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
-    assert rep.representation_sha256 == hashlib.sha256(b"Hello world").hexdigest()
 
 
 def test_custom_adapter_flows_from_discovery_to_manifest(tmp_path):
@@ -164,69 +322,72 @@ def test_workflow_reuse_boundary_recollects_unattested_or_stale_packets(tmp_path
     assert not (destination_dir / "worker-book-2.json").exists()
 
 
-@pytest.mark.parametrize("field,value", [("adapter_version", "old"), ("representation_sha256", "0" * 64)])
-def test_bind_manifest_rejects_existing_representation_drift(tmp_path, field, value):
-    source = _html(tmp_path / "book-1.html")
+def test_first_bind_requires_preexisting_asset_digest(tmp_path):
+    asset = tmp_path / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(tmp_path / "book.md", "![Chart](chart.png)")
     rep = representation_for(source)
-    row = {
-        "snapshot": source.name,
-        "sha256": rep.original_sha256,
-        "adapter": rep.adapter,
-        "adapter_version": rep.adapter_version,
-        "representation_encoding": "utf-8",
-        "representation_sha256": rep.representation_sha256,
-    }
-    row[field] = value
-    with pytest.raises(RuntimeError, match="representation drift"):
+    row = {"snapshot": source.name, "sha256": rep.original_sha256}
+    with pytest.raises(RuntimeError, match="assets_sha256"):
+        bind_manifest([source], [row])
+    row["assets_sha256"] = rep.assets_sha256
+    assert bind_manifest([source], [row])[0]["assets_sha256"] == rep.assets_sha256
+    asset.write_bytes(b"changed before first bind")
+    with pytest.raises(RuntimeError, match="assets_sha256"):
         bind_manifest([source], [row])
 
 
-def _ledger(tmp_path: pathlib.Path, **overrides) -> pathlib.Path:
-    root = tmp_path / "kb"
+def test_markdown_packet_attests_assets(tmp_path):
+    asset = tmp_path / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(tmp_path / "book.md", "![Chart](chart.png)")
+    packet = {"parsed": {}, "source_provenance": source_provenance([source])}
+    assert packet_source_defects(packet, source_provenance([source]), lambda _: []) == []
+    asset.write_bytes(b"changed")
+    assert packet_source_defects(packet, source_provenance([source]), lambda _: [])
+
+
+@pytest.mark.parametrize("mutation", ["unchanged", "changed", "deleted"])
+def test_published_markdown_requires_metadata(tmp_path, mutation):
+    root = _ledger(tmp_path)
     snapshots = root / "evidence" / "snapshots"
-    snapshots.mkdir(parents=True)
-    source = _html(snapshots / "book-1.html")
-    rep = representation_for(source)
-    source_row = {
-        "source_id": "s-1",
-        "url": "u",
-        "title": "t",
-        "retrieved_at": "2026-01-01",
-        "content_type": "text/html",
-        "sha256": rep.original_sha256,
-        "snapshot": "evidence/snapshots/book-1.html",
-        "adapter": rep.adapter,
-        "adapter_version": rep.adapter_version,
-        "representation_encoding": "utf-8",
-        "representation_sha256": rep.representation_sha256,
-        **overrides,
-    }
-    claim = {
-        "claim_id": "c-1",
-        "claim": "claim",
-        "note": "wiki/x.md",
-        "source_ids": ["s-1"],
-        "locator": "Book 1",
-        "excerpt": "Hello world",
-        "stance": "supports",
-        "confidence": 0.9,
-        "independence_group": "g",
-        "verified_at": "test",
-    }
-    (root / "evidence" / "sources.jsonl").write_text(json.dumps(source_row) + "\n", encoding="utf-8")
-    (root / "evidence" / "claims.jsonl").write_text(json.dumps(claim) + "\n", encoding="utf-8")
-    return root
-
-
-def test_converter_version_drift_fails_closed(tmp_path):
-    root = _ledger(tmp_path, adapter_version="old")
+    asset = snapshots / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(snapshots / "book.md", "Hello world\n\n![Chart](chart.png)")
+    ledger = root / "evidence" / "sources.jsonl"
+    row = json.loads(ledger.read_text())
+    row.update(_manifest_row(source), snapshot="evidence/snapshots/book.md", content_type="text/markdown")
+    ledger.write_text(json.dumps(row))
+    assert subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True).returncode == 0
+    for key in ("adapter", "adapter_version", "representation_encoding", "representation_sha256", "assets_sha256"):
+        row.pop(key)
+    if mutation == "changed":
+        asset.write_bytes(b"tampered")
+    elif mutation == "deleted":
+        asset.unlink()
+    ledger.write_text(json.dumps(row))
     result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
     assert result.returncode == 1
-    assert "adapter_version mismatch" in result.stderr
+    assert "representation metadata missing" in result.stderr
 
 
-def test_representation_digest_tamper_fails_closed(tmp_path):
-    root = _ledger(tmp_path, representation_sha256="0" * 64)
+@pytest.mark.parametrize("mutation", ["changed", "deleted", "unpinned"])
+def test_published_markdown_asset_gate(tmp_path, mutation):
+    root = _ledger(tmp_path)
+    snapshots = root / "evidence" / "snapshots"
+    asset = snapshots / "chart.png"
+    asset.write_bytes(b"original")
+    source = _md(snapshots / "book.md", "Hello world\n\n![Chart](chart.png)")
+    ledger = root / "evidence" / "sources.jsonl"
+    row = json.loads(ledger.read_text())
+    row.update(_manifest_row(source), snapshot="evidence/snapshots/book.md", content_type="text/markdown")
+    if mutation == "changed":
+        asset.write_bytes(b"tampered")
+    elif mutation == "deleted":
+        asset.unlink()
+    else:
+        row.pop("assets_sha256")
+    ledger.write_text(json.dumps(row))
     result = subprocess.run([sys.executable, str(PROVENANCE), str(root)], capture_output=True, text=True)
     assert result.returncode == 1
-    assert "representation_sha256 mismatch" in result.stderr
+    assert "assets_sha256" in result.stderr or "missing source asset" in result.stderr
