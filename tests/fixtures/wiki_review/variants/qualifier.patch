@@ -1,0 +1,10 @@
+--- a/wiki/entities/sensor.md
++++ b/wiki/entities/sensor.md
+@@ -1,6 +1,6 @@
+ # Sensor
+ 
+-Study A observed reduced drift only in dry indoor conditions among 24 participants.
++Study A observed reduced drift among 24 participants.
+ Study B enrolled 80 participants and did not evaluate drift.
+ 
+ Sources: [[study-a]], [[study-b]]. See [[drift]].
