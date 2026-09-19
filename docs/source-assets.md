@@ -39,9 +39,9 @@ memory sandbox; run untrusted corpora in the deployment's process sandbox.
 Rendering bytes can depend on the toolchain. Resume verifies the frozen bundle,
 source/derivative bytes and renderer version/configuration, and fails if anything
 changed or disappeared. It does not silently regenerate a missing derivative.
-`available` and `rendered` describe bytes only; `inspected` and `reviewed` remain
-false. Issue #14 consumes derivative path/hash plus source locator for inspection;
-this module makes no claim about equation transcription or interpretation.
+Asset paths/hashes identify available originals and derivatives; renderer records
+identify rendered derivatives. Inspection and review records belong to issue #14,
+which consumes derivative path/hash plus source locator. This module makes no claim about equation transcription or interpretation.
 
 OpenKB 0.4.5's native Markdown image copier uses a regex even inside code/comments.
 The derived input replaces only parsed image references and visual HTML tags with
@@ -59,13 +59,16 @@ OpenKB individually so bundled PDFs are not accidentally ingested as documents.
 No native compiler or converter is replaced.
 
 After native conversion, `publish_bundle` verifies native image hashes and copies
-original assets beside a publication receipt containing the same bundle manifest.
-The existing wiki exporter consumes that manifest's output mapping, rechecks
+original assets beside a byte-identical copy of `bundle.json`. There is no separate
+publication receipt or independently recorded native document name: the prepared
+input stem determines it, and publication verifies the native name against that
+stem. The existing wiki exporter consumes the same manifest's output mapping, rechecks
 hashes and copies only its referenced originals and native raster outputs. It
 adjusts native vault-root image paths to browser page-relative paths; it does not
 implement a second Markdown/HTML asset resolver. Existing source snapshots are
 scoped identically in production and offline rehearsal. Rehearsal still does not
-compile; it uses an already compiled field and the recorded native note identity.
+compile; it uses an already compiled field and the native note identity derived
+from the published bundle.
 The eventual shared publication extraction belongs to issue #18.
 
 Validation: `uv run pytest` exercises parsers, paths, collisions, renderer failures,

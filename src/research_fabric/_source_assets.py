@@ -127,18 +127,12 @@ def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> 
         **reference,
         "original_path": original_path,
         "original_sha256": digest(data),
-        "available": True,
-        "rendered": False,
-        "inspected": False,
-        "reviewed": False,
     }
     try:
         data, suffix, renderer = _derivative(original.suffix.lower(), data, reference["target"])
         output = "prepared/assets/" + digest(data) + suffix
         _write(root, output, data)
-        record.update(
-            derivative_path=output, derivative_sha256=digest(data), renderer=renderer, rendered=renderer is not None
-        )
+        record.update(derivative_path=output, derivative_sha256=digest(data), renderer=renderer)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if reference["required"]:
             raise ValueError(f"required visual unreadable: {relative}: {exc}") from exc
@@ -150,12 +144,12 @@ def _record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> dict:
     if reference["syntax"] == "srcset":
         if reference["required"]:
             raise ValueError("unsupported required visual syntax: srcset")
-        return {**reference, "available": False, "limitation": "unsupported-srcset"}
+        return {**reference, "limitation": "unsupported-srcset"}
     parsed = urlsplit(reference["target"])
     if parsed.scheme or parsed.netloc:
         if reference["required"]:
             raise ValueError(f"required remote visual unavailable offline: {reference['target']}")
-        return {**reference, "available": False, "limitation": "remote-not-fetched"}
+        return {**reference, "limitation": "remote-not-fetched"}
     return _local_record(source, reference, root)
 
 
@@ -188,7 +182,7 @@ def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation:
         manifest = json.loads(previous.read_text(encoding="utf-8"))
         verify_bundle(root, manifest)
         return manifest
-    normalized = source.suffix.lower() in (".md", ".markdown")
+    normalized = attestation["adapter"] == "markdown"
     references, text = _visual_source(raw.decode("utf-8")) if normalized else ([], "")
     records = [_record(source, reference, root) for reference in references]
     _write(root, "original/" + source.name, raw)
@@ -197,7 +191,6 @@ def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation:
     _write(root, "prepared/" + input_name, prepared)
     manifest = {
         "version": 1,
-        "normalized": normalized,
         "key": key,
         "source": attestation,
         "input_path": "prepared/" + input_name,
@@ -226,8 +219,6 @@ def _verify_source(root: pathlib.Path, manifest: dict) -> None:
     if source_attestation(representation_for(source)) != manifest["source"]:
         raise ValueError("bundle original source attestation drift")
     normalized = manifest["source"]["adapter"] == "markdown"
-    if manifest["normalized"] != normalized:
-        raise ValueError("bundle normalization policy drift")
     expected = _verify_mapping(source, manifest) if normalized else source.read_bytes()
     if digest(expected) != manifest["input_sha256"]:
         raise ValueError("bundle prepared mapping drift")
@@ -264,6 +255,9 @@ def verify_bundle(root: pathlib.Path, manifest: dict) -> None:
 
 def publish_bundle(root: pathlib.Path, manifest: dict, wiki: pathlib.Path, doc_name: str) -> None:
     """Record native image outputs and preserve their originals for the exporter."""
+    manifest_bytes = _read(root / "bundle.json")
+    if json.loads(manifest_bytes) != manifest:
+        raise ValueError("bundle manifest drift before publication")
     verify_bundle(root, manifest)
     original_prefix = f"assets/{manifest['key']}/"
     for relative, expected in publication_files(manifest, doc_name).items():
@@ -273,27 +267,22 @@ def publish_bundle(root: pathlib.Path, manifest: dict, wiki: pathlib.Path, doc_n
             continue
         if digest(_read(safe_path(wiki, relative))) != expected:
             raise ValueError(f"native asset drift: {relative}")
-    receipt = {"bundle": manifest, "native_doc_name": doc_name}
-    _write(
-        wiki,
-        f"assets/{manifest['key']}/publication.json",
-        (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode(),
-    )
+    _write(wiki, f"assets/{manifest['key']}/bundle.json", manifest_bytes)
 
 
 def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
     """Exporter consumes validated paths, never rediscovers source references."""
     files = {}
-    for path in (wiki / "assets").glob("*/publication.json"):
-        receipt_bytes = _read(safe_path(wiki, path.relative_to(wiki).as_posix()))
-        receipt = json.loads(receipt_bytes)
-        for relative, expected in publication_files(receipt["bundle"], receipt["native_doc_name"]).items():
+    for path in (wiki / "assets").glob("*/bundle.json"):
+        manifest_bytes = _read(safe_path(wiki, path.relative_to(wiki).as_posix()))
+        manifest = json.loads(manifest_bytes)
+        for relative, expected in publication_files(manifest, path.parent.name).items():
             data = _read(safe_path(wiki, relative))
             if digest(data) != expected:
                 raise ValueError(f"published asset drift: {relative}")
             _write(docs, relative, data)
             files[relative] = expected
-        _write(docs, path.relative_to(wiki).as_posix(), receipt_bytes)
+        _write(docs, path.relative_to(wiki).as_posix(), manifest_bytes)
     return files
 
 

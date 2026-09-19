@@ -233,13 +233,14 @@ def _commit(field_root, project_name: str, claim_count: int) -> str:
 
 
 def _published_notes(field_root, source_files, note_by_source, source_by_file):
-    """Consume the native note identity recorded with a validated source bundle."""
+    """Derive native note identity from the published source bundle."""
     for source in source_files:
         key = snapshot_relative(source).parent.name
-        receipt = field_root / "wiki" / "assets" / key / "publication.json"
-        if receipt.is_file():
-            doc_name = json.loads(receipt.read_text())["native_doc_name"]
-            if doc_name != key:
+        bundle_path = field_root / "wiki" / "assets" / key / "bundle.json"
+        if bundle_path.is_file():
+            manifest = json.loads(bundle_path.read_text())
+            doc_name = pathlib.Path(manifest["input_path"]).stem
+            if doc_name != key or manifest["key"] != key:
                 raise ValueError("published native source identity drift")
             note_by_source[source_by_file[source.name]] = f"wiki/summaries/{doc_name}.md"
 

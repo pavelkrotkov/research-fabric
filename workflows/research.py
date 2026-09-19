@@ -477,7 +477,7 @@ for src in source_files:
     compiler_input = bundle_root / bundle["input_path"]
     subprocess.run(["openkb", "--kb-dir", str(field_root), "add", str(compiler_input)], check=True, text=True)
     # Native input names are source-scoped when visual normalization is needed.
-    if bundle["normalized"]:
+    if bundle["source"]["adapter"] == "markdown":
         publish_bundle(bundle_root, bundle, field_root / "wiki", compiler_input.stem)
         bundles[src.name] = compiler_input.stem
 subprocess.run(["openkb", "--kb-dir", str(field_root), "lint"], check=True, text=True)

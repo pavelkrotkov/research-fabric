@@ -110,7 +110,7 @@ def test_optional_unsupported_preserves_original_link(tmp_path):
     source.write_text('<object data="image.svg" data-optional="true"></object>')
     manifest = prepare(source, tmp_path / "bundles")
     row = manifest["assets"][0]
-    assert row["available"] and not row["rendered"] and not row["inspected"]
+    assert (tmp_path / "bundles" / manifest["key"] / row["original_path"]).is_file()
     assert "unsupported visual format" in row["limitation"]
     assert "derivative_path" not in row
     prepared = (tmp_path / "bundles" / manifest["key"] / manifest["input_path"]).read_text()
@@ -133,7 +133,7 @@ def test_real_bounded_render_and_resume_drift(tmp_path, suffix, renderer):
     manifest = prepare(source, tmp_path / "bundles")
     root = tmp_path / "bundles" / manifest["key"]
     row = manifest["assets"][0]
-    assert row["rendered"] and not row["inspected"] and not row["reviewed"]
+    assert row["renderer"]["name"] == renderer
     assert row["original_sha256"] == assets.digest(image.read_bytes())
     with Image.open(root / row["derivative_path"]) as raster:
         raster.load()
@@ -195,16 +195,24 @@ def test_exporter_only_copies_manifest_closure_and_rejects_drift(tmp_path):
     native.write_bytes((root / row["derivative_path"]).read_bytes())
     (native.parent / "unreferenced.png").write_bytes(b"must not export")
     assets.publish_bundle(root, manifest, wiki, manifest["key"])
+    published = wiki / "assets" / manifest["key"] / "bundle.json"
+    assert published.read_bytes() == (root / "bundle.json").read_bytes()
+    changed = copy.deepcopy(manifest)
+    changed["assets"] = []
+    (root / "bundle.json").write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match="manifest drift"):
+        assets.publish_bundle(root, manifest, wiki, manifest["key"])
     docs = tmp_path / "docs"
     copied = assets.export_assets(wiki, docs)
     assert len(copied) == 2
+    assert (docs / published.relative_to(wiki)).read_bytes() == published.read_bytes()
     assert not list(docs.rglob("unreferenced.png"))
     native.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="drift"):
         assets.export_assets(wiki, tmp_path / "fresh-docs")
-    receipt = next(wiki.glob("assets/*/publication.json"))
+    receipt = next(wiki.glob("assets/*/bundle.json"))
     data = json.loads(receipt.read_text())
-    data["native_doc_name"] = "../escape"
+    data["input_path"] = "prepared/wrong.md"
     receipt.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="identity mismatch"):
         assets.export_assets(wiki, tmp_path / "fresh-docs")
