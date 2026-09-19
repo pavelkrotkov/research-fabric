@@ -44,7 +44,9 @@ The engine never merges the proposal into the KB's main branch.
 Unsafe configuration (run artifacts inside the KB) is rejected before an attempt
 starts and before any writes, preserving the existing worktree and prior artifacts.
 A started run that fails raises and records `FAILED`, its failing stage, reason and artifact
-location in `run.json`. Preserve those artifacts. To resume, retain `run_root`,
+location in `run.json`. If that state file is damaged or cannot be written, the
+recording failure is logged and the original exception is preserved; damaged
+bytes are not silently replaced with an invented state. Preserve those artifacts. To resume, retain `run_root`,
 set `reuse_evidence_dir=run_root / 'evidence'`, and supply any explicit execution
 overrides. Compatible completed packets are reused; missing or incompatible
 packets are collected. The journal retains earlier attempts and cumulative budget
