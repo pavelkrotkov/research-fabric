@@ -195,49 +195,27 @@ class ResearchRun:
         self.source_files = discover_sources(self.config.source_dir, ADAPTERS)
         if not self.source_files:
             raise RuntimeError("no supported source snapshots found in source_dir")
-        matched = [(p, self._book_of(p)) for p in self.source_files]
-        if any((b is None for _, b in matched)):
+        matched = [(path, self.book_re.search(path.name)) for path in self.source_files]
+        if any(match is None for _, match in matched):
             raise RuntimeError(f"all snapshots must match {self.book_re.pattern}")
         if self.is_multi:
-
-            def _variant_of(p):
-                m = self.book_re.search(p.name)
-                return m.group(2) if m and m.lastindex and (m.lastindex >= 2) else None
-
-            self.books = sorted((b for p, b in matched if _variant_of(p) == self.canonical))
+            self.books = sorted(int(match.group(1)) for _, match in matched if match.groups()[1:2] == (self.canonical,))
+            self.worker_sources = {f"book-{book}": self._witness_sources(book) for book in self.books}
         else:
-            self.books = sorted({b for _, b in matched})
-            if len(self.books) != len(self.source_files):
+            self.worker_sources = {f"book-{int(match.group(1))}": [path] for path, match in matched}
+            if len(self.worker_sources) != len(self.source_files):
                 raise RuntimeError(f"all snapshots must match {self.book_re.pattern}")
+            self.books = sorted(int(match.group(1)) for _, match in matched)
         self.worker_specs = [
             (f"book-{b}", book_task_from_project(b, self.project, self.config.project_path.stem)) for b in self.books
         ]
-        self.worker_sources = {sid: self._worker_source_files(int(sid.split("-")[1])) for sid, _ in self.worker_specs}
         self.worker_provenance = {sid: source_provenance(paths, ADAPTERS) for sid, paths in self.worker_sources.items()}
 
-    def _book_of(self, p):
-        m = self.book_re.search(p.name)
-        return int(m.group(1)) if m else None
-
-    def _worker_source_files(self, book: int) -> list[pathlib.Path]:
-        if self.is_multi:
-            labels = [self.project["book_label_template"].format(n=book, w=self.canonical)] + [
-                self.project["book_label_template"].format(n=book, w=w) for w in self.witnesses
-            ]
-            paths = [self.config.source_dir / label for label in labels]
-        else:
-            label = self.project.get("book_label_template", "{n}.html").format(n=book)
-            path = self.config.source_dir / label
-            if not path.is_file():
-                path = next(
-                    (
-                        p
-                        for p in self.source_files
-                        if (match := self.book_re.search(p.name)) and int(match.group(1)) == book
-                    ),
-                    path,
-                )
-            paths = [path]
+    def _witness_sources(self, book):
+        paths = [
+            self.config.source_dir / self.project["book_label_template"].format(n=book, w=variant)
+            for variant in [self.canonical, *self.witnesses]
+        ]
         missing = [path.name for path in paths if not path.is_file()]
         if missing:
             raise RuntimeError(f"worker source input missing: {missing}")

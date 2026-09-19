@@ -56,7 +56,7 @@ def ledger_rows(field_root, packets, notes, sources, *, multi=False):
     return claims, dropped
 
 
-def _packet_history(field_root, run_root, packets):
+def _packet_history(field_root, packets):
     execution = {
         worker: {"packet_revision": packet["packet_revision"], "execution": packet.get("execution")}
         for worker, packet in packets.items()
@@ -65,7 +65,6 @@ def _packet_history(field_root, run_root, packets):
     history = [event for packet in packets.values() for event in (packet.get("claim_history") or [])]
     if history:
         write_json(field_root / "evidence/claim-history.json", history)
-        write_json(run_root / "verification/claim-history.json", history)
 
 
 def materialize_evidence(field_root, run_root, worker_ids, notes, sources, source_rows, *, multi=False):
@@ -84,5 +83,5 @@ def materialize_evidence(field_root, run_root, worker_ids, notes, sources, sourc
         (field_root / "evidence" / filename).write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8"
         )
-    _packet_history(field_root, run_root, packets)
+    _packet_history(field_root, packets)
     return claims
