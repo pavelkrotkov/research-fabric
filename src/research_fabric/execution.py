@@ -506,13 +506,7 @@ def _validated(response, validate):
 
 
 def packet_policy_defects(packet, project):
-    """Keep historical identities; only the active restriction changes reuse.
-
-    Missing returned identity is permitted, but a restricted project needs a
-    recorded requested route for original extraction. Known returned aliases
-    must be explicitly allowed; no guessed provider/version normalization.
-    Failed/advisory attempts do not establish evidence-model provenance.
-    """
+    """Validate original extraction lineage before checking accepted evidence routes."""
     allowed = allowed_models(project)
     if allowed is None:
         return []
@@ -527,27 +521,18 @@ def packet_policy_defects(packet, project):
 def _record_policy_defects(row, allowed):
     if row.get("role") not in ("extraction", "repair"):
         return []
+    errors = []
     profile = row.get("profile")
     if not isinstance(profile, dict) or profile.get("model") not in allowed:
-        return ["recorded requested model violates project restriction"]
+        errors.append("recorded requested model violates project restriction")
     actual = row.get("actual_model")
     if actual is not None and actual not in allowed:
-        return ["recorded returned model violates project restriction"]
-    return []
+        errors.append("recorded returned model violates project restriction")
+    return errors
 
 
 def _accepted_attempts(records):
-    """Distinguish malformed lineage (None) from no accepted responses ([]).
-
-    Failed calls stay in immutable history but did not generate accepted claims;
-    including them in compatibility checks would invalidate successful fallback.
-    """
-    if not isinstance(records, list):
+    """Reject malformed lineage; failed calls did not produce accepted evidence."""
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
         return None
-    accepted = []
-    for row in records:
-        if not isinstance(row, dict):
-            return None
-        if row.get("outcome") == "accepted":
-            accepted.append(row)
-    return accepted
+    return [row for row in records if row.get("outcome") == "accepted"]
