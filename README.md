@@ -107,10 +107,10 @@ python bin/repair_claims.py <run_root> <source_dir> <grounding_report.txt> \
 
 Stable claim IDs are persisted at host acceptance, before any repair or ledger
 materialization. Repair reports bind packet state and source bytes; stale or
-unknown targets fail before mutation. Packet history is authoritative and its
-separate audit file is recoverable after interruption. Repair validates a
-disposable evidence copy; rerun the publication workflow to materialize the
-repaired packet into the isolated proposed branch.
+unknown targets fail before mutation. Each atomic packet write includes its
+transition history; publication projects that history into its audit file.
+Repair validates a disposable evidence copy; rerun the publication workflow
+to materialize the repaired packet into the isolated proposed branch.
 
 Legacy positional reports require the **retained original published ledger**.
 Do not reconstruct that ledger from a packet that may have been filtered or

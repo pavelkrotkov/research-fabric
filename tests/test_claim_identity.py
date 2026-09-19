@@ -184,6 +184,9 @@ def test_repair_uses_ids_and_replay_is_idempotent(tmp_path):
     assert remaining[ids[1]]["excerpt"] == "good B"
     assert remaining[ids[2]]["excerpt"] == "good C"
     history_len = len(after["claim_history"])
+    old_mirror = packet_dir / "claim-history.json"
+    old_mirror.write_bytes(b"obsolete interrupted mirror")
+    before_replay = packet_path.read_bytes()
 
     replay = repair_claims.repair_claims(
         run_root, source_dir, report, model=lambda _prompt: pytest.fail("replay called the model")
@@ -193,6 +196,8 @@ def test_repair_uses_ids_and_replay_is_idempotent(tmp_path):
     assert len(replayed_packet["claim_history"]) == history_len
     assert replayed_packet["source_provenance"] == attestation
     assert len(calls) == 2
+    assert packet_path.read_bytes() == before_replay
+    assert old_mirror.read_bytes() == b"obsolete interrupted mirror"
 
 
 def test_unknown_or_stale_report_fails_before_packet_mutation(tmp_path):
@@ -363,8 +368,6 @@ def test_drop_last_claim_fails_after_packet_history_is_retained(tmp_path):
     after = json.loads(packet_path.read_text(encoding="utf-8"))
     assert after["parsed"]["claims"] == []
     assert any(event.get("event") == "drop" for event in after["claim_history"])
-    sidecar = json.loads((packet_dir / "claim-history.json").read_text(encoding="utf-8"))
-    assert any(event.get("event") == "drop" for event in sidecar)
 
 
 def test_model_error_is_reported_after_prior_history_is_written(tmp_path):
@@ -398,57 +401,6 @@ def test_model_error_is_reported_after_prior_history_is_written(tmp_path):
         repair_claims.repair_claims(run_root, source_dir, report, model=model)
     after = json.loads(packet_path.read_text(encoding="utf-8"))
     assert any(event.get("claim_id") == ids[0] and event.get("event") == "drop" for event in after["claim_history"])
-
-
-def test_sidecar_history_recovers_after_packet_write_before_sidecar(tmp_path, monkeypatch):
-    source_dir = _source(tmp_path)
-    run_root = tmp_path / "run"
-    packet_dir = run_root / "evidence"
-    packet_dir.mkdir(parents=True)
-    packet = accept_packet(_packet(), "book-1", source_dir=source_dir)
-    packet_path = packet_dir / "worker-book-1.json"
-    atomic_write_json(packet_path, packet)
-    ids = [claim["claim_id"] for claim in packet["parsed"]["claims"]]
-    report = tmp_path / "report.txt"
-    report.write_text(
-        _bound_report(
-            packet,
-            source_dir,
-            [
-                {"claim_id": ids[0], "old_excerpt": "bad A", "reason": "excerpt not found"},
-                {"claim_id": ids[1], "old_excerpt": "bad B", "reason": "excerpt not found"},
-            ],
-        ),
-        encoding="utf-8",
-    )
-    original_append = claim_store.append_history
-    state = {"entries": 0}
-
-    def fail_once(path, entries):
-        if entries:
-            state["entries"] += 1
-        if state["entries"] == 2:
-            raise OSError("interrupted sidecar write")
-        return original_append(path, entries)
-
-    monkeypatch.setattr(claim_store, "append_history", fail_once)
-    with pytest.raises(OSError, match="interrupted"):
-        repair_claims.repair_claims(
-            run_root,
-            source_dir,
-            report,
-            model=lambda prompt: '{"excerpt":"good B","found":true}' if ids[1] in prompt else '{"found":false}',
-        )
-    monkeypatch.setattr(claim_store, "append_history", original_append)
-    replay = repair_claims.repair_claims(
-        run_root,
-        source_dir,
-        report,
-        model=lambda _: pytest.fail("replay called model after packet event persisted"),
-    )
-    assert replay["repaired"] == 0 and replay["dropped"] == 0
-    sidecar = json.loads((packet_dir / "claim-history.json").read_text(encoding="utf-8"))
-    assert any(event.get("claim_id") == ids[1] and event.get("event") == "repair" for event in sidecar)
 
 
 def _workflow_ledger(packet_dir, field_root):
@@ -1014,8 +966,6 @@ def test_post_replace_failure_resumes_from_durable_packet(tmp_path, monkeypatch)
     import os
     import stat
 
-    from research_fabric import claim_store
-
     if os.name == "nt":
         pytest.skip("directory flush is a POSIX durability operation")
 
@@ -1067,5 +1017,6 @@ def test_post_replace_failure_resumes_from_durable_packet(tmp_path, monkeypatch)
     result = repair_claims.repair_claims(tmp_path / "run", source_dir, report, model=model)
     assert result["repaired"] == 1 and result["dropped"] == 0
     assert calls == ["c-book-1-1", "c-book-1-2"]
-    audit = json.loads((path.parent / "claim-history.json").read_text())
-    assert [event["event"] for event in audit] == ["drop", "repair"]
+    audit = json.loads(path.read_text())["claim_history"]
+    assert [event["event"] for event in audit] == ["accepted"] * 3 + ["drop", "repair"]
+    assert list(path.parent.iterdir()) == [path]

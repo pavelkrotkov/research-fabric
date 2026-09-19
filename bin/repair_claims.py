@@ -29,8 +29,6 @@ from research_fabric.claims import (
     ClaimIdentityError,
 )
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
-
 
 def _client():
     key = os.environ.get("OPENROUTER_API_KEY")
@@ -119,8 +117,8 @@ def _repair_target(target, source_dir, model, grounded, adapters):
 def _process_targets(targets, store, source_dir, report_id, model, grounded, adapters):
     """Commit each completed target before continuing; aggregate model errors afterward.
 
-    Persistence failures propagate immediately. Treating them like provider
-    failures could hide an interrupted audit mirror that must be recovered.
+    Persistence failures propagate immediately; replay reads the last durable
+    packet to determine which targets still need repair.
     """
     counts = {"repair": 0, "drop": 0}
     errors = []
@@ -180,7 +178,6 @@ def repair_claims(
     report = Report.read(pathlib.Path(report_path), store.packets, source_dir)
     targets = report.targets(store.packets)
     preflight(field_root, project)
-    store.recover()
     counts = _process_targets(targets, store, source_dir, report.report_id, model, grounded, adapters)
     fully_validated = revalidate(
         run_root,

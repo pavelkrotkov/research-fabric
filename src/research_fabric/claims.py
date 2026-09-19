@@ -332,7 +332,7 @@ def transition_claim(packet, claim_id, *, action, reason, attempt_id=None, repor
 
     A previously applied report/claim pair is a no-op. Callers must bind and
     validate the complete report before invoking this primitive; PacketStore
-    then persists the packet before updating the recoverable history mirror.
+    then persists the transition and its history together in the packet.
     """
     require(action in {"repair", "drop"}, f"unsupported claim transition: {action}")
     history = packet.setdefault("claim_history", [])
