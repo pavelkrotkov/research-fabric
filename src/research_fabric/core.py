@@ -288,3 +288,26 @@ def multisource_packet_defects(parsed, project: dict, acceptance: dict | None = 
         if (project.get("acceptance") or {}).get("latin_canonical_required"):
             defects.extend(f"claim {idx}: {d}" for d in english_witness_defects(claim, project))
     return defects
+
+
+def read_verdict(text):
+    """Return ('PASS'|'FAIL'|None, detail) from a verifier reply."""
+    matches = list(re.finditer("^\\s*VERDICT:\\s*(PASS|FAIL)\\b[ \\t]*(.*)$", text or "", flags=re.I | re.M))
+    if matches:
+        verdict = matches[-1].group(1).upper()
+        detail = matches[-1].group(2).strip().lstrip("-–—:").strip()
+        if verdict == "FAIL" and (not detail):
+            return (None, "FAIL with no enumerated defect")
+        return (verdict, detail)
+    return _implicit_verdict(text)
+
+
+def _implicit_verdict(text):
+    lowered = (text or "").lower()
+    positive = "verified sound" in lowered or "verified clean" in lowered
+    negative = re.search(
+        "\\bfail(?:ed|ure)?\\b|blocking defect|\\bdefect(?:s)?\\b|not verified|unable to verify", lowered
+    )
+    if positive and (not negative):
+        return ("PASS", "implicit positive attestation")
+    return (None, "no usable VERDICT line or unambiguous positive attestation")

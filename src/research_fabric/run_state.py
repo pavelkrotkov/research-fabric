@@ -1,11 +1,20 @@
 """Atomic run terminal state and proposed-commit finalization (ADR-002)."""
 
 import hashlib
+import json
+import logging
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
 from research_fabric.compilation import CompilationError, _git, assert_run_branch, digest, write_json
+
+
+def set_state(run_root, state):
+    path = Path(run_root) / "run.json"
+    record = json.loads(path.read_text())
+    record["state"] = state
+    write_json(path, record)
 
 
 @contextmanager
@@ -16,7 +25,17 @@ def run_lifecycle(run_root):
     try:
         yield
     except BaseException as exc:
-        write_json(path, {"run_id": Path(run_root).name, "state": "FAILED", "failure": f"{type(exc).__name__}: {exc}"})
+        try:
+            record = json.loads(path.read_text())
+            record.update(
+                state="FAILED",
+                failed_stage=record["state"],
+                failure=f"{type(exc).__name__}: {exc}",
+                artifacts=str(Path(run_root).resolve()),
+            )
+            write_json(path, record)
+        except Exception:
+            logging.exception("Cannot record FAILED at %s; preserving original failure: %s", path, exc)
         raise
 
 
@@ -44,6 +63,7 @@ def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None):
         "branch": branch,
         "commit": head,
         "claims": claims,
+        "evidence": str(Path(kb) / "evidence"),
         "provenance": record,
     }
     write_json(Path(run_root) / "run.json", result)
