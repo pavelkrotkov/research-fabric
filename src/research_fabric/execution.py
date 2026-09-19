@@ -506,24 +506,48 @@ def _validated(response, validate):
 
 
 def packet_policy_defects(packet, project):
-    """Check original accepted routes without relabeling copied artifact history."""
+    """Keep historical identities; only the active restriction changes reuse.
+
+    Missing returned identity is permitted, but a restricted project needs a
+    recorded requested route for original extraction. Known returned aliases
+    must be explicitly allowed; no guessed provider/version normalization.
+    Failed/advisory attempts do not establish evidence-model provenance.
+    """
     allowed = allowed_models(project)
     if allowed is None:
         return []
-    records = packet.get("execution")
-    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+    accepted = _accepted_attempts(packet.get("execution"))
+    if accepted is None:
         return ["execution lineage missing under model restriction"]
-    accepted = [row for row in records if row.get("outcome") == "accepted"]
     if not any(row.get("role") == "extraction" for row in accepted):
         return ["original extraction route unknown under model restriction"]
-    errors = []
-    for row in accepted:
-        if row.get("role") not in ("extraction", "repair"):
-            continue
-        profile = row.get("profile")
-        if not isinstance(profile, dict) or profile.get("model") not in allowed:
-            errors.append("recorded requested model violates project restriction")
-        actual = row.get("actual_model")
-        if actual is not None and actual not in allowed:
-            errors.append("recorded returned model violates project restriction")
-    return errors
+    return [error for row in accepted for error in _record_policy_defects(row, allowed)]
+
+
+def _record_policy_defects(row, allowed):
+    if row.get("role") not in ("extraction", "repair"):
+        return []
+    profile = row.get("profile")
+    if not isinstance(profile, dict) or profile.get("model") not in allowed:
+        return ["recorded requested model violates project restriction"]
+    actual = row.get("actual_model")
+    if actual is not None and actual not in allowed:
+        return ["recorded returned model violates project restriction"]
+    return []
+
+
+def _accepted_attempts(records):
+    """Distinguish malformed lineage (None) from no accepted responses ([]).
+
+    Failed calls stay in immutable history but did not generate accepted claims;
+    including them in compatibility checks would invalidate successful fallback.
+    """
+    if not isinstance(records, list):
+        return None
+    accepted = []
+    for row in records:
+        if not isinstance(row, dict):
+            return None
+        if row.get("outcome") == "accepted":
+            accepted.append(row)
+    return accepted

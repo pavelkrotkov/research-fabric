@@ -160,9 +160,9 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
     kb, diagnostics = Path(kb).resolve(), Path(diagnostics).resolve()
     sources = tuple(Path(p).resolve() for p in sources)
     command = tuple(command or (sys.executable, str(Path(__file__).resolve())))
-    if execution_root is not None:
-        attempts = min(attempts, configured(execution_root)[1]["budget"]["attempts"])
-    identity, session, baseline = _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_root)
+    identity, session, baseline, attempts = _prepare_attempts(
+        kb, sources, diagnostics, command, attempts, execution_root
+    )
     for attempt in range(1, attempts + 1):
         if _identity(kb, sources, command, execution_root) != identity:
             raise CompilationError("Input, policy or worktree identity changed; start a new compile attempt")
@@ -170,10 +170,7 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
         shutil.copytree(baseline, candidate)
         result_file = session / f"result-{attempt}.json"
         argv = [*command, "--kb", str(candidate), "--result", str(result_file), "--sources", *map(str, sources)]
-        checkpoint = 0
-        if execution_root is not None:
-            argv.extend(["--execution-root", str(Path(execution_root).resolve()), "--profile-index", str(attempt - 1)])
-            checkpoint = max((r["id"] for r in history(execution_root)["attempts"]), default=0)
+        checkpoint = _execution_checkpoint(execution_root, argv, attempt)
         try:
             with (session / f"attempt-{attempt}.log").open("w") as log:
                 result = subprocess.run(
@@ -192,7 +189,17 @@ def compile_with_recovery(kb, sources, diagnostics, *, command=None, attempts=2,
     raise CompilationError(f"Compilation failed after {attempts} attempt(s); diagnostics and baseline: {session}")
 
 
+def _execution_checkpoint(root, argv, attempt):
+    """Bind the child invocation and retry history to this candidate's execution checkpoint."""
+    if root is None:
+        return 0
+    argv.extend(["--execution-root", str(Path(root).resolve()), "--profile-index", str(attempt - 1)])
+    return max((row["id"] for row in history(root)["attempts"]), default=0)
+
+
 def _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_root=None):
+    if execution_root is not None:
+        attempts = min(attempts, configured(execution_root)[1]["budget"]["attempts"])
     if not sources or not 1 <= attempts <= 3:
         raise CompilationError("Supply sources and 1–3 bounded attempts")
     if diagnostics.is_relative_to(kb):
@@ -204,7 +211,7 @@ def _prepare_attempts(kb, sources, diagnostics, command, attempts, execution_roo
     write_json(session / "identity.json", identity)
     baseline = session / "baseline"
     shutil.copytree(kb, baseline, ignore=shutil.ignore_patterns(".git"))
-    return identity, session, baseline
+    return identity, session, baseline, attempts
 
 
 def normalize_generated_log(kb):
