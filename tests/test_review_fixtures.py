@@ -81,6 +81,13 @@ def test_compiled_wiki_audit_separates_mechanical_from_semantic_variants(candida
     assert "wiki/concepts/drift.md" in (review / "generated-diff.patch").read_text()
 
 
+def test_wikilink_directory_does_not_count_as_target(candidate, tmp_path):
+    _git(candidate, "apply", "--unidiff-zero", str(FIXTURE / "variants/broken-page.patch"))
+    (candidate / "wiki/missing-sensor.md").mkdir()
+    with pytest.raises(CompilationError, match="missing wikilink"):
+        audit_compiled_wiki(candidate, tmp_path / "review")
+
+
 def test_existing_evidence_gates_still_do_not_decide_semantic_fixture(candidate):
     _git(candidate, "apply", "--unidiff-zero", str(FIXTURE / "variants/qualifier.patch"))
     for gate in ("provenance_validate.py", "excerpt_grounding.py"):
