@@ -6,21 +6,14 @@ import hashlib
 import json
 import pathlib
 import re
-import subprocess
 from urllib.parse import unquote, urlsplit
 
 from ._reading_plan import published_reading_plan
-from .compilation import CompilationError, write_json
+from .compilation import CompilationError, _git, write_json
 from .run_state import _publication_outputs
 
 _WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 _LINK = re.compile(r"!?\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))")
-
-
-def _git(kb, *args):
-    return subprocess.run(
-        ["git", "-C", str(kb), *args], check=True, text=True, capture_output=True
-    ).stdout.strip()
 
 
 def _scopes(kb):
@@ -123,7 +116,7 @@ def audit_compiled_wiki(kb, verification):
     scopes = _scopes(kb)
     changed = _changed(kb, scopes)
     if scopes:
-        subprocess.run(["git", "-C", str(kb), "add", "-N", "-A", "--", *scopes], check=True)
+        _git(kb, "add", "-N", "-A", "--", *scopes)
     diff = _git(kb, "diff", "--no-ext-diff", "--", *scopes)
     (verification / "generated-diff.patch").write_text(diff, encoding="utf-8")
     defects = []
