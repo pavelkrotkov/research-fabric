@@ -252,22 +252,28 @@ def _published_notes(field_root, source_files, note_by_source, source_by_file, s
             ] = f"wiki/summaries/{doc_name}.md"
 
 
+def _run_sources(run_root, project):
+    if "reading" not in project:
+        source_files, mappings = _source_context(run_root, project)
+        return source_files, *mappings, None, None
+    from research_fabric._source_assets import safe_path
+
+    source_root = run_root / "sources"
+    paths = {name: safe_path(source_root, name) for name in project["reading"]["sources"]}
+    plan = ReadingPlan.load(run_root / "reading-plan.json", paths, project["reading"])
+    sources = {name: row["source_id"] for name, row in plan.data["sources"].items()}
+    return list(paths.values()), {}, sources, plan, source_root
+
+
+def _write_reading_plan(field_root, reading_plan):
+    _write_reading_plan(field_root, reading_plan)
+
+
 def main() -> int:
     args = _parse_args()
     run_root = pathlib.Path(args.run_root).resolve()
     project = _load_project(args.project)
-    reading_plan = None
-    source_root = run_root / "sources" if "reading" in project else None
-    if source_root:
-        from research_fabric._source_assets import safe_path
-
-        paths = {name: safe_path(source_root, name) for name in project["reading"]["sources"]}
-        reading_plan = ReadingPlan.load(run_root / "reading-plan.json", paths, project["reading"])
-        source_files = list(paths.values())
-        note_by_source = {}
-        source_by_file = {name: row["source_id"] for name, row in reading_plan.data["sources"].items()}
-    else:
-        source_files, (note_by_source, source_by_file) = _source_context(run_root, project)
+    source_files, note_by_source, source_by_file, reading_plan, source_root = _run_sources(run_root, project)
     workdir, field_root = _clone(args.field_repo, args.branch)
     manifest_rows = _manifest(run_root, project, source_files)
     snap_dest = _publish_sources(field_root, source_files, source_root)
