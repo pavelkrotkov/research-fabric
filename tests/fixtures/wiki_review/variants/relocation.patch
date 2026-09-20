@@ -1,0 +1,10 @@
+--- a/wiki/concepts/drift.md
++++ b/wiki/concepts/drift.md
+@@ -4,0 +5,3 @@
++
++Study A observed reduced drift only in dry indoor conditions among 24 participants.
++Source: [[study-a]].
+--- a/wiki/entities/sensor.md
++++ b/wiki/entities/sensor.md
+@@ -3 +2,0 @@
+-Study A observed reduced drift only in dry indoor conditions among 24 participants.

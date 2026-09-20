@@ -39,13 +39,14 @@ def run_lifecycle(run_root):
         raise
 
 
-def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None):
+def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None, reviewed=None):
     """A proposed commit is ready only after provenance and clean-tree checks."""
     assert_run_branch(kb)
     record = provenance()
     if not isinstance(record, dict) or not record:
         raise CompilationError("Missing run provenance")
     outputs = _publication_outputs(kb)
+    _verify_reviewed_outputs(kb, outputs, reviewed)
     if compiled is not None:
         _verify_compiled_outputs(outputs, compiled)
     _git(kb, "add", "-A")
@@ -81,6 +82,13 @@ def _publication_outputs(kb):
     if (Path(kb) / ".gitattributes").is_file():
         outputs[".gitattributes"] = digest(Path(kb) / ".gitattributes")
     return outputs
+
+
+def _verify_reviewed_outputs(kb, outputs, reviewed):
+    if reviewed is not None and (
+        reviewed["base_commit"] != _git(kb, "rev-parse", "HEAD") or reviewed["outputs"] != outputs
+    ):
+        raise CompilationError("Publication outputs changed after compiled-wiki review")
 
 
 def _verify_compiled_outputs(outputs, compiled):

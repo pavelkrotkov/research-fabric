@@ -35,18 +35,24 @@ source snapshots (immutable, sha256-manifested)
   collect ─── direct-API workers (one LLM call per book, strict JSON packet)
         │        retries, structural packet validation (fail-closed)
         ▼
-  advisory LLM verifier (recorded, never gates)
+  advisory source verifier (recorded, never gates)
         │
         ▼
-  deterministic gates (all fail-closed, all byte-exact):
-    • provenance: every snapshot matches its manifest sha256
-    • excerpt grounding: every claim excerpt is a verbatim substring of its snapshot
+  compile source inputs independently with OpenKB
         │
         ▼
-  compile (openkb add + lint) → claims ledger (evidence/claims.jsonl)
+  materialize claims/source ledgers from accepted evidence packets
         │
         ▼
-  commit on an isolated worktree branch → READY_FOR_REVIEW
+  deterministic gates (fail-closed):
+    • provenance + excerpt grounding against immutable snapshots
+    • compiled-wiki links/citations + candidate hash/diff binding
+        │
+        ▼
+  advisory semantic wiki review (recorded, never gates)
+        │
+        ▼
+  commit the reviewed candidate on an isolated worktree branch → READY_FOR_REVIEW
         │
         ▼
   human review → explicit merge to main → rebuild hosted wiki
