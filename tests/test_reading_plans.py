@@ -97,7 +97,8 @@ def test_tokenizer_missing_cache_fails_without_download(tmp_path, monkeypatch):
 
 def test_context_keeps_its_source_work_and_reading_role_after_acceptance(tmp_path):
     from research_fabric.claims import ClaimIdentityError, accept_packet, transition_claim
-    from research_fabric.sources import reading_quote, source_provenance
+    from research_fabric.reading import reading_quote
+    from research_fabric.sources import source_provenance
 
     plan, _, root, _, _ = prepare(
         tmp_path,
