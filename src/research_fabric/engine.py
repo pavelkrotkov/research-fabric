@@ -29,6 +29,7 @@ from research_fabric.core import (
 )
 from research_fabric.execution import configure, configured, history, packet_policy_defects, resolve
 from research_fabric.publication import materialize_evidence
+from research_fabric.review import advisory_record, audit_compiled_wiki
 from research_fabric.run_state import finalize_run, run_lifecycle, set_state
 from research_fabric.sources import (
     ADAPTERS,
@@ -580,28 +581,31 @@ class ResearchRun:
             self._run_gate("translation_grounding.py", "translation-grounding.txt", alignment)
 
     def _verify_diff(self):
-        subprocess.run(["git", "-C", str(self.config.field_root), "add", "-N", "--", "evidence"], check=True)
-        diff = subprocess.run(
-            ["git", "-C", str(self.config.field_root), "diff", "--no-ext-diff", "--", "evidence"],
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout
-        diff_path = self.config.run_root / "verification" / "generated-diff.patch"
-        diff_path.write_text(diff, encoding="utf-8")
-        if not diff.strip():
-            raise RuntimeError("generated diff is empty; refusing to attest an empty change set")
-        self._advisory(
-            "verify-diff",
+        verification = self.config.run_root / "verification"
+        self.review = audit_compiled_wiki(self.config.field_root, verification)
+        prompt = (
             f"Question: {self.config.question}\n"
-            f"Read the claims ledger {self.config.field_root / 'evidence' / 'claims.jsonl'}, the source ledger "
-            f"{self.config.field_root / 'evidence' / 'sources.jsonl'}, and the approved snapshots in {self.snap_dest}. "
-            "For every claim verify that its excerpt appears in the snapshot named by its source_ids, that the "
-            "locator is consistent, and that the stance matches the excerpt. Confirm each source_id in the claims "
-            "ledger exists in the source ledger.\n\n" + VERDICT_CONTRACT,
-            "post-compile.txt",
-            "advisory-post-verifier.json",
+            f"Read the exact candidate diff {verification / 'generated-diff.patch'} and review record "
+            f"{verification / 'compiled-wiki-review.json'}. Follow changed wiki links and the source-linked "
+            "original-section citations. Compare retained before-state from the git diff with current pages and "
+            "source evidence. Look for unsupported interpretations, missing nuance, semantic omissions, duplicate "
+            "concepts, and lost qualifications; a detail moved to a linked page is not automatically lost. Start "
+            "with 'Scope:'; use 'Before:', 'After:' and 'Source:' when relevant; include 'Uncertainty:'. "
+            "Do not modify files. This opinion is advisory and cannot override mechanical failures.\n\n"
+            + VERDICT_CONTRACT
         )
+        try:
+            verdict, detail, reply = self.run_verifier("verify-diff", prompt, "post-compile.txt")
+            error = detail if verdict is None else None
+        except Exception as exc:
+            verdict, detail, reply, error = None, str(exc), "", f"verifier errored: {exc}"
+        record = advisory_record(
+            reply,
+            {"candidate_sha256": self.review["candidate_sha256"], "changed": self.review["changed"]},
+            error=error,
+        )
+        record.update(verdict=verdict, detail=detail)
+        write_json(verification / "advisory-post-verifier.json", record)
 
     def _finalize(self):
         default = (
@@ -623,7 +627,10 @@ class ResearchRun:
             len(self.claims),
             self.collect_provenance,
             compiled=self.compile_report,
+            reviewed=self.review,
         )
+        self.review["commit"] = completion["commit"]
+        write_json(self.config.run_root / "verification" / "compiled-wiki-review.json", self.review)
         return completion
 
     def collect_provenance(self) -> dict:
