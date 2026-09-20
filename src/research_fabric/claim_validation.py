@@ -31,7 +31,8 @@ from .claims import (
     validated_drop_ids,
 )
 from .core import multisource_packet_defects, packet_defects
-from .sources import reading_source_text, representation_for
+from .reading import reading_source_text
+from .sources import representation_for
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
