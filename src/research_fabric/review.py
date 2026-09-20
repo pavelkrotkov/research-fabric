@@ -35,9 +35,11 @@ def _wikilink_exists(wiki, raw):
     candidate = wiki.joinpath(*logical.parts)
     if not candidate.suffix:
         candidate = candidate.with_suffix(".md")
-    return candidate.is_file() or any(
-        path.is_file() for path in wiki.rglob(pathlib.Path(target).with_suffix(".md").name)
-    )
+    if candidate.is_file():
+        return True
+    if len(logical.parts) != 1:
+        return False
+    return any(path.is_file() for path in wiki.rglob(candidate.name))
 
 
 def _jsonl(path):
@@ -105,11 +107,8 @@ def _page_defects(page, wiki, citations, citation_paths):
     return defects
 
 
-def _changed_pages(kb, changed):
-    for relative in changed:
-        page = kb / relative
-        if relative.startswith("wiki/") and page.suffix == ".md" and page.is_file():
-            yield page
+def _wiki_pages(wiki):
+    return (page for page in wiki.rglob("*.md") if page.is_file())
 
 
 def audit_compiled_wiki(kb, verification):
@@ -135,7 +134,7 @@ def audit_compiled_wiki(kb, verification):
     except (OSError, ValueError, KeyError, TypeError) as exc:
         asset_hashes = {}
         defects.append(f"invalid published asset bundle: {exc}")
-    for page in _changed_pages(kb, changed):
+    for page in _wiki_pages(wiki):
         defects.extend(_page_defects(page, wiki, citations, citation_paths))
     if not diff.strip():
         defects.append("candidate diff is empty")
