@@ -27,9 +27,11 @@ FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.claims import accept_packet, atomic_write_json  # noqa: E402
+from research_fabric.compilation import CompilationError  # noqa: E402
 from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
 from research_fabric.publication import ledger_rows  # noqa: E402
 from research_fabric.reading import ReadingPlan  # noqa: E402
+from research_fabric.review import audit_compiled_wiki  # noqa: E402
 from research_fabric.sources import (  # noqa: E402
     bind_manifest,
     copy_source_snapshot,
@@ -173,20 +175,14 @@ def _gate(field_root: pathlib.Path, script: str, label: str) -> bool:
     return result.returncode == 0
 
 
-def _report_diff(field_root: pathlib.Path) -> bool:
-    subprocess.run(["git", "-C", str(field_root), "add", "-N", "--", "evidence"], check=True)
-    diff = subprocess.run(
-        ["git", "-C", str(field_root), "diff", "--no-ext-diff", "--", "evidence"],
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout
-    if not diff.strip():
-        print("[dryrun] FAIL: empty diff")
+def _report_diff(field_root: pathlib.Path, verification: pathlib.Path) -> bool:
+    try:
+        report = audit_compiled_wiki(field_root, verification)
+    except CompilationError as exc:
+        print(f"[dryrun] FAIL: {exc}")
         return False
-    files_in_diff = re.findall(r"^\+\+\+ b/(.+)$", diff, re.M)
-    print(f"[dryrun] diff bytes={len(diff)} files={len(files_in_diff)}")
-    for filename in files_in_diff:
+    print(f"[dryrun] compiled-wiki review bytes={report['diff_bytes']} files={len(report['changed'])}")
+    for filename in report["changed"]:
         print(f"[dryrun]   {filename}")
     return True
 
@@ -297,7 +293,7 @@ def main() -> int:
         return 1
     if not _gate(field_root, "excerpt_grounding.py", "grounding"):
         return 1
-    if not _report_diff(field_root):
+    if not _report_diff(field_root, workdir / "review"):
         return 1
     misses = _grounding_misses(snap_dest, source_by_file, claims)
     status = _commit(field_root, args.project, len(claims))
