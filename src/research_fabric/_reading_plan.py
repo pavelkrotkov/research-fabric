@@ -194,7 +194,11 @@ class ReadingPlan:
         rep = self.representations[span["source_file"]]
         start, end = span_range(rep, span)
         key = self.data["sources"][span["source_file"]]["bundle_key"]
-        source = quote(span["source_file"])
+        source_file = span["source_file"]
+        logical = pathlib.PurePosixPath(source_file)
+        if logical.is_absolute() or ".." in logical.parts or "\\" in source_file:
+            raise ValueError(f"unsafe reading source path: {source_file}")
+        source = quote(source_file, safe="/")
         target = f"assets/{key}/original/{source}#L{span['lines'][0]}-L{span['lines'][1] - 1}"
         return {
             **span,
