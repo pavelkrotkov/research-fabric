@@ -104,11 +104,7 @@ class ReadingPlan:
 
     def source_names(self, reading_id):
         reading = self.reading(reading_id)
-        names = {
-            self.data["sections"][key]["source_file"]
-            for role in ("primary", "context")
-            for key in reading[role]
-        }
+        names = {self.data["sections"][key]["source_file"] for role in ("primary", "context") for key in reading[role]}
         return sorted(names)
 
     def input(self, reading_id):
@@ -131,13 +127,16 @@ class ReadingPlan:
             for key in self.reading(reading_id)[role]:
                 span = self.data["sections"][key]
                 if span["source_file"] == source_file:
-                    yield {
-                        "plan_sha256": self.data["sha256"],
-                        "reading_id": reading_id,
-                        "work_id": self.data["sources"][source_file]["work_id"],
-                        "role": role,
-                        "lines": span["lines"],
-                    }, span
+                    yield (
+                        {
+                            "plan_sha256": self.data["sha256"],
+                            "reading_id": reading_id,
+                            "work_id": self.data["sources"][source_file]["work_id"],
+                            "role": role,
+                            "lines": span["lines"],
+                        },
+                        span,
+                    )
 
     def claim(self, reading_id, claim):
         """Bind one exact excerpt to exactly one assigned primary or context span.
@@ -164,8 +163,7 @@ class ReadingPlan:
             raise ValueError("reading claim source IDs differ from frozen source identity")
         binding = claim["reading"]
         valid = any(
-            binding == expected
-            for expected, _ in self._assignments(binding["reading_id"], claim["source_file"])
+            binding == expected for expected, _ in self._assignments(binding["reading_id"], claim["source_file"])
         )
         if not valid:
             raise ValueError("accepted reading assignment differs from frozen plan")
@@ -223,9 +221,7 @@ class ReadingPlan:
             "from summaries/concepts use ../assets/...). Prepared document line numbers are not original lines. "
             "Retain mathematical qualifications, definitions, uncertainty and conflicting results. "
             "Context is not independent primary evidence. Bibliographic unknowns remain unknown. "
-            "These mappings identify original ranges; they do not prove semantic support.\n"
-            + "\n".join(records)
-            + "\n"
+            "These mappings identify original ranges; they do not prove semantic support.\n" + "\n".join(records) + "\n"
         )
 
     def validate_packet(self, packet, reading_id, acceptance):
