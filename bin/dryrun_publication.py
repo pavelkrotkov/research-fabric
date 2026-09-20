@@ -29,8 +29,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric.claims import accept_packet, atomic_write_json  # noqa: E402
 from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
 from research_fabric.publication import ledger_rows  # noqa: E402
+from research_fabric.reading import ReadingPlan  # noqa: E402
 from research_fabric.sources import (  # noqa: E402
-    ReadingPlan,
     bind_manifest,
     copy_source_snapshot,
     discover_sources,
