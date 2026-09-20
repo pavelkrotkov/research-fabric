@@ -31,6 +31,7 @@ from .claims import (
     validated_drop_ids,
 )
 from .core import multisource_packet_defects, packet_defects
+from .reading import reading_source_text
 from .sources import representation_for
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -40,7 +41,7 @@ def source_body(source_dir, claim, adapters=ADAPTERS):
     # Containment is checked before the adapter opens a packet-controlled path.
     source_file_revision(source_dir, claim.get("source_file", ""))
     try:
-        return representation_for(source_dir / claim["source_file"], adapters).grounding_text
+        return reading_source_text(representation_for(source_dir / claim["source_file"], adapters), claim)
     except ValueError as exc:
         raise ClaimIdentityError(str(exc)) from exc
 
@@ -71,7 +72,7 @@ def _packet_index(packets):
     return current, drops
 
 
-def _ledger_claim(row, packet, claim):
+def _ledger_claim(row, packet, claim, reading_plan):
     for key in ("claim", "stance", "source_file"):
         require(key not in row or row[key] == claim.get(key), f"ledger {key} changed for {claim['claim_id']}")
     # Historical execution provenance survives when an older packet omits it.
@@ -82,17 +83,19 @@ def _ledger_claim(row, packet, claim):
     result.update({key: claim[key] for key in claim.keys() & {"source_revision", "accepted_attempt_id"}})
     fields = {"claim_type", "english_witness", "witnesses_consulted"}
     result.update({key: claim.get(key) for key in (claim.keys() | row.keys()) & fields})
+    if reading_plan:
+        result.update(reading_plan.project_claim(claim))
     return result
 
 
-def sync_ledger_rows(rows, packets):
+def sync_ledger_rows(rows, packets, reading_plan=None):
     current, drops = _packet_index(packets)
     ids = [row.get("claim_id") for row in rows]
     require(all(isinstance(cid, str) and cid for cid in ids), "ledger contains a missing claim_id")
     require(len(ids) == len(set(ids)), "ledger repeats claim_id")
     require(set(current).issubset(ids), f"ledger is missing accepted claim IDs: {sorted(set(current) - set(ids))}")
     require((set(ids) - set(current)).issubset(drops), "ledger claim is outside accepted packet history")
-    return [_ledger_claim(row, *current[row["claim_id"]]) for row in rows if row["claim_id"] in current]
+    return [_ledger_claim(row, *current[row["claim_id"]], reading_plan) for row in rows if row["claim_id"] in current]
 
 
 def _packet_gate(packets, source_dir, project, grounded, adapters):
@@ -120,12 +123,17 @@ def _gate(script, field_root, *extra):
     require(not result.returncode, f"post-repair {script} failed: {(result.stderr or result.stdout).strip()[-500:]}")
 
 
-def revalidate(run_root, source_dir, packets, field_root, project, alignment, grounded, adapters=ADAPTERS):
+def revalidate(
+    run_root, source_dir, packets, field_root, project, alignment, grounded, adapters=ADAPTERS, reading_plan=None
+):
+    if reading_plan:
+        for worker, packet in packets.items():
+            reading_plan.validate_packet(packet, worker, project.get("acceptance") or {})
     _packet_gate(packets, source_dir, project, grounded, adapters)
     if field_root is None:
         return False
     evidence = pathlib.Path(field_root).resolve() / "evidence"
-    rows = sync_ledger_rows(read_ledger(evidence / "claims.jsonl"), packets)
+    rows = sync_ledger_rows(read_ledger(evidence / "claims.jsonl"), packets, reading_plan)
     with tempfile.TemporaryDirectory(prefix="research-fabric-revalidate-") as temporary:
         candidate = pathlib.Path(temporary) / "field"
         shutil.copytree(evidence, candidate / "evidence")

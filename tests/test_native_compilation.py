@@ -425,7 +425,10 @@ cli.cli()
         assert (snapshot.parent / "plot.png").read_bytes() == (sources / "plot.png").read_bytes()
         from research_fabric._source_assets import export_assets
 
-        assert len(export_assets(kb / "wiki", tmp_path / "docs")) == 2
+        exported = export_assets(kb / "wiki", tmp_path / "docs")
+        original_path = f"assets/{source_row['snapshot'].split('/')[-2]}/original/{src.name}"
+        assert len(exported) == 3 and exported[original_path] == manifest["sha256"]
+        assert (tmp_path / "docs" / original_path).read_bytes() == src.read_bytes()
         import shutil
 
         shutil.copytree(sources, run / "sources")
@@ -732,3 +735,184 @@ def test_engine_resume_switch_preserves_completed_packet_and_shared_budget(engin
     assert (config.run_root / "verification/provenance.txt").is_file()
     assert (config.run_root / "verification/excerpt-grounding.txt").is_file()
     assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
+
+
+def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_run, tmp_path, monkeypatch):
+    """Three synthetic works: real worker transport, native compiler, gates, and proposed commit."""
+    import dataclasses
+    import runpy
+    import shutil
+    import subprocess
+    import sys
+
+    import yaml
+    from PIL import Image
+
+    from research_fabric.engine import ResearchRun
+    from research_fabric.reading import ReadingPlan
+    from research_fabric.sources import representation_for, source_attestation
+
+    config, _ = engine_run
+    subprocess.run(["git", "-C", str(config.field_root), "config", "core.autocrlf", "true"], check=True)
+    for path in config.source_dir.iterdir():
+        path.unlink()
+    texts = {
+        "chapter/α source.md": "".join(
+            f"# Repeated heading\r\n\r\nEvidence chapter section {i} spans  \r\ntwo original lines.\r\n\r\n"
+            + ("Long coherent argument with qualifications. " * 35).rstrip()
+            + "\r\n\r\n$$\r\nx = y + 1\r\n$$\r\n\r\n```text\r\n# inert heading\r\n```\r\n\r\n"
+            for i in range(3)
+        )
+        + "# Notation\r\n\r\nEvidence shared notation.\r\n\r\n![Plot](plot.png)\r\n",
+        "papers/one/source.md": "# First paper\n\nEvidence first paper qualifies the chapter.\n",
+        "papers/two/source.md": "# Second paper\n\nEvidence second paper contradicts the chapter.\n",
+    }
+    for name, text in texts.items():
+        path = config.source_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode())
+    Image.new("RGB", (4, 4), "red").save(config.source_dir / "chapter/plot.png")
+    rows = [
+        {
+            **source_attestation(representation_for(config.source_dir / name), config.source_dir),
+            "source_id": f"source-{index}",
+            "snapshot": name,
+            "url": "https://example.invalid/synthetic",
+            "title": "Synthetic fixture",
+            "retrieved_at": "2026-01-01",
+            "content_type": "text/markdown",
+        }
+        for index, name in enumerate(texts)
+    ]
+    (config.run_root / "source-manifest.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    project = tmp_path / "reading.yaml"
+    project.write_text(
+        yaml.safe_dump(
+            {
+                "corpus_dir": "synthetic",
+                "manifest_path": "manifest.jsonl",
+                "reading": {
+                    "sources": dict(zip(texts, ["chapter", "paper-one", "paper-two"])),
+                    "works": {key: {"title": None, "authors": None} for key in ("chapter", "paper-one", "paper-two")},
+                    "policy": {"target_tokens": 80, "soft_limit_tokens": 120, "context_budget_tokens": 40},
+                },
+                "acceptance": {"min_claims_per_reading": 1},
+            }
+        )
+    )
+    worker = tmp_path / "reading-worker-python"
+    worker.write_text(
+        f"#!{sys.executable}\n"
+        + """
+import json, pathlib, re, runpy, sys
+import httpx, openai
+original = openai.OpenAI
+capture = pathlib.Path(sys.argv[2]) / "reading-worker-prompts.jsonl"
+def respond(request):
+    body = json.loads(request.content)
+    prompt = body["messages"][0]["content"]
+    with capture.open("a") as handle:
+        handle.write(json.dumps(prompt) + "\\n")
+    name = re.search(r"\\[PRIMARY SOURCE (.+) L\\d+-\\d+\\]", prompt)[1]
+    excerpt = re.search(r"Evidence [^\\n]+(?:\\ntwo original lines\\.)?", prompt)[0]
+    parsed = {"claims": [{"claim": "A synthetic research finding", "source_file": name,
+                         "excerpt": excerpt, "locator": "assigned section", "stance": "supports", "confidence": 0.9}],
+              "conflicts": [], "coverage_notes": []}
+    return httpx.Response(200, json={"id":"reading", "object":"chat.completion", "created":1,
+        "model":body["model"], "choices":[{"index":0,"finish_reason":"stop",
+        "message":{"role":"assistant","content":json.dumps(parsed)}}],
+        "usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}})
+def client(**kwargs):
+    return original(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond)))
+openai.OpenAI = client
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+    )
+    worker.chmod(0o755)
+    config = dataclasses.replace(
+        config, project_path=project, worker_python=str(worker), question="Compare qualified findings."
+    )
+    result = ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    assert result["state"] == "READY_FOR_REVIEW"
+    assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
+    packet_bytes = {path.name: path.read_bytes() for path in (config.run_root / "evidence").glob("worker-*.json")}
+    prompt_bytes = (config.run_root / "reading-worker-prompts.jsonl").read_bytes()
+    changed_question = dataclasses.replace(
+        config, question="A different task", reuse_evidence_dir=config.run_root / "evidence"
+    )
+    changed_run = ResearchRun(changed_question, lambda **_: pytest.fail("question drift reached advisory"))
+    with pytest.raises(ValueError, match="question.*drift"):
+        changed_run._prepare()
+        changed_run._sources()
+    assert packet_bytes == {
+        path.name: path.read_bytes() for path in (config.run_root / "evidence").glob("worker-*.json")
+    }
+    assert (config.run_root / "reading-worker-prompts.jsonl").read_bytes() == prompt_bytes
+    plan = ReadingPlan.load(config.run_root / "reading-plan.json", {name: config.source_dir / name for name in texts})
+    assert len(plan.data["readings"]) >= 6
+    prompts = [json.loads(line) for line in (config.run_root / "reading-worker-prompts.jsonl").read_text().splitlines()]
+    assert len(prompts) == len(plan.data["readings"])
+    assert any("chapter/α source.md" in prompt for prompt in prompts)
+    claims = [json.loads(line) for line in (config.field_root / "evidence/claims.jsonl").read_text().splitlines()]
+    assert {row["independence_group"] for row in claims} == {"chapter", "paper-one", "paper-two"}
+    for claim in claims:
+        assert plan.project_claim(claim)["quote_span"] == claim["quote_span"]
+        original = (config.source_dir / claim["source_file"]).read_bytes()[
+            slice(*claim["quote_span"]["original_bytes"])
+        ]
+        assert original.decode().replace("\r\n", "\n") == claim["excerpt"]
+    calls = json.loads((tmp_path / "compiler-calls.json").read_text())
+    assert calls["citation_mappings"]
+    docs = tmp_path / "browser/docs"
+    subprocess.run(
+        [
+            sys.executable,
+            str(config.engine_root / "tools/wiki/build_wiki.py"),
+            "--vault",
+            str(config.field_root / "wiki"),
+            "--docs",
+            str(docs),
+        ],
+        check=True,
+    )
+    for name, source in plan.data["sources"].items():
+        bundle_root = config.run_root / "compiler-sources" / source["bundle_key"]
+        bundle = json.loads((bundle_root / "bundle.json").read_text())
+        prepared = (bundle_root / bundle["input_path"]).read_bytes()
+        raw_name = "raw/" + Path(bundle["input_path"]).name
+        assert subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + raw_name]) == prepared
+        original_name = "wiki/assets/" + source["bundle_key"] + "/original/" + name
+        assert (
+            subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + original_name])
+            == (config.source_dir / name).read_bytes()
+        )
+    generated = "\n".join(path.read_text() for path in (config.field_root / "wiki/concepts").glob("*.md"))
+    for record in calls["citation_mappings"]:
+        resolved = plan.section(record["section"])
+        assert "../" + resolved["target"] in generated
+        from urllib.parse import unquote
+
+        exported_original = docs / unquote(resolved["target"].split("#", 1)[0])
+        assert exported_original.read_bytes() == (config.source_dir / resolved["source_file"]).read_bytes()
+        assert record["original_bytes"] == resolved["original_bytes"]
+        assert (config.source_dir / resolved["source_file"]).read_bytes()[slice(*resolved["original_bytes"])]
+    assert (config.run_root / "verification/provenance.txt").exists()
+    assert (config.run_root / "verification/excerpt-grounding.txt").exists()
+    shutil.copytree(config.source_dir, config.run_root / "sources")
+    rehearsal = runpy.run_path(str(config.engine_root / "bin/dryrun_publication.py"))
+    rehearsal["main"].__globals__.update(FABRIC=config.engine_root, PROJECTS_DIR=tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dryrun_publication.py",
+            str(config.run_root),
+            str(config.field_root),
+            "--branch",
+            "agent/engine",
+            "--project",
+            "reading",
+        ],
+    )
+    assert rehearsal["main"]() == 0

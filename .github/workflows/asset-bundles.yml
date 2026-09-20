@@ -12,6 +12,8 @@ jobs:
   native-assets:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TIKTOKEN_CACHE_DIR: /tmp/research-fabric-tiktoken
     steps:
       - uses: actions/checkout@v7
         with:
@@ -25,7 +27,9 @@ jobs:
       - name: Install project and pinned native converter
         run: |
           uv venv
-          uv pip install -e . pytest ruff -r tests/native-requirements.txt openai-agents==0.17.3 openai==2.44.0
+          uv pip install -e ".[reading]" pytest ruff -r tests/native-requirements.txt openai-agents==0.17.3 openai==2.44.0
+      - name: Provision official tokenizer data for offline reading tests
+        run: .venv/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
       - name: Portable behavior and real renderer regressions
         run: .venv/bin/python -m pytest
       - name: Real native conversion and browser export, no model calls

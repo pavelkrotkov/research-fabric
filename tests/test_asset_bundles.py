@@ -205,7 +205,10 @@ def test_exporter_only_copies_manifest_closure_and_rejects_drift(tmp_path, field
         assets.publish_bundle(root, manifest, wiki, manifest["key"])
     docs = tmp_path / "docs"
     copied = assets.export_assets(wiki, docs)
-    assert len(copied) == 2
+    assert len(copied) == 3
+    original = f"assets/{manifest['key']}/original/{source.name}"
+    assert copied[original] == manifest["source"]["sha256"]
+    assert (docs / original).read_bytes() == source.read_bytes()
     assert (docs / published.relative_to(wiki)).read_bytes() == published.read_bytes()
     assert not list(docs.rglob("unreferenced.png"))
     native.write_bytes(b"tampered")
@@ -337,3 +340,22 @@ def test_reference_edits_preserve_container_text_and_unrelated_html(tmp_path, en
     assert '<div class="original">[Figure]$n!$</div>' in prepared
     assert 'Inline <code><img src="missing.png"></code> untouched.' in prepared
     assert len(manifest["assets"]) == 3
+
+
+def test_old_publication_requires_republish_for_original_document(tmp_path):
+    source = tmp_path / "paper.md"
+    source.write_bytes(b"# Original\r\n\r\nHard break  \r\nNext line\r\n")
+    manifest = prepare(source, tmp_path / "bundles")
+    root = tmp_path / "bundles" / manifest["key"]
+    wiki = tmp_path / "wiki"
+    assets.publish_bundle(root, manifest, wiki, manifest["key"])
+    original = f"assets/{manifest['key']}/original/paper.md"
+    (wiki / original).unlink()
+    before = (root / "bundle.json").read_bytes()
+    with pytest.raises(ValueError, match="republish from verified staging"):
+        assets.export_assets(wiki, tmp_path / "docs")
+    assets.publish_bundle(root, manifest, wiki, manifest["key"])
+    copied = assets.export_assets(wiki, tmp_path / "docs")
+    assert copied == {original: manifest["source"]["sha256"]}
+    assert (tmp_path / "docs" / original).read_bytes() == source.read_bytes()
+    assert (wiki / "assets" / manifest["key"] / "bundle.json").read_bytes() == before

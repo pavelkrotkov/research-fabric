@@ -6,8 +6,9 @@ import hashlib
 import pathlib
 import re
 from dataclasses import dataclass
+from itertools import accumulate
 
-from ._source_adapter import ADAPTERS, SourceAdapter
+from ._source_adapter import ADAPTERS, SourceAdapter, _lines
 
 REPRESENTATION_FIELDS = frozenset({"adapter", "adapter_version", "representation_encoding", "representation_sha256"})
 ASSET_HASH_FIELD = "assets_sha256"
@@ -25,6 +26,7 @@ class SourceRepresentation:
     assets: tuple[str, ...] = ()
     assets_sha256: str | None = None
     source_metadata: tuple[tuple[str, str], ...] = ()
+    original_line_offsets: tuple[int, ...] = ()
 
     @property
     def grounding_text(self) -> str:
@@ -33,11 +35,21 @@ class SourceRepresentation:
             return re.sub(r"<!--@@(?:chapter |section |asset |formula)[^>]*-->", " ", self.text)
         return self.text
 
+    def original_byte_offset(self, position: int) -> int:
+        """Map a Markdown character boundary back to its immutable UTF-8 snapshot."""
+        if self.adapter != "markdown" or not 0 <= position <= len(self.text):
+            raise ValueError("source position has no exact original-byte mapping")
+        line = self.text.count("\n", 0, position)
+        column_start = self.text.rfind("\n", 0, position) + 1
+        return self.original_line_offsets[line] + len(self.text[column_start:position].encode("utf-8"))
 
-def source_attestation(rep: SourceRepresentation) -> dict[str, str]:
+
+def source_attestation(rep: SourceRepresentation, source_root: pathlib.Path | None = None) -> dict:
     """Return the exact source input attestation consumed by a worker."""
     return {
-        "source_file": rep.path.name,
+        "source_file": rep.path.resolve().relative_to(source_root.resolve()).as_posix()
+        if source_root is not None
+        else rep.path.name,
         "sha256": rep.original_sha256,
         **_representation_metadata(rep),
     }
@@ -89,6 +101,11 @@ def representation_for(path: pathlib.Path, adapters: tuple[SourceAdapter, ...] =
         assets=assets,
         assets_sha256=_assets_sha256(path, assets),
         source_metadata=source_metadata,
+        original_line_offsets=(
+            tuple(accumulate((len(line.encode("utf-8")) for line in _lines(decoded)), initial=0))
+            if adapter.name == "markdown"
+            else ()
+        ),
     )
 
 
@@ -100,11 +117,14 @@ def source_bundle(path: pathlib.Path) -> tuple[tuple[pathlib.Path, pathlib.Path]
 
 
 def source_provenance(
-    source_files: list[pathlib.Path], adapters: tuple[SourceAdapter, ...] = ADAPTERS
+    source_files: list[pathlib.Path],
+    adapters: tuple[SourceAdapter, ...] = ADAPTERS,
+    *,
+    source_root: pathlib.Path | None = None,
 ) -> list[dict[str, str]]:
     """Hash and describe the representations supplied to one worker."""
     return sorted(
-        (source_attestation(representation_for(path, adapters)) for path in source_files),
+        (source_attestation(representation_for(path, adapters), source_root) for path in source_files),
         key=lambda row: row["source_file"],
     )
 
@@ -198,53 +218,69 @@ def _manifest_representation(source: pathlib.Path, adapters: tuple[SourceAdapter
         raise RuntimeError(f"source representation invalid for {source.name}: {exc}") from exc
 
 
-def bind_manifest(
-    source_files: list[pathlib.Path], rows: list[dict], adapters: tuple[SourceAdapter, ...] = ADAPTERS
-) -> list[dict]:
-    """Verify original bytes and bind exact worker-representation provenance."""
+def _manifest_rows(rows, source_root):
     by_name = {}
     for row in rows:
-        name = pathlib.Path(row.get("snapshot", "")).name
+        name = row.get("source_file") if source_root is not None else pathlib.Path(row.get("snapshot", "")).name
         if not name:
             raise RuntimeError("source manifest row missing snapshot")
         if name in by_name:
             raise RuntimeError(f"duplicate source manifest entry: {name}")
         by_name[name] = row
-    bound = []
-    for source in source_files:
-        row = by_name.get(source.name)
-        if row is None:
-            raise RuntimeError(f"source manifest has no entry for {source.name}")
-        rep = _manifest_representation(source, adapters)
-        if rep.original_sha256 != row.get("sha256"):
-            raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
-        bound.append(_bind_representation(row, rep, source))
-    return bound
+    return by_name
 
 
-def prepare_source_bundle(source: pathlib.Path, destination: pathlib.Path, attestation: dict) -> dict:
+def _bound_manifest_row(source, rows, adapters, source_root, representations):
+    name = source.relative_to(source_root).as_posix() if source_root is not None else source.name
+    row = rows.get(name)
+    if row is None:
+        raise RuntimeError(f"source manifest has no entry for {source.name}")
+    rep = representations[source] if representations is not None else _manifest_representation(source, adapters)
+    if rep.original_sha256 != row.get("sha256"):
+        raise RuntimeError(f"sha256 mismatch: {source.name}: {row.get('sha256')} != {rep.original_sha256}")
+    return _bind_representation(row, rep, source)
+
+
+def bind_manifest(
+    source_files: list[pathlib.Path],
+    rows: list[dict],
+    adapters: tuple[SourceAdapter, ...] = ADAPTERS,
+    *,
+    source_root: pathlib.Path | None = None,
+    representations: dict | None = None,
+) -> list[dict]:
+    """Verify original bytes and bind exact worker-representation provenance."""
+    by_name = _manifest_rows(rows, source_root)
+    return [_bound_manifest_row(source, by_name, adapters, source_root, representations) for source in source_files]
+
+
+def prepare_source_bundle(
+    source: pathlib.Path, destination: pathlib.Path, attestation: dict, *, source_root: pathlib.Path | None = None
+) -> dict:
     """Extend the existing source attestation with a frozen visual asset closure."""
     from ._source_assets import prepare_bundle
 
-    if source_attestation(representation_for(source)) != attestation:
+    if source_attestation(representation_for(source), source_root) != attestation:
         raise ValueError(f"source bundle attestation drift: {source.name}")
     return prepare_bundle(source, destination, attestation)
 
 
-def snapshot_relative(source: pathlib.Path) -> pathlib.Path:
+def snapshot_relative(source: pathlib.Path, source_root: pathlib.Path | None = None) -> pathlib.Path:
     from ._source_assets import bundle_key
 
-    attestation = source_attestation(representation_for(source))
+    attestation = source_attestation(representation_for(source), source_root)
     return pathlib.Path(bundle_key(attestation)) / source.name
 
 
-def copy_source_snapshot(source: pathlib.Path, snapshots: pathlib.Path) -> pathlib.Path:
+def copy_source_snapshot(
+    source: pathlib.Path, snapshots: pathlib.Path, *, source_root: pathlib.Path | None = None
+) -> pathlib.Path:
     """The original document and local assets share one collision-free namespace."""
     import shutil
 
     from ._source_assets import safe_path
 
-    relative = snapshot_relative(source)
+    relative = snapshot_relative(source, source_root)
     for original, asset_relative in source_bundle(source):
         destination = safe_path(snapshots, (relative.parent / asset_relative).as_posix())
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -256,3 +292,49 @@ def copy_source_snapshot(source: pathlib.Path, snapshots: pathlib.Path) -> pathl
         shutil.copy2(original, destination)
         destination.chmod(0o444)
     return snapshots / relative
+
+
+def _reading_tokenizer():
+    """Use the qualified BPE data, explicitly provisioned before an offline run."""
+    import importlib.metadata
+    import os
+    import platform
+
+    import tiktoken
+
+    cache = os.environ.get("TIKTOKEN_CACHE_DIR")
+    url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    expected = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+    path = pathlib.Path(cache or "") / hashlib.sha1(url.encode()).hexdigest()
+    if not cache or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise ValueError("provision verified cl100k_base data in TIKTOKEN_CACHE_DIR before reading-plan preparation")
+    encoding = tiktoken.get_encoding("cl100k_base")
+    record = {
+        "encoding": encoding.name,
+        "package": importlib.metadata.version("tiktoken"),
+        "python": platform.python_version(),
+        "data_sha256": expected,
+        "count_semantics": "cl100k_base BPE; source/context counted separately; not provider usage",
+    }
+    return encoding, record
+
+
+def preserve_original_bytes(field_root):
+    """Original snapshots and native raw input copies are data, with readable Git diffs."""
+    from .claims import atomic_write_text
+
+    path = field_root / ".gitattributes"
+    original = path.read_bytes().decode("utf-8") if path.exists() else ""
+    current = original.replace("\r\n", "\n").replace("\r", "\n")
+    rules = (
+        "evidence/snapshots/** -text -whitespace",
+        "wiki/assets/**/original/** -text -whitespace",
+        "raw/** -text -whitespace",
+        "wiki/sources/** -text -whitespace",
+    )
+    block = "\n".join(rules) + "\n"
+    if not current.endswith(block):
+        separator = "" if not current or current.endswith("\n") else "\n"
+        current += separator + block
+    if current != original:
+        atomic_write_text(path, current)
