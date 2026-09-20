@@ -6,11 +6,32 @@ filesystem writes or subprocesses. Constructing a `ResearchRun` is also inert;
 journal, claim identity, source adapters, gates and terminal-state owner remain
 authoritative.
 
-`publication.materialize_evidence` projects accepted packets and bound source
-rows into the existing ledgers and packet histories. It reads each packet once
-and returns the projected claims. The engine still runs the gates and delegates
-the proposed commit to `run_state.finalize_run`; materialization cannot declare
-a run ready. The rehearsal does not yet share this operation (#18).
+`publication.publish_candidate` is the single post-compilation publication
+operation used by both the engine and `bin/dryrun_publication.py`. Its prepared
+input is an accepted compile receipt, accepted evidence packets, frozen source
+files plus manifest, and an isolated compiled candidate. It revalidates packet
+and source revisions, materializes the ledgers/snapshots, runs the real
+deterministic provenance/grounding gates, snapshots the complete generated diff,
+records advisory availability, and creates/verifies the proposed Git commit.
+Generated `wiki/`, `evidence/`, `raw/`, and `.gitattributes` outputs share
+one staging policy; an empty diff, stale compiled output, ignored output, commit
+rewrite/failure, or dirty post-commit tree cannot succeed.
+
+The publisher does **not** compile, plan, call models, merge main, or set terminal
+run state. Production may supply an advisory callback, but its result never
+overrides a deterministic gate. Offline rehearsal supplies no advisory callback,
+so the review record says `unavailable` rather than inventing success. The
+rehearsal copies both the prepared run and candidate into a disposable directory;
+the input run and KB are read-only. After a validated publication result returns,
+only `ResearchRun` calls `run_state.record_ready`.
+
+Parity is exercised in the native workflow fixture: the same prepared candidate
+and accepted run are published once by `ResearchRun` and once by the rehearsal,
+then normalized ledgers, gate outcomes, changed/tracked publication files and
+output bytes are compared. Portable publication tests cover source-manifest and
+claim mapping failures, stale evidence/candidate revisions, deterministic gate
+failure, commit/dirty-tree failures, missing compiled outputs and the shared
+empty-diff rejection.
 
 ```python
 from pathlib import Path

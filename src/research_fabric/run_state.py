@@ -39,12 +39,9 @@ def run_lifecycle(run_root):
         raise
 
 
-def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None, reviewed=None):
-    """A proposed commit is ready only after provenance and clean-tree checks."""
+def commit_publication(kb, message, *, compiled=None, reviewed=None):
+    """Create and verify the isolated proposed commit without declaring a run ready."""
     assert_run_branch(kb)
-    record = provenance()
-    if not isinstance(record, dict) or not record:
-        raise CompilationError("Missing run provenance")
     outputs = _publication_outputs(kb)
     _verify_reviewed_outputs(kb, outputs, reviewed)
     if compiled is not None:
@@ -58,17 +55,33 @@ def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None, re
     branch = _git(kb, "branch", "--show-current")
     if _git(kb, "status", "--porcelain"):
         raise CompilationError("Worktree dirty after commit; proposed commit is not accepted")
+    return {"branch": branch, "commit": head, "evidence": str(Path(kb) / "evidence"), "outputs": outputs}
+
+
+def record_ready(run_root, claims, provenance, publication):
+    """The engine alone turns a validated publication outcome into terminal READY."""
+    if not isinstance(provenance, dict) or not provenance:
+        raise CompilationError("Missing run provenance")
     result = {
         "run_id": Path(run_root).name,
         "state": "READY_FOR_REVIEW",
-        "branch": branch,
-        "commit": head,
+        "branch": publication["branch"],
+        "commit": publication["commit"],
         "claims": claims,
-        "evidence": str(Path(kb) / "evidence"),
-        "provenance": record,
+        "evidence": publication["evidence"],
+        "provenance": provenance,
     }
     write_json(Path(run_root) / "run.json", result)
     return result
+
+
+def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None, reviewed=None):
+    """Compatibility wrapper: validate provenance, commit, then record READY."""
+    record = provenance()
+    if not isinstance(record, dict) or not record:
+        raise CompilationError("Missing run provenance")
+    publication = commit_publication(kb, message, compiled=compiled, reviewed=reviewed)
+    return record_ready(run_root, claims, record, publication)
 
 
 def _publication_outputs(kb):
@@ -92,19 +105,13 @@ def _verify_reviewed_outputs(kb, outputs, reviewed):
 
 
 def _verify_compiled_outputs(outputs, compiled):
-    """Compilation pages must survive later phases with their attested bytes.
-
-    The native operations log and lint reports intentionally change after
-    compilation. Required summary/concept/entity pages and index do not.
-    Ledger/snapshot output is included separately in the final publication
-    snapshot, so this does not create a second compiled-output audit.
-    """
+    """Required compiled pages must survive publication with their attested bytes."""
     paths = {"wiki/index.md"}
     for source in compiled["sources"]:
         paths.add(f"wiki/summaries/{source['summary']}.md")
         paths.update(f"wiki/{folder}/{slug}.md" for folder, _, slug in source["required"])
     for path in paths:
-        if path not in outputs or outputs[path] != compiled["outputs"][path]:
+        if path not in outputs or outputs[path] != compiled["outputs"].get(path):
             raise CompilationError(f"Required compiled output changed or disappeared: {path}")
 
 
@@ -117,13 +124,7 @@ def _require_tracked(kb, outputs):
 
 
 def _verify_commit(kb, head, outputs):
-    """Bind accepted bytes to actual Git blobs, including changes by hooks.
-
-    A clean worktree is insufficient if a commit hook rewrote both the index
-    and working copy. Read the proposed commit itself and compare it to the
-    snapshot taken after gates and before staging. Never force-add ignored
-    native/auth state, and leave rejected proposed commits on the run branch.
-    """
+    """Bind accepted bytes to actual Git blobs, including changes by hooks."""
     for path, expected in outputs.items():
         blob = subprocess.run(
             ["git", "-C", str(kb), "cat-file", "blob", f"{head}:{path}"], capture_output=True, check=True
