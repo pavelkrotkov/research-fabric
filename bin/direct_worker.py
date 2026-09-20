@@ -64,7 +64,8 @@ def main():
         project_path = pathlib.Path(sys.argv[5])
         from research_fabric._source_assets import safe_path
         from research_fabric.core import load_project
-        from research_fabric.sources import ReadingPlan, source_provenance
+        from research_fabric.reading import ReadingPlan
+        from research_fabric.sources import source_provenance
 
         project = load_project(project_path.parent, project_path.stem)
         plan = ReadingPlan.load(
