@@ -108,7 +108,15 @@ def _page_defects(page, wiki, citations, citation_paths):
 
 
 def _wiki_pages(wiki):
-    return (page for page in wiki.rglob("*.md") if page.is_file())
+    """Semantic wiki pages only; native source views/policies have their own validators."""
+    excluded = {"sources", "assets", "reports"}
+    return (
+        page
+        for page in wiki.rglob("*.md")
+        if page.is_file()
+        and page.name != "AGENTS.md"
+        and page.relative_to(wiki).parts[0] not in excluded
+    )
 
 
 def audit_compiled_wiki(kb, verification):
