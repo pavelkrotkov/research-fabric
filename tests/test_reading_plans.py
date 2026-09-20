@@ -2,7 +2,8 @@
 
 import pytest
 
-from research_fabric.sources import prepare_reading_plan, representation_for, source_attestation
+from research_fabric.reading import prepare_reading_plan
+from research_fabric.sources import representation_for, source_attestation
 
 
 def prepare(tmp_path, texts, **profile_changes):
@@ -235,7 +236,7 @@ def test_frozen_plan_loader_rejects_rehashed_context_and_current_source_drift(tm
     import json
 
     from research_fabric.claims import stable_revision
-    from research_fabric.sources import ReadingPlan
+    from research_fabric.reading import ReadingPlan
 
     plan, _, root, _, _ = prepare(tmp_path, {"a.md": "# A\r\n\r\nAlpha.\r\n", "b.md": "# B\n\nBeta.\n"})
     reading = plan.data["readings"][0]
