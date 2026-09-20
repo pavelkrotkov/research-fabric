@@ -12,14 +12,13 @@ model results. Apply one `variants/*.patch` to a fresh `after/` copy with
 | qualifier | Drops “only in dry indoor conditions” | Did the result become overgeneralized? |
 | count | Changes Study A's 24 to Study B's 80 | Was enrollment copied across sources? |
 | relocation | Moves the qualified result to linked `drift.md` | Is the supported detail preserved in the linked scope? |
-| broken-page | Links to absent `missing-sensor` | Pending mechanical wiki-link rejection |
-| broken-asset | References absent `missing-plot.png` | Pending mechanical target/asset binding |
+| broken-page | Links to absent `missing-sensor` | Mechanical wiki-link rejection |
+| broken-asset | References absent `missing-plot.png` | Mechanical target/asset rejection |
 
 `advisory.json` contains plain scripted replies with explicit scope, before/after
 and source evidence, and uncertainty. It also includes a malformed reply and an
 unavailable-review case. There is deliberately no new response protocol/parser
-or assertion that a live model will detect these changes. Future #13 handling
-must record adverse/unavailable opinions without making them semantic gates.
+or assertion that a live model will detect these changes. #13 handling records adverse/unavailable opinions without making them semantic gates.
 
 Current tests show that provenance/excerpt gates alone accept all five wiki
 variants, while the compiled-wiki audit rejects broken page/asset links and
