@@ -10,7 +10,8 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-from research_fabric.sources import ReadingPlan, representation_for, source_attestation  # noqa: E402
+from research_fabric.reading import ReadingPlan  # noqa: E402
+from research_fabric.sources import representation_for, source_attestation  # noqa: E402
 
 SOURCE_KEYS = {"source_id", "url", "title", "retrieved_at", "content_type", "sha256", "snapshot"}
 REPRESENTATION_KEYS = {"adapter", "adapter_version", "representation_encoding", "representation_sha256"}
