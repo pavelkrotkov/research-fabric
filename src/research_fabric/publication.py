@@ -5,6 +5,10 @@ import json
 from research_fabric.compilation import write_json
 
 
+def _reading_projection(reading_plan, claim):
+    return reading_plan.project_claim(claim) if reading_plan else {}
+
+
 def _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading_plan):
     source_id = sources.get(claim.get("source_file", ""))
     if not source_id:
@@ -40,8 +44,7 @@ def _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading
             english_witness=claim.get("english_witness"),
             witnesses_consulted=claim.get("witnesses_consulted", []),
         )
-    if reading_plan:
-        row.update(reading_plan.project_claim(claim))
+    row.update(_reading_projection(reading_plan, claim))
     return row
 
 
