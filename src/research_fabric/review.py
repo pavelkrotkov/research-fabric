@@ -62,9 +62,10 @@ def _citation_defect(label, relative, fragment, citations, citation_paths):
     if citations is None:
         return None
     key = relative + (f"#{fragment}" if fragment else "")
-    if relative in citation_paths and key not in citations:
-        return f"{label}: citation does not match frozen source section"
-    if "/original/" in relative and relative.endswith(".md") and relative not in citation_paths:
+    if relative in citation_paths:
+        if key not in citations:
+            return f"{label}: citation does not match frozen source section"
+    elif "/original/" in relative and relative.endswith(".md"):
         return f"{label}: original-source citation is not in frozen reading plan"
     return None
 
