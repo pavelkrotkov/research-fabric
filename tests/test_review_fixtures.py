@@ -36,9 +36,7 @@ def test_publication_inventory_and_compile_bytes_cover_candidate(candidate):
     before = _git(candidate, "rev-parse", "HEAD")
     outputs = _publication_outputs(candidate)
     expected = {
-        path.relative_to(FIXTURE / "after").as_posix()
-        for path in (FIXTURE / "after").rglob("*")
-        if path.is_file()
+        path.relative_to(FIXTURE / "after").as_posix() for path in (FIXTURE / "after").rglob("*") if path.is_file()
     }
     assert set(outputs) == expected
     compiled = {
