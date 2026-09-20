@@ -1,4 +1,4 @@
-"""Materialize accepted evidence; gates and terminal publication remain separate."""
+"""Shared post-compilation publication for production and offline rehearsal."""
 
 import json
 
