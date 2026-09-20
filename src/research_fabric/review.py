@@ -9,6 +9,7 @@ import re
 from urllib.parse import unquote, urlsplit
 
 from ._reading_plan import published_reading_plan
+from ._source_assets import published_assets
 from .compilation import CompilationError, _git, write_json
 from .run_state import _publication_outputs
 
@@ -127,6 +128,11 @@ def audit_compiled_wiki(kb, verification):
         citations, citation_paths = None, set()
         defects.append(f"invalid published reading plan: {exc}")
     wiki = kb / "wiki"
+    try:
+        asset_hashes = published_assets(wiki)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        asset_hashes = {}
+        defects.append(f"invalid published asset bundle: {exc}")
     for page in _changed_pages(kb, changed):
         defects.extend(_page_defects(page, wiki, citations, citation_paths))
     if not diff.strip():
@@ -142,6 +148,7 @@ def audit_compiled_wiki(kb, verification):
         "changed": changed,
         "diff_sha256": diff_sha,
         "diff_bytes": len(diff.encode()),
+        "asset_manifest_hashes": asset_hashes,
         "mechanical": {"ok": not defects, "defects": defects},
         "limitations": [
             "Byte/link/source-span checks do not establish semantic support or completeness.",
