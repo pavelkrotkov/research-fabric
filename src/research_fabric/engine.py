@@ -194,7 +194,7 @@ class ResearchRun:
 
     def _sources(self):
         if "reading" in self.project:
-            from .sources import prepare_reading_plan
+            from .reading import prepare_reading_plan
 
             self._bind_manifest(reading=True, bind=False)
             self.reading_plan, self.bundles = prepare_reading_plan(
