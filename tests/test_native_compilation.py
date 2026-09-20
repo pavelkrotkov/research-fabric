@@ -431,11 +431,58 @@ cli.cli()
         assert (tmp_path / "docs" / original_path).read_bytes() == src.read_bytes()
         import shutil
 
+        from research_fabric.compilation import _git, _tree
+        from research_fabric.run_state import _publication_outputs
+
         shutil.copytree(sources, run / "sources")
+        prepared = tmp_path / "prepared"
+        _git(tmp_path, "clone", "--quiet", "--no-hardlinks", str(kb), str(prepared))
+        _git(prepared, "config", "user.email", "fixture@example.invalid")
+        _git(prepared, "config", "user.name", "Fixture")
+        # Retain actual native pages/assets/snapshots; remove derived publication records only.
+        records = ("claims.jsonl", "sources.jsonl", "claim-history.json", "packet-execution.json")
+        _git(prepared, "rm", "--", *(f"evidence/{name}" for name in records))
+        _git(prepared, "commit", "-m", "Prepared native candidate without published ledgers")
+        prepared_head = _git(prepared, "rev-parse", "HEAD")
+        original_run = _tree(run)
+        native_calls = (tmp_path / "calls.json").read_bytes()
+        production_files = set(_git(kb, "ls-files", "--", "wiki", "evidence").splitlines())
+        production_outputs = _publication_outputs(kb)
+        observed = {}
         rehearsal = runpy.run_path(str(root / "bin/dryrun_publication.py"))
-        rehearsal["main"].__globals__.update(FABRIC=root, PROJECTS_DIR=projects)
-        monkeypatch.setattr(sys, "argv", ["dryrun_publication.py", str(run), str(kb), "--branch", "agent/workflow"])
+        namespace = rehearsal["main"].__globals__
+        namespace.update(FABRIC=root, PROJECTS_DIR=projects)
+        real_commit = namespace["_commit"]
+
+        def observe_commit(destination, *args):
+            status = real_commit(destination, *args)
+            observed["files"] = set(_git(destination, "ls-files", "--", "wiki", "evidence").splitlines())
+            observed["outputs"] = _publication_outputs(destination)
+            observed["claims"] = [
+                json.loads(line) for line in (destination / "evidence/claims.jsonl").read_text().splitlines()
+            ]
+            return status
+
+        monkeypatch.setitem(namespace, "_commit", observe_commit)
+        monkeypatch.setattr(
+            sys, "argv", ["dryrun_publication.py", str(run), str(prepared), "--branch", "agent/workflow"]
+        )
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         assert rehearsal["main"]() == 0
+        # Characterize real differences; do not normalize missing provenance or fields away.
+        assert observed["claims"] == [
+            dict(row, claim_type="", english_witness=None, witnesses_consulted=[]) for row in ledger
+        ]
+        assert production_files - observed["files"] == {"evidence/packet-execution.json"}
+        assert observed["files"] - production_files == {"evidence/accepted-packets/worker-book-1.json"}
+        shared = production_files & observed["files"] - {"evidence/claims.jsonl"}
+        assert {name: observed["outputs"][name] for name in shared} == {
+            name: production_outputs[name] for name in shared
+        }
+        assert _tree(run) == original_run
+        assert (tmp_path / "calls.json").read_bytes() == native_calls
+        assert _git(prepared, "rev-parse", "HEAD") == prepared_head
+        assert _git(prepared, "status", "--porcelain") == ""
     assert (run / "verification/provenance.txt").exists()
     assert (run / "verification/excerpt-grounding.txt").exists()
     assert subprocess.check_output(["git", "-C", str(kb), "status", "--porcelain"]) == b""
