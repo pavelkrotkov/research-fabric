@@ -108,6 +108,22 @@ def test_invalid_published_reading_plan_is_mechanical_failure(candidate, tmp_pat
         audit_compiled_wiki(candidate, tmp_path / "review")
 
 
+def test_published_asset_manifest_drift_is_mechanical_failure(candidate, tmp_path):
+    from research_fabric._source_assets import prepare_bundle, publish_bundle
+    from research_fabric.sources import representation_for, source_attestation
+
+    source = tmp_path / "source.md"
+    source.write_text("# Source\n\nEvidence.\n")
+    staging = tmp_path / "bundle"
+    manifest = prepare_bundle(source, staging, source_attestation(representation_for(source)))
+    root = staging / manifest["key"]
+    publish_bundle(root, manifest, candidate / "wiki", Path(manifest["input_path"]).stem)
+    published = candidate / "wiki/assets" / manifest["key"] / "original" / source.name
+    published.write_text("tampered")
+    with pytest.raises(CompilationError, match="invalid published asset bundle.*drift"):
+        audit_compiled_wiki(candidate, tmp_path / "review")
+
+
 def test_review_snapshot_invalidates_later_candidate_change(candidate, tmp_path):
     report = audit_compiled_wiki(candidate, tmp_path / "review")
     page = candidate / "wiki/entities/sensor.md"
