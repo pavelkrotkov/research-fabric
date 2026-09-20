@@ -272,12 +272,11 @@ def publish_bundle(root: pathlib.Path, manifest: dict, wiki: pathlib.Path, doc_n
     _write(wiki, f"assets/{manifest['key']}/bundle.json", manifest_bytes)
 
 
-def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
-    """Exporter consumes validated paths, never rediscovers source references."""
+def published_assets(wiki: pathlib.Path) -> dict[str, str]:
+    """Verify published bundle manifests and return their attested file hashes."""
     files = {}
     for path in (wiki / "assets").glob("*/bundle.json"):
-        manifest_bytes = _read(safe_path(wiki, path.relative_to(wiki).as_posix()))
-        manifest = json.loads(manifest_bytes)
+        manifest = json.loads(_read(safe_path(wiki, path.relative_to(wiki).as_posix())))
         if path.parent.name != manifest["key"]:
             raise ValueError("published bundle directory identity drift")
         doc_name = pathlib.Path(manifest["input_path"]).stem
@@ -285,12 +284,20 @@ def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
             published = safe_path(wiki, relative)
             if not published.is_file():
                 raise ValueError(f"published bundle incomplete; republish from verified staging: {relative}")
-            data = _read(published)
-            if digest(data) != expected:
+            if digest(_read(published)) != expected:
                 raise ValueError(f"published asset drift: {relative}")
-            _write(docs, relative, data)
             files[relative] = expected
-        _write(docs, path.relative_to(wiki).as_posix(), manifest_bytes)
+    return files
+
+
+def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
+    """Exporter consumes validated paths, never rediscovers source references."""
+    files = published_assets(wiki)
+    for relative in files:
+        _write(docs, relative, _read(safe_path(wiki, relative)))
+    for path in (wiki / "assets").glob("*/bundle.json"):
+        relative = path.relative_to(wiki).as_posix()
+        _write(docs, relative, _read(safe_path(wiki, relative)))
     return files
 
 

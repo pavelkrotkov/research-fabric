@@ -1,0 +1,7 @@
+{
+  "qualifier": "Scope: compared evidence/snapshots/study-a.md paragraph 1 with wiki/entities/sensor.md paragraph 1 before and after. Before: \"only in dry indoor conditions\". After: that qualification is absent. Source: \"the sensor reduced drift only in dry indoor conditions\". Advisory: possible overgeneralization; inspect the conditions. Uncertainty: no other pages were reviewed; this is not an exhaustive omission check.",
+  "count": "Scope: compared both source snapshots with wiki/entities/sensor.md. Study A says \"24 participants\"; Study B says \"80 participants\" and \"did not evaluate drift\". Before: Study A had 24 participants. After: the entity attributes 80 to Study A. Advisory: likely cross-source overwrite, not a newly established result. Uncertainty: only these two sources and this page were reviewed.",
+  "relocation": "Scope: compared wiki/entities/sensor.md before/after and followed its [[drift]] link to wiki/concepts/drift.md, against evidence/snapshots/study-a.md paragraph 1. The qualified 24-participant result moved to drift.md with [[study-a]] attribution. Advisory: no loss observed for this detail in the reviewed linked pages. Uncertainty: this does not certify other details or the full wiki.",
+  "malformed": "Findings follow later.",
+  "unavailable": null
+}
