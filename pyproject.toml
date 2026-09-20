@@ -17,8 +17,12 @@ dependencies = [
     "boltons==25.0.0",
 ]
 
+[project.optional-dependencies]
+reading = ["tiktoken==0.14.0"]
+
 [dependency-groups]
 dev = [
+    "research-fabric[reading]",
     "pre-commit>=4.6.2",
     "pip-audit>=2.10.1",
     "pytest>=8.0",

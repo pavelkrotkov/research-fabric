@@ -72,12 +72,15 @@ def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None):
 
 def _publication_outputs(kb):
     """Snapshot every publication artifact, excluding private native state."""
-    return {
+    outputs = {
         str(path.relative_to(kb)): digest(path)
-        for folder in ("wiki", "evidence")
+        for folder in ("wiki", "evidence", "raw")
         for path in (Path(kb) / folder).rglob("*")
         if path.is_file()
     }
+    if (Path(kb) / ".gitattributes").is_file():
+        outputs[".gitattributes"] = digest(Path(kb) / ".gitattributes")
+    return outputs
 
 
 def _verify_compiled_outputs(outputs, compiled):

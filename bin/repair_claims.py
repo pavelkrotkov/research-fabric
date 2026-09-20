@@ -84,6 +84,10 @@ def _repair_target(target, source_dir, model, grounded, adapters):
     result = extract_json(model(prompt))
     if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
         raise ValueError("repair response requires a boolean found field")
+    if "reading" in claim and result["found"]:
+        from research_fabric.reading import exact_excerpt
+
+        exact_excerpt(body, result.get("excerpt"))
     return _replacement(result, body, grounded)
 
 
@@ -104,8 +108,10 @@ def _process_targets(targets, store, source_dir, report_id, model, grounded, ada
             session = worker_session(
                 run_root, "repair", target.claim_id, [source_dir / target.claim["source_file"]], project
             )
+
             def callback(prompt):
                 return call_model(prompt, session)
+
         try:
             action, excerpt, reason = _repair_target(target, source_dir, callback, grounded, adapters)
         except Exception as exc:
@@ -126,6 +132,34 @@ def _process_targets(targets, store, source_dir, report_id, model, grounded, ada
     if errors:
         raise ClaimIdentityError("repair did not resolve every target: " + "; ".join(errors))
     return counts
+
+
+def _reading_claims(packets):
+    return [
+        claim
+        for packet in packets.values()
+        for claim in packet["claim_source_bindings"].values()
+        if "reading" in claim
+    ]
+
+
+def _reading_plan(run_root, source_dir, project, packets):
+    claims = _reading_claims(packets)
+    if not claims:
+        return None
+    if not project or "reading" not in project:
+        raise ClaimIdentityError("reading repair requires its source-mapped project")
+    from research_fabric._source_assets import safe_path
+    from research_fabric.reading import ReadingPlan
+
+    plan = ReadingPlan.load(
+        run_root / "reading-plan.json",
+        {name: safe_path(source_dir, name) for name in project["reading"]["sources"]},
+        project["reading"],
+    )
+    for claim in claims:
+        plan.validate_claim(claim)
+    return plan
 
 
 def repair_claims(
@@ -161,6 +195,7 @@ def repair_claims(
     report = Report.read(pathlib.Path(report_path), store.packets, source_dir)
     targets = report.targets(store.packets)
     preflight(field_root, project)
+    plan = _reading_plan(run_root, source_dir, project, store.packets)
     counts = _process_targets(
         targets, store, source_dir, report.report_id, model, grounded, adapters, run_root, project
     )
@@ -173,6 +208,7 @@ def repair_claims(
         alignment_path,
         grounded,
         adapters,
+        reading_plan=plan,
     )
     return {
         "repaired": counts["repair"],

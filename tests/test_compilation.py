@@ -170,12 +170,13 @@ def test_input_drift_is_rejected_before_candidate_application(repo, tmp_path, ex
     assert git(repo, "status", "--porcelain") == ""
 
 
-def test_clean_commit_hook_rewrite_is_not_accepted(repo, tmp_path):
-    page = repo / "wiki/page.md"
-    page.parent.mkdir()
+@pytest.mark.parametrize("target", ["wiki/page.md", ".gitattributes"])
+def test_clean_commit_hook_rewrite_is_not_accepted(repo, tmp_path, target):
+    page = repo / target
+    page.parent.mkdir(exist_ok=True)
     page.write_text("gated bytes\n")
     hook = repo / ".git/hooks/pre-commit"
-    hook.write_text("#!/bin/sh\nprintf 'changed after gates\\n' > wiki/page.md\ngit add wiki/page.md\n")
+    hook.write_text(f"#!/bin/sh\nprintf 'changed after gates\\n' > {target}\ngit add {target}\n")
     hook.chmod(0o755)
     run = tmp_path / "run"
     with pytest.raises(CompilationError, match="changed publication"), run_lifecycle(run):
@@ -247,3 +248,14 @@ def test_initial_state_write_failure_does_not_enter_run(tmp_path, monkeypatch):
     monkeypatch.setattr(run_state, "write_json", reject_write)
     with pytest.raises(OSError, match="initial state write failed"), run_state.run_lifecycle(tmp_path):
         pytest.fail("execution began without the initial state record")
+
+
+def test_ignored_source_byte_policy_cannot_be_published(repo, tmp_path):
+    from research_fabric.sources import preserve_original_bytes
+
+    (repo / ".gitignore").write_text(".gitattributes\n")
+    preserve_original_bytes(repo)
+    run = tmp_path / "run"
+    with pytest.raises(CompilationError, match="ignored/untracked.*gitattributes"), run_lifecycle(run):
+        finalize_run(repo, run, "proposal", 1, lambda: {"fixture": True})
+    assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
