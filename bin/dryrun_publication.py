@@ -273,7 +273,13 @@ def main() -> int:
     snap_dest = _publish_sources(field_root, source_files, source_root)
     _published_notes(field_root, source_files, note_by_source, source_by_file, source_root)
     claims = _materialize_claims(
-        run_root / "evidence", field_root, note_by_source, source_by_file, run_root / "sources", reading_plan
+        run_root / "evidence",
+        field_root,
+        note_by_source,
+        source_by_file,
+        run_root / "sources",
+        reading_plan,
+        project.get("acceptance") or {},
     )
     if claims is None:
         return 1
