@@ -338,4 +338,3 @@ def preserve_original_bytes(field_root):
         current += separator + block
     if current != original:
         atomic_write_text(path, current)
-
