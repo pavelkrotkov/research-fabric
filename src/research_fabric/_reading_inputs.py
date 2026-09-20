@@ -231,4 +231,3 @@ def _budget(reading, sections, representations, encoding):
         )
         for role in ("primary", "context")
     }
-
