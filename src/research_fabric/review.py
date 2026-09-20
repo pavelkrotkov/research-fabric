@@ -113,9 +113,7 @@ def _wiki_pages(wiki):
     return (
         page
         for page in wiki.rglob("*.md")
-        if page.is_file()
-        and page.name != "AGENTS.md"
-        and page.relative_to(wiki).parts[0] not in excluded
+        if page.is_file() and page.name != "AGENTS.md" and page.relative_to(wiki).parts[0] not in excluded
     )
 
 
