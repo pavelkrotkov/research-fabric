@@ -92,8 +92,17 @@ def test_deleted_page_breaking_unchanged_referrer_is_rejected(candidate, tmp_pat
     _git(candidate, "add", ".")
     _git(candidate, "commit", "-m", "Candidate fixture baseline")
     (candidate / "wiki/entities/sensor.md").unlink()
+    review = tmp_path / "review"
     with pytest.raises(CompilationError, match="missing wikilink.*sensor"):
-        audit_compiled_wiki(candidate, tmp_path / "review")
+        audit_compiled_wiki(candidate, review)
+    diff = (review / "generated-diff.patch").read_text()
+    assert "deleted file mode" in diff and "wiki/entities/sensor.md" in diff
+
+
+def test_bare_wikilink_with_dot_resolves_markdown_page(candidate, tmp_path):
+    (candidate / "wiki/concepts/gpt-3.5.md").write_text("# GPT 3.5\n")
+    (candidate / "wiki/index.md").write_text("# Index\n\n[[gpt-3.5]]\n")
+    audit_compiled_wiki(candidate, tmp_path / "review")
 
 
 def test_path_qualified_wikilink_requires_exact_path(candidate, tmp_path):
