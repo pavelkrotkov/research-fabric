@@ -27,19 +27,23 @@ def _changed(kb, scopes):
     return sorted(filter(None, changed))
 
 
-def _wikilink_exists(wiki, raw):
+def _wikilink_candidate(wiki, raw):
     target = raw.split("|", 1)[0].split("#", 1)[0].strip()
     logical = pathlib.PurePosixPath(target)
     if not target or logical.is_absolute() or ".." in logical.parts or "\\" in target:
-        return False
+        return None
     candidate = wiki.joinpath(*logical.parts)
-    if not candidate.suffix:
-        candidate = candidate.with_suffix(".md")
+    return candidate if candidate.suffix else candidate.with_suffix(".md")
+
+
+def _wikilink_exists(wiki, raw):
+    candidate = _wikilink_candidate(wiki, raw)
+    if candidate is None:
+        return False
     if candidate.is_file():
         return True
-    if len(logical.parts) != 1:
-        return False
-    return any(path.is_file() for path in wiki.rglob(candidate.name))
+    relative = candidate.relative_to(wiki)
+    return len(relative.parts) == 1 and any(path.is_file() for path in wiki.rglob(candidate.name))
 
 
 def _jsonl(path):
