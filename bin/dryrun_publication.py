@@ -32,6 +32,7 @@ from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
 from research_fabric.publication import ledger_rows  # noqa: E402
 from research_fabric.reading import ReadingPlan  # noqa: E402
 from research_fabric.review import audit_compiled_wiki  # noqa: E402
+from research_fabric.run_state import _publication_outputs, _verify_reviewed_outputs  # noqa: E402
 from research_fabric.sources import (  # noqa: E402
     bind_manifest,
     copy_source_snapshot,
@@ -175,16 +176,16 @@ def _gate(field_root: pathlib.Path, script: str, label: str) -> bool:
     return result.returncode == 0
 
 
-def _report_diff(field_root: pathlib.Path, verification: pathlib.Path) -> bool:
+def _report_diff(field_root: pathlib.Path, verification: pathlib.Path):
     try:
         report = audit_compiled_wiki(field_root, verification)
     except CompilationError as exc:
         print(f"[dryrun] FAIL: {exc}")
-        return False
+        return None
     print(f"[dryrun] compiled-wiki review bytes={report['diff_bytes']} files={len(report['changed'])}")
     for filename in report["changed"]:
         print(f"[dryrun]   {filename}")
-    return True
+    return report
 
 
 def _grounding_misses(snap_dest, source_by_file, claims):
@@ -206,7 +207,8 @@ def _grounding_misses(snap_dest, source_by_file, claims):
     return misses
 
 
-def _commit(field_root, project_name: str, claim_count: int) -> str:
+def _commit(field_root, project_name: str, claim_count: int, reviewed) -> str:
+    _verify_reviewed_outputs(field_root, _publication_outputs(field_root), reviewed)
     subprocess.run(["git", "-C", str(field_root), "add", "--", "evidence", ".gitattributes"], check=True)
     subprocess.run(["git", "-C", str(field_root), "diff", "--cached", "--check"], check=True)
     subprocess.run(
@@ -293,10 +295,11 @@ def main() -> int:
         return 1
     if not _gate(field_root, "excerpt_grounding.py", "grounding"):
         return 1
-    if not _report_diff(field_root, workdir / "review"):
+    reviewed = _report_diff(field_root, workdir / "review")
+    if reviewed is None:
         return 1
     misses = _grounding_misses(snap_dest, source_by_file, claims)
-    status = _commit(field_root, args.project, len(claims))
+    status = _commit(field_root, args.project, len(claims), reviewed)
     shutil.rmtree(workdir)
     failed = bool(misses) or bool(status.strip())
     print(f"[dryrun] RESULT: {'ISSUES FOUND' if failed else 'OK'}")
