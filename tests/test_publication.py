@@ -115,7 +115,7 @@ def test_shared_publication_rejects_stale_evidence_revision(tmp_path):
     source = case["source_files"][0]
     source.write_text(source.read_text() + "<p>new bytes</p>\n")
     case["manifest_rows"][0]["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
-    with pytest.raises(ValueError, match="source revision mismatch"):
+    with pytest.raises(ValueError, match="claim source binding changed"):
         _publish(case)
 
 
