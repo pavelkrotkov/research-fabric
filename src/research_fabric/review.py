@@ -65,6 +65,35 @@ def _citation_targets(kb):
     return targets, {target.split("#", 1)[0] for target in targets}
 
 
+def _citation_defect(label, relative, fragment, citations, citation_paths):
+    if citations is None:
+        return None
+    key = relative + (f"#{fragment}" if fragment else "")
+    if relative in citation_paths and key not in citations:
+        return f"{label}: citation does not match frozen source section"
+    if "/original/" in relative and relative.endswith(".md") and relative not in citation_paths:
+        return f"{label}: original-source citation is not in frozen reading plan"
+    return None
+
+
+def _local_link_defect(page, wiki, target, citations, citation_paths):
+    label = page.relative_to(wiki)
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return f"{label}: malformed link {target}"
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return None
+    resolved = (page.parent / unquote(parsed.path)).resolve()
+    try:
+        relative = resolved.relative_to(wiki.resolve()).as_posix()
+    except ValueError:
+        return f"{label}: local link escapes wiki: {target}"
+    if not resolved.is_file():
+        return f"{label}: missing local target {target}"
+    return _citation_defect(label, relative, parsed.fragment, citations, citation_paths)
+
+
 def _page_defects(page, wiki, citations, citation_paths):
     text = page.read_text(encoding="utf-8")
     defects = [
@@ -73,31 +102,17 @@ def _page_defects(page, wiki, citations, citation_paths):
         if not _wikilink_exists(wiki, raw)
     ]
     for bracketed, plain in _LINK.findall(text):
-        target = bracketed or plain
-        try:
-            parsed = urlsplit(target)
-        except ValueError:
-            defects.append(f"{page.relative_to(wiki)}: malformed link {target}")
-            continue
-        if parsed.scheme or parsed.netloc or not parsed.path:
-            continue
-        resolved = (page.parent / unquote(parsed.path)).resolve()
-        try:
-            relative = resolved.relative_to(wiki.resolve()).as_posix()
-        except ValueError:
-            defects.append(f"{page.relative_to(wiki)}: local link escapes wiki: {target}")
-            continue
-        if not resolved.is_file():
-            defects.append(f"{page.relative_to(wiki)}: missing local target {target}")
-            continue
-        if citations is None:
-            continue
-        key = relative + (f"#{parsed.fragment}" if parsed.fragment else "")
-        if relative in citation_paths and key not in citations:
-            defects.append(f"{page.relative_to(wiki)}: citation does not match frozen source section: {target}")
-        elif "/original/" in relative and relative.endswith(".md") and relative not in citation_paths:
-            defects.append(f"{page.relative_to(wiki)}: original-source citation is not in frozen reading plan: {target}")
+        defect = _local_link_defect(page, wiki, bracketed or plain, citations, citation_paths)
+        if defect:
+            defects.append(defect)
     return defects
+
+
+def _changed_pages(kb, changed):
+    for relative in changed:
+        page = kb / relative
+        if relative.startswith("wiki/") and page.suffix == ".md" and page.is_file():
+            yield page
 
 
 def audit_compiled_wiki(kb, verification):
@@ -118,10 +133,8 @@ def audit_compiled_wiki(kb, verification):
         citations, citation_paths = None, set()
         defects.append(f"invalid published reading plan: {exc}")
     wiki = kb / "wiki"
-    for relative in changed:
-        page = kb / relative
-        if relative.startswith("wiki/") and page.suffix == ".md" and page.is_file():
-            defects.extend(_page_defects(page, wiki, citations, citation_paths))
+    for page in _changed_pages(kb, changed):
+        defects.extend(_page_defects(page, wiki, citations, citation_paths))
     if not diff.strip():
         defects.append("candidate diff is empty")
     base = _git(kb, "rev-parse", "HEAD")
@@ -138,7 +151,8 @@ def audit_compiled_wiki(kb, verification):
         "mechanical": {"ok": not defects, "defects": defects},
         "limitations": [
             "Byte/link/source-span checks do not establish semantic support or completeness.",
-            "Semantic omission, nuance, duplication and preserved qualifications remain advisory human-review questions.",
+            "Semantic omission, nuance, duplication and preserved qualifications "
+            "remain advisory human-review questions.",
         ],
     }
     write_json(verification / "compiled-wiki-review.json", report)
