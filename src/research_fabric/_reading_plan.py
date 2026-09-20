@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+
 from ._reading_span import reading_quote, span_text, structure
 from ._reading_validation import policy, validate_plan
 
