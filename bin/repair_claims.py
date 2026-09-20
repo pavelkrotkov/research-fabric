@@ -85,7 +85,7 @@ def _repair_target(target, source_dir, model, grounded, adapters):
     if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
         raise ValueError("repair response requires a boolean found field")
     if "reading" in claim and result["found"]:
-        from research_fabric.sources import exact_excerpt
+        from research_fabric.reading import exact_excerpt
 
         exact_excerpt(body, result.get("excerpt"))
     return _replacement(result, body, grounded)
@@ -176,7 +176,7 @@ def repair_claims(
     ]
     if reading_claims:
         from research_fabric._source_assets import safe_path
-        from research_fabric.sources import ReadingPlan
+        from research_fabric.reading import ReadingPlan
 
         if not project or "reading" not in project:
             raise ClaimIdentityError("reading repair requires its source-mapped project")
