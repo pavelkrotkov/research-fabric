@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-from urllib.parse import quote
-
 from ._reading_span import reading_quote, span_range, span_text, structure
 from ._reading_validation import policy, validate_plan
 
@@ -184,45 +182,14 @@ class ReadingPlan:
         return result
 
     def section(self, section_id):
-        """Expose a citation target plus byte range in the immutable original snapshot.
+        from ._reading_citations import section
 
-        Representation offsets are mapped back through the source adapter's CRLF map.
-        """
-        span = self.data["sections"][section_id]
-        rep = self.representations[span["source_file"]]
-        start, end = span_range(rep, span)
-        key = self.data["sources"][span["source_file"]]["bundle_key"]
-        source_file = span["source_file"]
-        logical = pathlib.PurePosixPath(source_file)
-        if logical.is_absolute() or ".." in logical.parts or "\\" in source_file:
-            raise ValueError(f"unsafe reading source path: {source_file}")
-        source = quote(source_file, safe="/")
-        target = f"assets/{key}/original/{source}#L{span['lines'][0]}-L{span['lines'][1] - 1}"
-        return {
-            **span,
-            "target": target,
-            "original_bytes": [rep.original_byte_offset(start), rep.original_byte_offset(end)],
-        }
+        return section(self, section_id)
 
     def citation_policy(self):
-        """Generate OpenKB citation guidance from the same frozen section identities.
+        from ._reading_citations import citation_policy
 
-        The native planner stays in charge; this only constrains source targets and roles.
-        """
-        records = []
-        for section_id in self.data["sections"]:
-            section = self.section(section_id)
-            heading = span_text(self.representations, section).splitlines()[0]
-            records.append(json.dumps({"section": section_id, "heading": heading, **section}, ensure_ascii=False))
-        return (
-            "\n## Frozen research source citations\n"
-            f"Reading plan SHA256: {self.data['sha256']}\n"
-            "Cite original source sections using the targets below (paths relative to wiki root; "
-            "from summaries/concepts use ../assets/...). Prepared document line numbers are not original lines. "
-            "Retain mathematical qualifications, definitions, uncertainty and conflicting results. "
-            "Context is not independent primary evidence. Bibliographic unknowns remain unknown. "
-            "These mappings identify original ranges; they do not prove semantic support.\n" + "\n".join(records) + "\n"
-        )
+        return citation_policy(self)
 
     def validate_packet(self, packet, reading_id, acceptance):
         """Require every worker claim to belong to its dispatched frozen assignment.
