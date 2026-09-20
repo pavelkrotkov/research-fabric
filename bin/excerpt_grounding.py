@@ -38,7 +38,8 @@ from research_fabric.claim_report import grounding_report_metadata
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from research_fabric._source_adapter import HTMLAdapter  # noqa: E402
-from research_fabric.sources import ReadingPlan, representation_for  # noqa: E402
+from research_fabric.reading import ReadingPlan  # noqa: E402
+from research_fabric.sources import representation_for  # noqa: E402
 
 # Punctuation folding table: typographic variants -> ASCII equivalents.
 _PUNCT = {
