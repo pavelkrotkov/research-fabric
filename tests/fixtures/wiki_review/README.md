@@ -1,4 +1,4 @@
-# Synthetic compiled-wiki review cases (#13 preparation only)
+# Synthetic compiled-wiki review cases
 
 `before/sensor.md` is one retained prior page, not a complete prior KB.
 `after/` is a small candidate with a modified entity, new concept, two source
@@ -21,16 +21,10 @@ unavailable-review case. There is deliberately no new response protocol/parser
 or assertion that a live model will detect these changes. Future #13 handling
 must record adverse/unavailable opinions without making them semantic gates.
 
-Current tests call real evidence gates and demonstrate that all five wiki
-variants leave valid verbatim evidence: those gates do **not** audit wiki prose
-or links. They also exercise the existing publication inventory (including
-wiki-only/untracked additions) and compiled-page hash-drift rejection. The byte
-snapshot is fixture input to that existing check, not proof of native compilation
-or an implemented review certificate. Existing #12 asset-bundle tests separately
-cover manifest closure; the broken wiki asset here is deliberately unmanifested.
-
-Still blocked on #11: generic source/span/disposition mappings and the final
-mechanical review interface. Review snapshot/commit binding, citation and link
-rejection, advisory handling, shared workflow/rehearsal integration, and the
-README's compiler/ledger data-flow correction remain #13 implementation work.
-No fixture grants semantic accuracy, completeness, READY status or merge authority.
+Current tests show that provenance/excerpt gates alone accept all five wiki
+variants, while the compiled-wiki audit rejects broken page/asset links and
+accepts semantic-only qualifier/count/relocation cases for human review. The
+audit snapshots publication hashes, includes modified and untracked wiki files
+in its diff, and is invalidated by later candidate-byte changes. #11's published
+reading-plan validator supplies source/span/disposition identity; no fixture
+grants semantic accuracy, completeness, READY status or merge authority.
