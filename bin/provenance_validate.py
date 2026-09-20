@@ -75,6 +75,20 @@ def source_errors(root: pathlib.Path, row: dict, sid) -> list[str]:
     return errors + _representation_errors(row, sid, snap)
 
 
+def _reading_errors(root, source_rows, claim_rows, errors):
+    if errors:
+        return []
+    try:
+        return [
+            f"reading claim invalid: {cid}: {why}"
+            for cid, why in ReadingPlan.published_claim_errors(
+                root, [row for _, row in source_rows], [row for _, row in claim_rows], quotes=False
+            )
+        ]
+    except (ValueError, RuntimeError, KeyError, TypeError) as exc:
+        return [f"reading plan invalid: {exc}"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("field_root", type=pathlib.Path)
@@ -96,16 +110,7 @@ def main() -> int:
         source_ids.add(sid)
         sources_by_id[sid] = row
         errors.extend(source_errors(root, row, sid))
-    if not errors:
-        try:
-            errors.extend(
-                f"reading claim invalid: {cid}: {why}"
-                for cid, why in ReadingPlan.published_claim_errors(
-                    root, [row for _, row in source_rows], [row for _, row in claim_rows], quotes=False
-                )
-            )
-        except (ValueError, RuntimeError, KeyError, TypeError) as exc:
-            errors.append(f"reading plan invalid: {exc}")
+    errors.extend(_reading_errors(root, source_rows, claim_rows, errors))
     claim_ids = set()
     for line, row in claim_rows:
         missing = CLAIM_KEYS - row.keys()
