@@ -16,6 +16,8 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      TIKTOKEN_CACHE_DIR: /tmp/research-fabric-tiktoken
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -35,6 +37,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - name: Provision official tokenizer data for offline reading tests
+        run: uv run python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
+
       - name: Run pytest
         run: uv run pytest
 
@@ -46,6 +51,7 @@ jobs:
     timeout-minutes: 10
     env:
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      TIKTOKEN_CACHE_DIR: /tmp/research-fabric-tiktoken
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,6 +63,8 @@ jobs:
       - name: Install qualified native compiler and portable engine
         run: |
           uv venv
-          uv pip install -e . pytest -r tests/native-requirements.txt
+          uv pip install -e ".[reading]" pytest -r tests/native-requirements.txt
+      - name: Provision official tokenizer data for offline reading tests
+        run: .venv/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
       - name: Exercise real native rollback and production retry without credentials
         run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py

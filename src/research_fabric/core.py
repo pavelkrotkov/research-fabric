@@ -40,7 +40,8 @@ def load_project(projects_dir: pathlib.Path, name: str) -> dict:
     if not path.exists():
         raise RuntimeError(f"no project spec at {path}")
     proj = yaml.safe_load(path.read_text(encoding="utf-8"))
-    missing = [f for f in REQUIRED_PROJECT_FIELDS if f not in proj]
+    required = REQUIRED_PROJECT_FIELDS[:2] if "reading" in proj else REQUIRED_PROJECT_FIELDS
+    missing = [f for f in required if f not in proj]
     if missing:
         raise RuntimeError(f"project '{name}' spec missing required fields: {', '.join(missing)}")
     return proj

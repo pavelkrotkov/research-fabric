@@ -115,13 +115,13 @@ def _derivative(suffix: str, data: bytes, target: str) -> tuple[bytes, str, dict
     return data, suffix, None
 
 
-def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> dict:
+def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path, original_prefix: str) -> dict:
     relative = _local_asset(reference["target"])
     if not relative:
         raise ValueError("empty local visual reference")
     original = safe_path(source.parent, relative)
     data = _read(original)
-    original_path = "original/" + relative
+    original_path = original_prefix + relative
     _write(root, original_path, data)
     record = {
         **reference,
@@ -140,7 +140,7 @@ def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> 
     return record
 
 
-def _record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> dict:
+def _record(source: pathlib.Path, reference: dict, root: pathlib.Path, original_prefix: str) -> dict:
     if reference["syntax"] == "srcset":
         if reference["required"]:
             raise ValueError("unsupported required visual syntax: srcset")
@@ -150,7 +150,7 @@ def _record(source: pathlib.Path, reference: dict, root: pathlib.Path) -> dict:
         if reference["required"]:
             raise ValueError(f"required remote visual unavailable offline: {reference['target']}")
         return {**reference, "limitation": "remote-not-fetched"}
-    return _local_record(source, reference, root)
+    return _local_record(source, reference, root, original_prefix)
 
 
 def _derived_text(text: str, records: list[dict], key: str) -> str:
@@ -184,8 +184,10 @@ def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation:
         return manifest
     normalized = attestation["adapter"] == "markdown"
     references, text = _visual_source(raw.decode("utf-8")) if normalized else ([], "")
-    records = [_record(source, reference, root) for reference in references]
-    _write(root, "original/" + source.name, raw)
+    original_path = "original/" + attestation["source_file"]
+    original_prefix = pathlib.PurePosixPath(original_path).parent.as_posix() + "/"
+    records = [_record(source, reference, root, original_prefix) for reference in references]
+    _write(root, original_path, raw)
     prepared = _derived_text(text, records, key).encode() if normalized else raw
     input_name = key + ".md" if normalized else source.name
     _write(root, "prepared/" + input_name, prepared)
@@ -216,7 +218,7 @@ def _verify_source(root: pathlib.Path, manifest: dict) -> None:
     from .sources import representation_for, source_attestation
 
     source = safe_path(root, "original/" + manifest["source"]["source_file"])
-    if source_attestation(representation_for(source)) != manifest["source"]:
+    if source_attestation(representation_for(source), root / "original") != manifest["source"]:
         raise ValueError("bundle original source attestation drift")
     normalized = manifest["source"]["adapter"] == "markdown"
     expected = _verify_mapping(source, manifest) if normalized else source.read_bytes()
@@ -280,7 +282,10 @@ def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
             raise ValueError("published bundle directory identity drift")
         doc_name = pathlib.Path(manifest["input_path"]).stem
         for relative, expected in publication_files(manifest, doc_name).items():
-            data = _read(safe_path(wiki, relative))
+            published = safe_path(wiki, relative)
+            if not published.is_file():
+                raise ValueError(f"published bundle incomplete; republish from verified staging: {relative}")
+            data = _read(published)
             if digest(data) != expected:
                 raise ValueError(f"published asset drift: {relative}")
             _write(docs, relative, data)
@@ -300,7 +305,7 @@ def publication_files(manifest: dict, doc_name: str) -> dict[str, str]:
     expected_name = manifest["key"] if source["adapter"] == "markdown" else pathlib.Path(source["source_file"]).stem
     if not doc_name == pathlib.Path(manifest["input_path"]).stem == expected_name:
         raise ValueError("native asset document identity mismatch")
-    files = {}
+    files = {f"assets/{manifest['key']}/original/{source['source_file']}": source["sha256"]}
     for row in manifest["assets"]:
         if "original_path" in row:
             files[f"assets/{manifest['key']}/{row['original_path']}"] = row["original_sha256"]
