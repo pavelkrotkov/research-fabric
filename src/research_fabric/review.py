@@ -33,7 +33,7 @@ def _wikilink_candidate(wiki, raw):
     if not target or logical.is_absolute() or ".." in logical.parts or "\\" in target:
         return None
     candidate = wiki.joinpath(*logical.parts)
-    return candidate if candidate.suffix else candidate.with_suffix(".md")
+    return candidate if candidate.suffix == ".md" else candidate.with_name(candidate.name + ".md")
 
 
 def _wikilink_exists(wiki, raw):
@@ -130,7 +130,7 @@ def audit_compiled_wiki(kb, verification):
     changed = _changed(kb, scopes)
     if scopes:
         _git(kb, "add", "-N", "-A", "--", *scopes)
-    diff = _git(kb, "diff", "--no-ext-diff", "--", *scopes)
+    diff = _git(kb, "diff", "HEAD", "--no-ext-diff", "--", *scopes)
     (verification / "generated-diff.patch").write_text(diff, encoding="utf-8")
     defects = []
     try:
