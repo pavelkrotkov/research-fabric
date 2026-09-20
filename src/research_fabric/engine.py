@@ -192,31 +192,34 @@ class ResearchRun:
             return multisource_packet_defects(parsed, self.project, acceptance)
         return packet_defects(parsed, acceptance)
 
+    def _reading_sources(self):
+        from .reading import prepare_reading_plan
+
+        self._bind_manifest(reading=True, bind=False)
+        self.reading_plan, self.bundles = prepare_reading_plan(
+            self.config.source_dir,
+            self.project,
+            self.manifest_rows,
+            self.config.run_root / "reading-plan.json",
+            self.compiler_dir,
+            question=self.config.question,
+        )
+        data = self.reading_plan.data
+        self.manifest_rows = list(data["sources"].values())
+        self.source_files = [self.config.source_dir / name for name in data["sources"]]
+        self.worker_specs = [(row["id"], self.config.question) for row in data["readings"]]
+        self.worker_sources = {
+            row["id"]: [self.config.source_dir / name for name in self.reading_plan.source_names(row["id"])]
+            for row in data["readings"]
+        }
+        self.worker_provenance = {
+            sid: source_provenance(paths, source_root=self.config.source_dir)
+            for sid, paths in self.worker_sources.items()
+        }
+
     def _sources(self):
         if "reading" in self.project:
-            from .reading import prepare_reading_plan
-
-            self._bind_manifest(reading=True, bind=False)
-            self.reading_plan, self.bundles = prepare_reading_plan(
-                self.config.source_dir,
-                self.project,
-                self.manifest_rows,
-                self.config.run_root / "reading-plan.json",
-                self.compiler_dir,
-                question=self.config.question,
-            )
-            data = self.reading_plan.data
-            self.manifest_rows = list(data["sources"].values())
-            self.source_files = [self.config.source_dir / name for name in data["sources"]]
-            self.worker_specs = [(row["id"], self.config.question) for row in data["readings"]]
-            self.worker_sources = {
-                row["id"]: [self.config.source_dir / name for name in self.reading_plan.source_names(row["id"])]
-                for row in data["readings"]
-            }
-            self.worker_provenance = {
-                sid: source_provenance(paths, source_root=self.config.source_dir)
-                for sid, paths in self.worker_sources.items()
-            }
+            self._reading_sources()
             return
         self.source_files = discover_sources(self.config.source_dir, ADAPTERS)
         if not self.source_files:
