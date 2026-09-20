@@ -88,6 +88,21 @@ def test_wikilink_directory_does_not_count_as_target(candidate, tmp_path):
         audit_compiled_wiki(candidate, tmp_path / "review")
 
 
+def test_deleted_page_breaking_unchanged_referrer_is_rejected(candidate, tmp_path):
+    _git(candidate, "add", ".")
+    _git(candidate, "commit", "-m", "Candidate fixture baseline")
+    (candidate / "wiki/entities/sensor.md").unlink()
+    with pytest.raises(CompilationError, match="missing wikilink.*sensor"):
+        audit_compiled_wiki(candidate, tmp_path / "review")
+
+
+def test_path_qualified_wikilink_requires_exact_path(candidate, tmp_path):
+    page = candidate / "wiki/concepts/path-link.md"
+    page.write_text("# Path\n\nSee [[entities/drift]].\n")
+    with pytest.raises(CompilationError, match="missing wikilink.*entities/drift"):
+        audit_compiled_wiki(candidate, tmp_path / "review")
+
+
 def test_existing_evidence_gates_still_do_not_decide_semantic_fixture(candidate):
     _git(candidate, "apply", "--unidiff-zero", str(FIXTURE / "variants/qualifier.patch"))
     for gate in ("provenance_validate.py", "excerpt_grounding.py"):
