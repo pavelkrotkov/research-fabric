@@ -24,7 +24,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ACTOR: ${{ github.actor }}
         run: |
-          permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)"
+          if ! permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)"; then
+            echo "::error::Failed to retrieve repository permission for $ACTOR."
+            exit 1
+          fi
           case "$permission" in
             admin|maintain|write) ;;
             *)
@@ -76,12 +79,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.issue.number }}
         run: |
-          head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.repo.full_name)"
+          if ! head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.repo.full_name)"; then
+            echo "::error::Failed to retrieve PR repository metadata."
+            exit 1
+          fi
           if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
             echo "::error::/jbot is disabled for fork-head PRs."
             exit 1
           fi
-          head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)"
+          if ! head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)"; then
+            echo "::error::Failed to retrieve PR head SHA."
+            exit 1
+          fi
           echo "head=$head" >> "$GITHUB_OUTPUT"
 
       - name: Acknowledge accepted command
