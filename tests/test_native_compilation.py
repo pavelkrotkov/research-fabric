@@ -749,7 +749,8 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
     from PIL import Image
 
     from research_fabric.engine import ResearchRun
-    from research_fabric.sources import ReadingPlan, representation_for, source_attestation
+    from research_fabric.reading import ReadingPlan
+    from research_fabric.sources import representation_for, source_attestation
 
     config, _ = engine_run
     subprocess.run(["git", "-C", str(config.field_root), "config", "core.autocrlf", "true"], check=True)
