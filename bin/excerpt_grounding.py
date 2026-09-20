@@ -259,6 +259,12 @@ def source_text(snapshot: pathlib.Path) -> str:
     return representation_for(snapshot).grounding_text
 
 
+def _reading_failures(field_root, sources, claims, failures):
+    for cid, why in ReadingPlan.published_claim_errors(field_root, sources, claims):
+        if not any(failed_id == cid for failed_id, _ in failures):
+            failures.append((cid, why))
+
+
 def main() -> int:
     _self_test()
     if len(sys.argv) < 2:
@@ -273,9 +279,7 @@ def main() -> int:
         snap = field_root / row["snapshot"]
         texts[row["source_id"]] = source_text(snap)
     failures = check(claims, texts)
-    for cid, why in ReadingPlan.published_claim_errors(field_root, sources, claims):
-        if not any(failed_id == cid for failed_id, _ in failures):
-            failures.append((cid, why))
+    _reading_failures(field_root, sources, claims, failures)
     claim_ids = [claim.get("claim_id") for claim in claims]
     duplicate_ids = {cid for cid, count in Counter(claim_ids).items() if count > 1}
     if duplicate_ids:
