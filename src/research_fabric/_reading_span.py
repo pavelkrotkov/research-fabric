@@ -136,4 +136,3 @@ def reading_quote(rep, claim):
         "representation_bytes": [len(rep.text[:start].encode()), len(rep.text[:end].encode())],
         "original_bytes": [rep.original_byte_offset(start), rep.original_byte_offset(end)],
     }
-
