@@ -35,7 +35,9 @@ def _wikilink_exists(wiki, raw):
     candidate = wiki.joinpath(*logical.parts)
     if not candidate.suffix:
         candidate = candidate.with_suffix(".md")
-    return candidate.is_file() or any(wiki.rglob(pathlib.Path(target).with_suffix(".md").name))
+    return candidate.is_file() or any(
+        path.is_file() for path in wiki.rglob(pathlib.Path(target).with_suffix(".md").name)
+    )
 
 
 def _jsonl(path):
