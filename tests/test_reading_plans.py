@@ -232,6 +232,17 @@ def test_reviewed_reading_id_is_a_safe_worker_identity(tmp_path, reading_id):
         plan.validate()
 
 
+def test_section_citation_rejects_unsafe_logical_source_path(tmp_path):
+    plan, _, _, _, _ = prepare(tmp_path, {"a.md": "# A\n\nAlpha.\n"})
+    section_id = plan.data["readings"][0]["primary"][0]
+    source = plan.data["sections"][section_id]["source_file"]
+    plan.representations["../a.md"] = plan.representations[source]
+    plan.data["sources"]["../a.md"] = plan.data["sources"][source]
+    plan.data["sections"][section_id]["source_file"] = "../a.md"
+    with pytest.raises(ValueError, match="unsafe reading source path"):
+        plan.section(section_id)
+
+
 def test_frozen_plan_loader_rejects_rehashed_context_and_current_source_drift(tmp_path):
     import json
 
