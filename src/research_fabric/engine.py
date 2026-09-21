@@ -28,18 +28,16 @@ from research_fabric.core import (
     load_project as load_project_spec,
 )
 from research_fabric.execution import configure, configured, history, packet_policy_defects, resolve
-from research_fabric.publication import materialize_evidence
-from research_fabric.review import advisory_record, audit_compiled_wiki
-from research_fabric.run_state import finalize_run, run_lifecycle, set_state
+from research_fabric.publication import publish_candidate
+from research_fabric.review import advisory_record
+from research_fabric.run_state import record_ready, run_lifecycle, set_state
 from research_fabric.sources import (
     ADAPTERS,
     bind_manifest,
-    copy_source_snapshot,
     discover_sources,
     packet_source_defects,
     prepare_source_bundle,
     representation_for,
-    snapshot_relative,
     source_attestation,
     source_provenance,
 )
@@ -135,7 +133,6 @@ class ResearchRun:
         self.agent_provider = agent_provider
         self.reading_plan = None
         self.packet_dir = config.run_root / "evidence"
-        self.snap_dest = config.field_root / "evidence/snapshots"
         self.compiler_dir = config.run_root / "compiler-sources"
 
     def execute(self):
@@ -152,11 +149,7 @@ class ResearchRun:
             set_state(self.config.run_root, "COMPILING")
             self._compile()
             set_state(self.config.run_root, "MATERIALIZING_LEDGER")
-            self._materialize()
-            self._gates()
-            set_state(self.config.run_root, "VERIFYING_DIFF")
-            self._verify_diff()
-            return self._finalize()
+            return self._publish()
 
     def _prepare(self):
         assert_run_branch(self.config.field_root)
@@ -475,10 +468,6 @@ class ResearchRun:
         )
 
     def _compile(self):
-        from .sources import preserve_original_bytes
-
-        preserve_original_bytes(self.config.field_root)
-        self.snap_dest.mkdir(parents=True, exist_ok=True)
         self.compiler_dir.mkdir(exist_ok=True)
         if self.reading_plan:
             from openkb.schema import get_agents_md
@@ -490,7 +479,6 @@ class ResearchRun:
         compiler_inputs = []
         for src in self.source_files:
             source_root = self.config.source_dir if self.reading_plan else None
-            copy_source_snapshot(src, self.snap_dest, source_root=source_root)
             rep = (
                 self.reading_plan.representations[src.relative_to(source_root).as_posix()]
                 if self.reading_plan
@@ -520,69 +508,27 @@ class ResearchRun:
         )
         normalize_generated_log(self.config.field_root)
 
-    def _materialize(self):
+    def _publication_context(self):
         if self.reading_plan:
-            sources = {name: row["source_id"] for name, row in self.reading_plan.data["sources"].items()}
-            notes = {}
-            write_json(self.config.field_root / "evidence/reading-plan.json", self.reading_plan.data)
-        else:
-            notes, sources = source_mappings(self.project, self.books)
-        for filename, bundle in self.bundles.items():
-            if bundle["source"]["adapter"] == "markdown":
-                notes[sources[filename]] = f"wiki/summaries/{pathlib.Path(bundle['input_path']).stem}.md"
-        source_root = self.config.source_dir if self.reading_plan else None
-        present_names = set(sources)
-        source_rows = []
-        for row in self.manifest_rows:
-            name = row["source_file"] if self.reading_plan else pathlib.Path(row["snapshot"]).name
-            if name in present_names:
-                relative = snapshot_relative(self.config.source_dir / name, source_root).as_posix()
-                source_rows.append(dict(row, snapshot="evidence/snapshots/" + relative))
-        self.claims = materialize_evidence(
-            self.config.field_root,
-            self.config.run_root,
-            [sid for sid, _, _ in self.results],
-            notes,
-            sources,
-            source_rows,
-            multi=self.is_multi,
-            reading_plan=self.reading_plan,
+            return {}, {name: row["source_id"] for name, row in self.reading_plan.data["sources"].items()}
+        return source_mappings(self.project, self.books)
+
+    def _alignment(self):
+        if not self.is_multi:
+            return None
+        path = self.config.run_root / "alignment.jsonl"
+        original = (
+            self.config.engine_root
+            / "corpora"
+            / self.project["corpus_dir"]
+            / self.project.get("alignment_path", "alignment.jsonl")
         )
+        if not path.exists() and original.exists():
+            shutil.copy2(original, path)
+        return path if path.is_file() else None
 
-    def _run_gate(self, script, artifact, *extra):
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(self.config.engine_root / "bin" / script),
-                str(self.config.field_root),
-                *map(str, extra),
-            ],
-            text=True,
-            capture_output=True,
-        )
-        path = self.config.run_root / "verification" / artifact
-        path.write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
-        if result.returncode:
-            raise RuntimeError(f"{script} failed; preserved diagnostics: {path}")
-
-    def _gates(self):
-        self._run_gate("provenance_validate.py", "provenance.txt")
-        self._run_gate("excerpt_grounding.py", "excerpt-grounding.txt")
-        if self.is_multi and any(c.get("english_witness") for c in self.claims):
-            alignment = self.config.run_root / "alignment.jsonl"
-            original = (
-                self.config.engine_root
-                / "corpora"
-                / self.project["corpus_dir"]
-                / self.project.get("alignment_path", "alignment.jsonl")
-            )
-            if not alignment.exists() and original.exists():
-                shutil.copy2(original, alignment)
-            self._run_gate("translation_grounding.py", "translation-grounding.txt", alignment)
-
-    def _verify_diff(self):
+    def _advisory_review(self, review):
         verification = self.config.run_root / "verification"
-        self.review = audit_compiled_wiki(self.config.field_root, verification)
         prompt = (
             f"Question: {self.config.question}\n"
             f"Read the exact candidate diff {verification / 'generated-diff.patch'} and review record "
@@ -601,37 +547,51 @@ class ResearchRun:
             verdict, detail, reply, error = None, str(exc), "", f"verifier errored: {exc}"
         record = advisory_record(
             reply,
-            {"candidate_sha256": self.review["candidate_sha256"], "changed": self.review["changed"]},
+            {"candidate_sha256": review["candidate_sha256"], "changed": review["changed"]},
             error=error,
         )
         record.update(verdict=verdict, detail=detail)
-        write_json(verification / "advisory-post-verifier.json", record)
+        return record
 
-    def _finalize(self):
+    def _commit_message(self, claims):
         default = (
             "{project} evidence run ({claims} claims; run {run})"
             if self.reading_plan
             else "{project} evidence run ({claims} claims, Books {books}; run {run})"
         )
-        _cmt = self.project.get("commit_message") or default
-        commit_msg = _cmt.format(
+        return (self.project.get("commit_message") or default).format(
             project=self.config.project_path.stem.capitalize(),
-            claims=len(self.claims),
+            claims=claims,
             books="" if self.reading_plan else "-".join(map(str, (self.books[0], self.books[-1]))),
             run=self.config.run_root.name,
         )
-        completion = finalize_run(
-            self.config.field_root,
-            self.config.run_root,
-            commit_msg,
-            len(self.claims),
-            self.collect_provenance,
+
+    def _publish(self):
+        notes, sources = self._publication_context()
+        provenance = self.collect_provenance()
+        outcome = publish_candidate(
+            field_root=self.config.field_root,
+            run_root=self.config.run_root,
+            engine_root=self.config.engine_root,
+            source_dir=self.config.source_dir,
+            source_files=self.source_files,
+            manifest_rows=self.manifest_rows,
+            worker_ids=[sid for sid, _, _ in self.results],
+            notes=notes,
+            sources=sources,
             compiled=self.compile_report,
-            reviewed=self.review,
+            message=self._commit_message,
+            multi=self.is_multi,
+            reading_plan=self.reading_plan,
+            acceptance=self.acceptance,
+            alignment=self._alignment(),
+            advisory=self._advisory_review,
+            before_review=lambda: set_state(self.config.run_root, "VERIFYING_DIFF"),
         )
-        self.review["commit"] = completion["commit"]
+        self.claims, self.review = outcome["claims"], outcome["review"]
+        self.review["commit"] = outcome["commit"]
         write_json(self.config.run_root / "verification" / "compiled-wiki-review.json", self.review)
-        return completion
+        return record_ready(self.config.run_root, len(self.claims), provenance, outcome)
 
     def collect_provenance(self) -> dict:
         """Record the exact toolchain + inputs that produced this run."""
