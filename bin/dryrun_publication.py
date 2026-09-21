@@ -151,6 +151,7 @@ def main():
     shutil.copytree(input_run, run_root)
     try:
         source_files, notes, sources, reading_plan, books = _run_sources(run_root, project)
+        workers = sorted(path.stem.removeprefix("worker-") for path in (run_root / "evidence").glob("worker-*.json"))
         result = publish_candidate(
             field_root=field_root,
             run_root=run_root,
@@ -158,7 +159,7 @@ def main():
             source_dir=run_root / "sources",
             source_files=source_files,
             manifest_rows=_manifest(run_root),
-            worker_ids=sorted(path.stem.removeprefix("worker-") for path in (run_root / "evidence").glob("worker-*.json")),
+            worker_ids=workers,
             notes=notes,
             sources=sources,
             compiled=_compiled(run_root),

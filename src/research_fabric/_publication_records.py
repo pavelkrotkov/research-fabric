@@ -1,8 +1,19 @@
-"""Publication record projection from already accepted evidence packets."""
+"""Project accepted packet records into publication ledgers.
+
+This module is deliberately narrow: claim identity and source validation happen
+before it is called. It only preserves those accepted bindings in the published
+claim/source ledgers and packet audit records. Missing mappings fail closed;
+there is no repair, migration, gate policy, or Git behavior here.
+"""
 
 import json
 
 from .compilation import write_json
+
+
+def _claim_id(claim):
+    value = claim.get("claim_id")
+    return value if isinstance(value, str) and value else None
 
 
 def _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading_plan):
@@ -12,8 +23,8 @@ def _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading
     note = notes[source_id]
     if not (field_root / note).is_file():
         raise RuntimeError(f"claim note target does not exist: {note}")
-    claim_id = claim.get("claim_id")
-    if not isinstance(claim_id, str) or not claim_id:
+    claim_id = _claim_id(claim)
+    if not claim_id:
         return None
     row = {
         "claim_id": claim_id,
@@ -57,17 +68,7 @@ def ledger_rows(field_root, packets, notes, sources, *, multi=False, reading_pla
     return claims, dropped
 
 
-def materialize_evidence(field_root, run_root, packets, notes, sources, source_rows, *, multi=False, reading_plan=None):
-    claims, dropped = ledger_rows(field_root, packets, notes, sources, multi=multi, reading_plan=reading_plan)
-    if dropped:
-        write_json(run_root / "verification/dropped-claims.json", dropped)
-        raise RuntimeError(f"{len(dropped)} claim(s) could not be mapped to a manifest source; see dropped-claims.json")
-    if not claims:
-        raise RuntimeError("no claims survived materialization")
-    for filename, rows in (("claims.jsonl", claims), ("sources.jsonl", source_rows)):
-        (field_root / "evidence" / filename).write_text(
-            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8"
-        )
+def _packet_records(field_root, packets):
     execution = {
         worker: {"packet_revision": packet["packet_revision"], "execution": packet.get("execution")}
         for worker, packet in packets.items()
@@ -76,4 +77,17 @@ def materialize_evidence(field_root, run_root, packets, notes, sources, source_r
     history = [event for packet in packets.values() for event in (packet.get("claim_history") or [])]
     if history:
         write_json(field_root / "evidence/claim-history.json", history)
+
+
+def materialize_evidence(field_root, run_root, packets, notes, sources, source_rows, *, multi=False, reading_plan=None):
+    claims, dropped = ledger_rows(field_root, packets, notes, sources, multi=multi, reading_plan=reading_plan)
+    if dropped:
+        write_json(run_root / "verification/dropped-claims.json", dropped)
+        raise RuntimeError(f"{len(dropped)} claim(s) could not be mapped to a manifest source; see dropped-claims.json")
+    if not claims:
+        raise RuntimeError("no claims survived materialization")
+    for filename, rows in (("claims.jsonl", claims), ("sources.jsonl", source_rows)):
+        text = "\n".join(map(lambda row: json.dumps(row, ensure_ascii=False), rows)) + "\n"
+        (field_root / "evidence" / filename).write_text(text, encoding="utf-8")
+    _packet_records(field_root, packets)
     return claims
