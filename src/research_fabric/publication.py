@@ -106,7 +106,9 @@ def _advisory(review, callback):
         record = callback(review)
     except Exception as exc:
         return advisory_record("", scope, error=f"advisory review unavailable: {exc}")
-    if isinstance(record, dict):\n        return record\n    return advisory_record("", scope, error="advisory review returned no record")
+    if isinstance(record, dict):
+        return record
+    return advisory_record("", scope, error="advisory review returned no record")
 
 
 def publish_candidate(
