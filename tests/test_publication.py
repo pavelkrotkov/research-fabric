@@ -110,6 +110,17 @@ def test_shared_publication_rejects_manifest_and_mapping_failures(tmp_path, faul
         _publish(case)
 
 
+def test_shared_publication_requires_accepted_packet_metadata(tmp_path):
+    case = _case(tmp_path)
+    path = case["run_root"] / "evidence/worker-book-1.json"
+    packet = __import__("json").loads(path.read_text())
+    for key in ("packet_revision", "packet_state_revision", "source_revision"):
+        packet.pop(key, None)
+    atomic_write_json(path, packet)
+    with pytest.raises(RuntimeError, match="accepted packet metadata"):
+        _publish(case)
+
+
 def test_shared_publication_rejects_stale_evidence_revision(tmp_path):
     case = _case(tmp_path)
     source = case["source_files"][0]

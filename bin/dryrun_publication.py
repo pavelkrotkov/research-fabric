@@ -24,27 +24,10 @@ FABRIC = pathlib.Path("/home/pavel/research-fabric")
 PROJECTS_DIR = FABRIC / "projects"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from research_fabric.claims import accept_packet, atomic_write_json  # noqa: E402
-from research_fabric.core import normalize_packet, source_mappings  # noqa: E402
+from research_fabric.core import source_mappings  # noqa: E402
 from research_fabric.publication import publish_candidate  # noqa: E402
 from research_fabric.reading import ReadingPlan  # noqa: E402
 from research_fabric.sources import discover_sources  # noqa: E402
-
-
-def accept_and_persist_packet(packet_path, worker, source_dir, destination, reading_plan=None, acceptance=None):
-    """Legacy preparation helper; persist migration only in a disposable destination."""
-    packet_path = pathlib.Path(packet_path)
-    packet = json.loads(packet_path.read_text(encoding="utf-8"))
-    if not packet.get("packet_revision") and reading_plan is None:
-        normalize_packet(packet.get("parsed") or packet)
-    if reading_plan:
-        reading_plan.validate_packet(packet, worker, acceptance or {})
-    accepted = accept_packet(packet, worker, source_dir=source_dir)
-    destination = pathlib.Path(destination)
-    destination.mkdir(parents=True, exist_ok=True)
-    target = destination / packet_path.name
-    atomic_write_json(target, accepted)
-    return accepted, target
 
 
 def _parse_args():
