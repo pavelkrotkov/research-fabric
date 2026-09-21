@@ -87,7 +87,7 @@ def materialize_evidence(field_root, run_root, packets, notes, sources, source_r
     if not claims:
         raise RuntimeError("no claims survived materialization")
     for filename, rows in (("claims.jsonl", claims), ("sources.jsonl", source_rows)):
-        text = "\n".join(map(lambda row: json.dumps(row, ensure_ascii=False), rows)) + "\n"
+        text = "\\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\\n"
         (field_root / "evidence" / filename).write_text(text, encoding="utf-8")
     _packet_records(field_root, packets)
     return claims
