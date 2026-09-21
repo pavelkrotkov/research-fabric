@@ -452,9 +452,7 @@ cli.cli()
         prepared_status = _git(prepared, "status", "--porcelain")
         original_run = _tree(run)
         native_calls = (tmp_path / "calls.json").read_bytes()
-        production_files = set(
-            _git(kb, "ls-files", "--", "wiki", "evidence", "raw", ".gitattributes").splitlines()
-        )
+        production_files = set(_git(kb, "ls-files", "--", "wiki", "evidence", "raw", ".gitattributes").splitlines())
         production_outputs = _publication_outputs(kb)
         production_publication = json.loads((run / "verification/publication-result.json").read_text())
         observed = {}
