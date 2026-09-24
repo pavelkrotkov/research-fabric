@@ -2,4 +2,4 @@
 openkb==0.4.5
 litellm==1.87.2
 openai-agents==0.17.3
-openai==2.44.0
+openai==3.16.2
