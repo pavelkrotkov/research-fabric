@@ -18,7 +18,7 @@ def _claim_id(claim):
 
 def _claim_row(field_root, worker, packet, claim, notes, sources, multi, reading_plan):
     source_id = sources.get(claim.get("source_file", ""))
-    note = notes.get(source_id)
+    note = notes.get(worker, notes.get(source_id)) if reading_plan else notes.get(source_id)
     if not note:
         return None
     if not (field_root / note).is_file():

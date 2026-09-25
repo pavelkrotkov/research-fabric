@@ -105,6 +105,9 @@ def publish_candidate(
             raise ValueError(f"source escapes allowed root: {source}")
     verification = run_root / "verification"
     verification.mkdir(parents=True, exist_ok=True)
+    from ._unit_coverage import publish_unit_coverage
+
+    unit_notes = publish_unit_coverage(field_root, compiled, reading_plan)
     packets, source_rows, published_notes = prepare_inputs(
         field_root,
         run_root,
@@ -117,6 +120,9 @@ def publish_candidate(
         reading_plan,
         {} if acceptance is None else acceptance,
     )
+    # Reading IDs and source IDs are separate namespaces and may have equal text.
+    # Apply authoritative unit notes after deriving any legacy source-note names.
+    published_notes.update(unit_notes)
     claims = materialize_evidence(
         field_root,
         run_root,
