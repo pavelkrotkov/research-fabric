@@ -13,7 +13,7 @@ import pathlib
 import shutil
 import sys
 
-from ._source_assets import _derived_text, _visual_source, publish_bundle, verify_bundle
+from ._source_assets import _derived_text, _visual_source, _write, publish_bundle, safe_path, verify_bundle
 from .claims import stable_revision
 from .compilation import (
     CompilationError,
@@ -284,7 +284,7 @@ def compile_units(kb, run_root, frozen, *, command=None):
 
 
 def publish_unit_assets(run_root, wiki, bundles, frozen):
-    """Verify native unit images, then reuse the original bundle exporter contract."""
+    """Verify participating native images; archive the complete verified bundle closure."""
     for unit in frozen["units"]:
         for asset in unit["assets"]:
             record = asset["record"]
@@ -294,8 +294,12 @@ def publish_unit_assets(run_root, wiki, bundles, frozen):
             source = wiki / "sources/images" / unit["id"] / name
             if digest(source) != record["derivative_sha256"]:
                 raise CompilationError("native unit asset drift")
-            target = wiki / "sources/images" / bundles[asset["source_file"]]["key"] / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
     for bundle in bundles.values():
-        publish_bundle(run_root / "compiler-sources" / bundle["key"], bundle, wiki, bundle["key"])
+        root = run_root / "compiler-sources" / bundle["key"]
+        verify_bundle(root, bundle)
+        # Archival assets include excluded sections, not just compiled evidence.
+        for record in bundle["assets"]:
+            if "derivative_path" in record:
+                source = safe_path(root, record["derivative_path"])
+                _write(wiki, f"sources/images/{bundle['key']}/{source.name}", source.read_bytes())
+        publish_bundle(root, bundle, wiki, bundle["key"])
