@@ -160,6 +160,8 @@ def audit_compiled_wiki(kb, verification):
         "diff_sha256": diff_sha,
         "diff_bytes": len(diff.encode()),
         "asset_manifest_hashes": asset_hashes,
+        "unit_coverage": "evidence/coverage.json" if (kb / "evidence/coverage.json").is_file() else None,
+        "unit_outcomes": "evidence/unit-outcomes.json" if (kb / "evidence/unit-outcomes.json").is_file() else None,
         "mechanical": {"ok": not defects, "defects": defects},
         "limitations": [
             "Byte/link/source-span checks do not establish semantic support or completeness.",

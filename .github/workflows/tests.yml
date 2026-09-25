@@ -67,4 +67,4 @@ jobs:
       - name: Provision official tokenizer data for offline reading tests
         run: .venv/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
       - name: Exercise real native rollback and production retry without credentials
-        run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py
+        run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py tests/test_compile_units.py
