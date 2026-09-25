@@ -4,6 +4,7 @@ Run with OpenKB 0.4.5, Pillow, pdftoppm, Ghostscript and this package installed.
 No model calls, compiler replacement, fake conversion, or original mutations.
 """
 
+import json
 import os
 import pathlib
 import subprocess
@@ -14,7 +15,8 @@ from urllib.parse import unquote
 from markdown_it import MarkdownIt
 from PIL import Image
 
-from research_fabric._source_assets import digest, publish_bundle
+from research_fabric._source_assets import digest, publication_files, publish_bundle
+from research_fabric.reading import prepare_reading_plan
 from research_fabric.sources import prepare_source_bundle, representation_for, source_attestation
 
 ENGINE = pathlib.Path(__file__).resolve().parents[1]
@@ -38,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
     for work, color in (("first", "red"), ("second", "blue"), ("text-only", "green")):
         originals = root / work
         originals.mkdir()
-        Image.new("RGB", (40, 30), color).save(originals / "figure one.png")
+        Image.new("RGB", (6000, 3000) if work == "first" else (40, 30), color).save(originals / "figure one.png")
         Image.new("RGB", (40, 30), color).save(originals / "figure.pdf", "PDF")
         (originals / "figure.eps").write_text(
             "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 50 30\n0 0 50 30 rectfill\nshowpage\n"
@@ -57,6 +59,16 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
         before = {path.name: digest(path.read_bytes()) for path in originals.iterdir()}
         manifest = prepare_source_bundle(source, root / "bundles", source_attestation(representation_for(source)))
         bundle_root = root / "bundles" / manifest["key"]
+        plan, bundles = prepare_reading_plan(
+            originals,
+            {"reading": {"sources": {"paper.md": work}, "works": {work: {"title": None, "authors": None}}}},
+            [{**source_attestation(representation_for(source)), "source_id": work, "snapshot": "paper.md"}],
+            root / (work + "-reading-plan.json"),
+            root / "bundles",
+        )
+        assert bundles["paper.md"] == manifest
+        assigned = {row["index"] for reading in plan.data["readings"] for row in reading["assets"]}
+        assert assigned == set(range(len(manifest["assets"])))
         converted = convert_document(bundle_root / manifest["input_path"], root)
         assert converted.doc_name == manifest["key"]
         assert converted.source_path.is_file()
@@ -72,6 +84,7 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
             assert digest(copied.read_bytes()) == row["derivative_sha256"]
             with Image.open(copied) as image:
                 image.load()  # Native read-image consumes the same raster formats.
+                assert max(image.size) <= 1600
     html_source = root / "chapter.html"
     html_source.write_text("<h1>HTML chapter</h1><p>Original HTML evidence.</p>")
     manifest = prepare_source_bundle(html_source, root / "bundles", source_attestation(representation_for(html_source)))
@@ -106,4 +119,8 @@ with tempfile.TemporaryDirectory(prefix="native-assets-") as directory:
         for link in links:
             assert (page.parent / unquote(link)).resolve().is_file(), (page, link)
     assert not list(docs.rglob("missing*"))
-    print("PASS: colliding works, real PDF/EPS rendering, native conversion/exporter; all links/hashes intact")
+    for path in docs.glob("assets/*/bundle.json"):
+        receipt = json.loads(path.read_text())
+        for relative, expected in publication_files(receipt, pathlib.Path(receipt["input_path"]).stem).items():
+            assert digest((docs / relative).read_bytes()) == expected
+    print("PASS: 18 MP raster, reading assignments, PDF/EPS, native conversion/export; all links/hashes intact")

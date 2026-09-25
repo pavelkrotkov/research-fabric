@@ -9,14 +9,32 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import warnings
 from urllib.parse import quote, urlsplit
 
-from PIL import Image
+from PIL import Image, ImageFile, features
 
 from ._source_adapter import _local_asset, _visual_source, literal_caption
 
-POLICY = {"version": 1, "page": 1, "region": "whole-page", "max_pixels": 1600, "timeout_seconds": 30}
 MAX_BYTES = 20_000_000
+POLICY = {
+    "version": 2,
+    "page": 1,
+    "region": "whole-page",
+    "max_pixels": 1600,
+    "timeout_seconds": 30,
+    "raster": {
+        "version": 1,
+        "max_input_bytes": MAX_BYTES,
+        "max_input_pixels": 32_000_000,
+        "max_input_edge": 16_000,
+        "max_output_bytes": MAX_BYTES,
+        "max_output_edge": 1600,
+        "frames": "single-only",
+        "resampling": "LANCZOS",
+        "output": "PNG RGB/RGBA, compress_level=6, no metadata; small inputs byte-exact",
+    },
+}
 
 
 def digest(data: bytes) -> str:
@@ -34,7 +52,11 @@ def safe_path(root: pathlib.Path, relative: str) -> pathlib.Path:
 def _read(path: pathlib.Path) -> bytes:
     if path.stat().st_size > MAX_BYTES:
         raise ValueError(f"asset exceeds {MAX_BYTES} bytes: {path.name}")
-    return path.read_bytes()
+    with path.open("rb") as stream:
+        data = stream.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise ValueError(f"asset exceeds {MAX_BYTES} bytes: {path.name}")
+    return data
 
 
 def _raster(data: bytes) -> None:
@@ -42,6 +64,55 @@ def _raster(data: bytes) -> None:
         if image.width * image.height > 16_000_000:
             raise ValueError("asset exceeds 16 million pixels")
         image.load()
+
+
+def _raster_toolchain() -> dict:
+    return {
+        "name": "Pillow",
+        "version": Image.__version__,
+        "codecs": {name: features.version(name) for name in features.get_supported()},
+        "configuration": POLICY["raster"],
+    }
+
+
+def _prepare_raster(data: bytes, suffix: str) -> tuple[bytes, str, dict]:
+    policy = POLICY["raster"]
+    if len(data) > policy["max_input_bytes"]:
+        raise ValueError("raster input byte limit exceeded")
+    if ImageFile.LOAD_TRUNCATED_IMAGES:
+        raise ValueError("unsafe Pillow truncated-image decoding enabled")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(data), formats=("PNG", "JPEG", "GIF", "WEBP")) as image:
+            size = list(image.size)
+            if image.width * image.height > policy["max_input_pixels"] or max(size) > policy["max_input_edge"]:
+                raise ValueError("raster input pixel/dimension limit exceeded")
+            if getattr(image, "n_frames", 1) != 1:
+                raise ValueError("animated/multipage rasters unsupported")
+            image.verify()
+        with Image.open(io.BytesIO(data), formats=("PNG", "JPEG", "GIF", "WEBP")) as image:
+            image.load()
+            operation = "byte-exact-copy"
+            if max(size) > policy["max_output_edge"]:
+                mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
+                image = image.convert(mode)
+                image.thumbnail((policy["max_output_edge"],) * 2, Image.Resampling.LANCZOS)
+                image.info.clear()
+                output = io.BytesIO()
+                image.save(output, format="PNG", compress_level=6)
+                data, suffix, operation = output.getvalue(), ".png", "downsample"
+            if len(data) > policy["max_output_bytes"]:
+                raise ValueError("raster output byte limit exceeded")
+            return (
+                data,
+                suffix,
+                {
+                    **_raster_toolchain(),
+                    "operation": operation,
+                    "original_dimensions": size,
+                    "derivative_dimensions": list(image.size),
+                },
+            )
 
 
 def _renderer(suffix: str) -> tuple[str, dict]:
@@ -111,8 +182,7 @@ def _derivative(suffix: str, data: bytes, target: str) -> tuple[bytes, str, dict
         return data, ".png", renderer
     if suffix not in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
         raise ValueError(f"unsupported visual format: {suffix}")
-    _raster(data)
-    return data, suffix, None
+    return _prepare_raster(data, suffix)
 
 
 def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path, original_prefix: str) -> dict:
@@ -133,9 +203,18 @@ def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path, ori
         output = "prepared/assets/" + digest(data) + suffix
         _write(root, output, data)
         record.update(derivative_path=output, derivative_sha256=digest(data), renderer=renderer)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (
+        OSError,
+        ValueError,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        subprocess.SubprocessError,
+    ) as exc:
         if reference["required"]:
-            raise ValueError(f"required visual unreadable: {relative}: {exc}") from exc
+            raise ValueError(
+                f"required visual unreadable: {source.name}: {relative} at {reference['locator']}; "
+                f"source incomplete, dependent readings blocked: {exc}"
+            ) from exc
         record["limitation"] = str(exc)
     return record
 
@@ -160,6 +239,7 @@ def _derived_text(text: str, records: list[dict], key: str) -> str:
     for number, row in enumerate(records, 1):
         gallery.append(f"\nFigure {number}; source locator: {json.dumps(row['locator'], sort_keys=True)}\n")
         gallery.append(literal_caption(row.get("caption", "")) + "\n")
+        gallery.append("Visual availability only; uninspected, readability and mathematical content unverified.\n")
         if row.get("derivative_path"):
             gallery.append(f"![Figure {number}]({row['derivative_path'].removeprefix('prepared/')})\n")
         if row.get("original_path"):
@@ -167,6 +247,12 @@ def _derived_text(text: str, records: list[dict], key: str) -> str:
         if row.get("limitation"):
             gallery.append("Visual unavailable:\n\n" + literal_caption(row["limitation"]) + "\n")
     return text + "\n\n## Source figures\n" + "\n".join(gallery)
+
+
+def visual_disposition(records: list[dict]) -> str:
+    if any(not row.get("derivative_path") for row in records):
+        return "incomplete-optional-visuals"
+    return "available-uninspected" if records else "no-visuals"
 
 
 def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation: dict) -> dict:
@@ -198,6 +284,7 @@ def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation:
         "input_path": "prepared/" + input_name,
         "input_sha256": digest(prepared),
         "assets": records,
+        "visual_disposition": visual_disposition(records),
         "policy": POLICY,
     }
     _write(root, "bundle.json", (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode())
@@ -207,10 +294,15 @@ def prepare_bundle(source: pathlib.Path, destination: pathlib.Path, attestation:
 def _verify_renderers(manifest: dict) -> None:
     if manifest["policy"] != POLICY:
         raise ValueError("bundle rendering policy drift")
+    if manifest.get("visual_disposition") != visual_disposition(manifest["assets"]):
+        raise ValueError("bundle visual disposition drift")
     for row in manifest["assets"]:
-        if row.get("renderer"):
-            _, actual = _renderer(pathlib.Path(row["original_path"]).suffix.lower())
-            if actual != row["renderer"]:
+        if row.get("derivative_path"):
+            if pathlib.Path(row["original_path"]).suffix.lower() not in (".pdf", ".eps"):
+                actual = _raster_toolchain()
+            else:
+                _, actual = _renderer(pathlib.Path(row["original_path"]).suffix.lower())
+            if any((row.get("renderer") or {}).get(key) != value for key, value in actual.items()):
                 raise ValueError("bundle renderer version/configuration drift")
 
 
