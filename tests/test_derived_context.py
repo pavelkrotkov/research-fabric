@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from research_fabric.claims import atomic_write_json
 from research_fabric.derived_context import context_path, load_context, prepare_contexts
 from research_fabric.engine import ResearchRun, RunConfig
+from research_fabric.execution import configure, resolve
 from research_fabric.sources import representation_for, source_attestation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,7 @@ def reading_run(tmp_path, *, shared=False):
         None,
     )
     run.project, run.canonical_manifest, run.acceptance, run.is_multi = project, manifest, {}, False
+    configure(run_root, resolve(native_model="openai/test", environ={}))
     run._sources()
     return run, spec, texts
 
