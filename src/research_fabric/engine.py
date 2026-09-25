@@ -200,6 +200,11 @@ class ResearchRun:
             question=self.config.question,
         )
         data = self.reading_plan.data
+        from .compile_units import prepare_units
+
+        self.compile_plan = prepare_units(
+            self.reading_plan, self.bundles, self.project, self.config.run_root, self.config.field_root
+        )
         self.manifest_rows = list(data["sources"].values())
         self.source_files = [self.config.source_dir / name for name in data["sources"]]
         self.worker_specs = [(row["id"], self.config.question) for row in data["readings"]]
@@ -519,22 +524,19 @@ class ResearchRun:
     def _compile(self):
         self.compiler_dir.mkdir(exist_ok=True)
         if self.reading_plan:
-            from openkb.schema import get_agents_md
+            from .compile_units import compile_units
 
-            policy_path = self.config.field_root / "wiki/AGENTS.md"
-            policy = get_agents_md(policy_path.parent).split("\n## Frozen research source citations\n")[0]
-            policy_path.write_text(policy + self.reading_plan.citation_policy(), encoding="utf-8")
+            self.compile_report = compile_units(
+                self.config.field_root, self.config.run_root, self.compile_plan, command=self.config.compiler_command
+            )
+            self._lint_compiled()
+            return
         self.bundles = {}
         compiler_inputs = []
         for src in self.source_files:
-            source_root = self.config.source_dir if self.reading_plan else None
-            rep = (
-                self.reading_plan.representations[src.relative_to(source_root).as_posix()]
-                if self.reading_plan
-                else representation_for(src)
-            )
-            attestation = source_attestation(rep, source_root)
-            bundle = prepare_source_bundle(src, self.compiler_dir, attestation, source_root=source_root)
+            rep = representation_for(src)
+            attestation = source_attestation(rep)
+            bundle = prepare_source_bundle(src, self.compiler_dir, attestation)
             self.bundles[attestation["source_file"]] = bundle
             compiler_inputs.append(self.compiler_dir / bundle["key"] / bundle["input_path"])
         self.compile_report = compile_with_recovery(
@@ -552,6 +554,9 @@ class ResearchRun:
                     self.config.field_root / "wiki",
                     pathlib.Path(bundle["input_path"]).stem,
                 )
+        self._lint_compiled()
+
+    def _lint_compiled(self):
         subprocess.run(
             [*self.config.openkb_command, "--kb-dir", str(self.config.field_root), "lint"], check=True, text=True
         )
@@ -582,7 +587,9 @@ class ResearchRun:
             f"Question: {self.config.question}\n"
             f"Read the exact candidate diff {verification / 'generated-diff.patch'} and review record "
             f"{verification / 'compiled-wiki-review.json'}. Follow changed wiki links and the source-linked "
-            "original-section citations. Compare retained before-state from the git diff with current pages and "
+            "original-section citations. If present, read evidence/coverage.json and evidence/unit-outcomes.json "
+            f"under {self.config.field_root} for original Work/unit/operation mappings and per-unit retention diffs. "
+            "Compare retained before-state from the git diff with current pages and "
             "source evidence. Look for unsupported interpretations, missing nuance, semantic omissions, duplicate "
             "concepts, and lost qualifications; a detail moved to a linked page is not automatically lost. Start "
             "with 'Scope:'; use 'Before:', 'After:' and 'Source:' when relevant; include 'Uncertainty:'. "

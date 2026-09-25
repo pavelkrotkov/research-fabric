@@ -165,6 +165,8 @@ def audit_compiled_wiki(kb, verification):
         "derived_context": {
             worker: row["derived_context"] for worker, row in packets.items() if "derived_context" in row
         },
+        "unit_coverage": "evidence/coverage.json" if (kb / "evidence/coverage.json").is_file() else None,
+        "unit_outcomes": "evidence/unit-outcomes.json" if (kb / "evidence/unit-outcomes.json").is_file() else None,
         "mechanical": {"ok": not defects, "defects": defects},
         "derived_review": {worker: row["derived_review"] for worker, row in packets.items() if "derived_review" in row},
         "limitations": [
