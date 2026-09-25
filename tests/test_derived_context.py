@@ -8,7 +8,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from research_fabric.claims import atomic_write_json
-from research_fabric.derived_context import context_path, load_context, prepare_contexts
+from research_fabric.derived_context import _selection, context_path, load_context, prepare_contexts
 from research_fabric.engine import ResearchRun, RunConfig
 from research_fabric.execution import configure, resolve
 from research_fabric.sources import representation_for, source_attestation
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NOTE = "Possibly E = m c^2; the exponent is uncertain. Ask whether energy scales quadratically with c."
 
 
-def reading_run(tmp_path, *, shared=False):
+def reading_run(tmp_path, *, shared=False, image_path="equation.png"):
     pytest.importorskip("openkb")
     root, run_root = tmp_path / "sources", tmp_path / "run"
     for folder in ("a", "b"):
@@ -26,7 +26,7 @@ def reading_run(tmp_path, *, shared=False):
         ImageDraw.Draw(image).text((10, 20), "E = m c^2", fill="black")
         image.save(root / folder / "equation.png")
     texts = {
-        "a/paper.md": "# Energy\n\nThe relation is illustrated below.\n\n![Equation](equation.png)\n",
+        "a/paper.md": f"# Energy\n\nThe relation is illustrated below.\n\n![Equation]({image_path})\n",
         "b/paper.md": "# Method\n\nMeasurements require calibration.\n\n![Calibration](equation.png)\n",
     }
     rows = []
@@ -117,6 +117,21 @@ def test_text_only_missing_required_budget_and_shared_context(tmp_path):
         run.bundles["a/paper.md"]["assets"][0]["original_sha256"]
         == (run.bundles["b/paper.md"]["assets"][0]["original_sha256"])
     )
+
+
+def test_selection_normalizes_only_safe_paths_and_preserves_hash_binding():
+    asset = {"original_path": "original/a/./equation.png", "original_sha256": "expected"}
+    row = {"path": "./a/equation.png", "sha256": "expected", "source_locator": "original locator"}
+    assert _selection(asset, {"assets": [row]}) is row
+    assert _selection({}, {"assets": [row]}) is None
+    assert _selection(asset, {"assets": [{**row, "path": "b/equation.png"}]}) is None
+    with pytest.raises(ValueError, match="ambiguous"):
+        _selection(asset, {"assets": [row, {**row, "path": "a/./equation.png"}]})
+    with pytest.raises(ValueError, match="identity drift"):
+        _selection(asset, {"assets": [{**row, "sha256": "changed"}]})
+    for unsafe in ("/a/equation.png", "a/../a/equation.png", "a\\equation.png", ""):
+        with pytest.raises(ValueError, match="unsafe source asset path"):
+            _selection(asset, {"assets": [{**row, "path": unsafe}]})
 
 
 def test_context_checksum_and_immutable_history(tmp_path):

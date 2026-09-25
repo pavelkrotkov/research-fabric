@@ -1,7 +1,7 @@
 """Bounded, unreviewed visual context, separate from frozen source evidence."""
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ._source_assets import safe_path
 from .claims import atomic_write_json, stable_revision
@@ -45,9 +45,19 @@ def packet_defects(packet, expected):
     return []
 
 
+def _asset_identity(relative):
+    path = PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts or "\\" in relative or not path.parts:
+        raise ValueError(f"unsafe source asset path: {relative}")
+    return path
+
+
 def _selection(asset, spec):
     original = asset.get("original_path", "").removeprefix("original/")
-    matches = [row for row in spec["assets"] if row["path"] == original]
+    if not original:
+        return None  # Unresolved/remote assets have no local identity.
+    identity = _asset_identity(original)
+    matches = [row for row in spec["assets"] if _asset_identity(row["path"]) == identity]
     if len(matches) > 1:
         raise ValueError(f"ambiguous visual inspection input: {original}")
     if matches and matches[0]["sha256"] != asset.get("original_sha256"):

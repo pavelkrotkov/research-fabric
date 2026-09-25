@@ -214,6 +214,35 @@ def test_inspection_reaches_real_reading_workers_and_publication(tmp_path, repla
 
 
 @pytest.mark.parametrize("required", [False, True])
+def test_equivalent_asset_paths_reach_workers(tmp_path, replay, monkeypatch, required):  # noqa: F811
+    run, spec, _ = reading_run(tmp_path, image_path="./equation.png")
+    run.project["reading"]["visual_context"] = {"required": required}
+    if required:
+        spec["assets"].append({**spec["assets"][0], "path": "b/./equation.png"})
+    atomic_write_json(run.config.visual_preflight_spec, spec)
+    outputs, inspections = replay
+    outputs.extend([[call()], [message(NOTE)]])
+    if required:
+        outputs.extend([[call()], [message("Calibration figure remains uncertain.")]])
+    requests = _worker_replies(monkeypatch)
+    _cli_dispatch(monkeypatch)
+    run.plan()
+    run._collect()
+    assert len(inspections) == (4 if required else 2)
+    assert NOTE in requests[0]["messages"][0]["content"]
+    assert NOTE not in requests[1]["messages"][0]["content"]
+    first = run.reading_plan.data["readings"][0]["id"]
+    asset = run.derived_contexts[first]["assets"][0]
+    assert asset["source_asset"]["original_path"] == "original/a/./equation.png"
+    assert asset["inspection"]["assets"][0]["path"] == "a/equation.png"
+    assert asset["inspection"]["assets"][0]["source_locator"] == "a/paper.md#equation"
+    spec["assets"].append({**spec["assets"][0], "path": "a/./equation.png"})
+    atomic_write_json(run.config.visual_preflight_spec, spec)
+    with pytest.raises(ValueError, match="ambiguous visual inspection input"):
+        run.plan()
+
+
+@pytest.mark.parametrize("required", [False, True])
 def test_unresolved_native_inspection_is_explicit_or_blocks(tmp_path, replay, monkeypatch, required):  # noqa: F811
     run, _, _ = reading_run(tmp_path)
     run.project["reading"]["visual_context"] = {"required": required}
