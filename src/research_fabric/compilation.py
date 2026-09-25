@@ -47,6 +47,9 @@ def _execution_identity(root):
     return {
         "revision": revision,
         "config": config,
+        "compile_plan_sha256": digest(Path(root) / "compile-plan.json")
+        if (Path(root) / "compile-plan.json").is_file()
+        else None,
         "code": {
             name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ("execution.py",)
         },
