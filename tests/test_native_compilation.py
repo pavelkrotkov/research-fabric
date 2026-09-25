@@ -801,6 +801,7 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
     import yaml
     from PIL import Image
 
+    from research_fabric.claims import stable_revision
     from research_fabric.engine import ResearchRun
     from research_fabric.reading import ReadingPlan
     from research_fabric.sources import representation_for, source_attestation
@@ -812,6 +813,7 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
     texts = {
         "chapter/α source.md": "".join(
             f"# Repeated heading\r\n\r\nEvidence chapter section {i} spans  \r\ntwo original lines.\r\n\r\n"
+            + f"Evidence chapter assumption {i}: bias, variance, calibration and error require independence.\r\n\r\n"
             + ("Long coherent argument with qualifications. " * 35).rstrip()
             + "\r\n\r\n$$\r\nx = y + 1\r\n$$\r\n\r\n```text\r\n# inert heading\r\n```\r\n\r\n"
             for i in range(3)
@@ -837,6 +839,12 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
         }
         for index, name in enumerate(texts)
     ]
+    from research_fabric._reading_span import structure
+
+    # A source ID may equal a reading ID: publication must still use the unit note.
+    first_name = next(iter(texts))
+    first_section = next(iter(structure(first_name, representation_for(config.source_dir / first_name))[0]))
+    rows[0]["source_id"] = "read-" + stable_revision({"primary": [first_section], "work_id": "chapter"})[:20]
     (config.run_root / "source-manifest.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
     project = tmp_path / "reading.yaml"
     project.write_text(
@@ -850,6 +858,7 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
                     "policy": {"target_tokens": 80, "soft_limit_tokens": 120, "context_budget_tokens": 40},
                 },
                 "acceptance": {"min_claims_per_reading": 1},
+                "compilation": {"max_request_tokens": 64000},
             }
         )
     )
@@ -886,7 +895,24 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     config = dataclasses.replace(
         config, project_path=project, worker_python=str(worker), question="Compare qualified findings."
     )
+    from research_fabric.execution import history
+
+    # Exhaustion after an accepted prefix must leave the real worktree clean.
+    config = dataclasses.replace(config, execution={"budget": {"requests": 26}})
+    with pytest.raises(RuntimeError):
+        ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    checkpoint = json.loads((config.run_root / "verification/compile/units/checkpoint.json").read_text())
+    assert checkpoint["sources"]
+    assert not (config.run_root / "verification/compile/units/completed.json").exists()
+    assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
+    prior_calls = history(config.run_root)["attempts"]
+    config = dataclasses.replace(
+        config, execution={"budget": {"requests": 100}}, reuse_evidence_dir=config.run_root / "evidence"
+    )
     result = ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    aggregate = json.loads((config.run_root / "verification/compile/units/completed.json").read_text())["report"]
+    assert aggregate["sources"][: len(checkpoint["sources"])] == checkpoint["sources"]
+    assert history(config.run_root)["attempts"][: len(prior_calls)] == prior_calls
     assert result["state"] == "READY_FOR_REVIEW"
     assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
     packet_bytes = {path.name: path.read_bytes() for path in (config.run_root / "evidence").glob("worker-*.json")}
@@ -917,6 +943,26 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         assert original.decode().replace("\r\n", "\n") == claim["excerpt"]
     calls = json.loads((tmp_path / "compiler-calls.json").read_text())
     assert calls["citation_mappings"]
+    compile_plan = json.loads((config.run_root / "compile-plan.json").read_text())
+    coverage = json.loads((config.field_root / "evidence/coverage.json").read_text())
+    assert coverage["mechanical_complete"] and coverage["semantic_complete"] is None
+    assert coverage["native_source_notes"] == len(plan.data["readings"])
+    assert coverage["independent_works"] == 3
+    assert all(row["disposition"] == "compiled" for row in coverage["sections"].values())
+    assert any(row["changed_existing_pages"] for row in coverage["retention"])
+    assert len(list((config.field_root / "wiki/concepts").glob("*.md"))) == 4
+    captured = [json.loads(line) for line in (tmp_path / "compiler-calls.prompts.jsonl").read_text().splitlines()]
+    assert captured
+    for messages in captured:
+        system = messages[0]["content"]
+        mappings = [json.loads(line) for line in system.splitlines() if line.startswith('{"section":')]
+        assert len(mappings) < len(plan.data["sections"])
+        body = json.dumps(messages[1], ensure_ascii=False)
+        assert not all(f"Evidence chapter section {i}" in body for i in range(3))
+    for unit in compile_plan["units"]:
+        raw_name = "raw/" + unit["id"] + ".md"
+        prepared = (config.run_root / "compile-units" / unit["input_path"]).read_bytes()
+        assert subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + raw_name]) == prepared
     docs = tmp_path / "browser/docs"
     subprocess.run(
         [
@@ -932,15 +978,17 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     for name, source in plan.data["sources"].items():
         bundle_root = config.run_root / "compiler-sources" / source["bundle_key"]
         bundle = json.loads((bundle_root / "bundle.json").read_text())
-        prepared = (bundle_root / bundle["input_path"]).read_bytes()
         raw_name = "raw/" + Path(bundle["input_path"]).name
-        assert subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + raw_name]) == prepared
+        assert not (config.field_root / raw_name).exists()
         original_name = "wiki/assets/" + source["bundle_key"] + "/original/" + name
         assert (
             subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + original_name])
             == (config.source_dir / name).read_bytes()
         )
     generated = "\n".join(path.read_text() for path in (config.field_root / "wiki/concepts").glob("*.md"))
+    assert "bias, variance, calibration and error require independence" in generated
+    assert "Evidence first paper qualifies the chapter" in generated
+    assert "Evidence second paper contradicts the chapter" in generated
     for record in calls["citation_mappings"]:
         resolved = plan.section(record["section"])
         assert "../" + resolved["target"] in generated
