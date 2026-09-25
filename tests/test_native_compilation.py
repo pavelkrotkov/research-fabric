@@ -458,7 +458,7 @@ cli.cli()
         observed = {}
         rehearsal = runpy.run_path(str(root / "bin/dryrun_publication.py"))
         namespace = rehearsal["main"].__globals__
-        namespace.update(FABRIC=root, PROJECTS_DIR=projects)
+
         real_publish = namespace["publish_candidate"]
 
         def observe_publish(**kwargs):
@@ -475,7 +475,17 @@ cli.cli()
 
         monkeypatch.setitem(namespace, "publish_candidate", observe_publish)
         monkeypatch.setattr(
-            sys, "argv", ["dryrun_publication.py", str(run), str(prepared), "--branch", "agent/workflow"]
+            sys,
+            "argv",
+            [
+                "dryrun_publication.py",
+                str(run),
+                str(prepared),
+                "--branch",
+                "agent/workflow",
+                "--projects-dir",
+                str(projects),
+            ],
         )
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         assert rehearsal["main"]() == 0
@@ -793,7 +803,7 @@ def test_engine_resume_switch_preserves_completed_packet_and_shared_budget(engin
 def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_run, tmp_path, monkeypatch):
     """Three synthetic works: real worker transport, native compiler, gates, and proposed commit."""
     import dataclasses
-    import runpy
+    import os
     import shutil
     import subprocess
     import sys
@@ -953,19 +963,25 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert (config.run_root / "verification/provenance.txt").exists()
     assert (config.run_root / "verification/excerpt-grounding.txt").exists()
     shutil.copytree(config.source_dir, config.run_root / "sources")
-    rehearsal = runpy.run_path(str(config.engine_root / "bin/dryrun_publication.py"))
-    rehearsal["main"].__globals__.update(FABRIC=config.engine_root, PROJECTS_DIR=tmp_path)
-    monkeypatch.setattr(
-        sys,
-        "argv",
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    alias = tmp_path / "temporary-alias"
+    alias.symlink_to(temporary, target_is_directory=True)
+    rehearsal = subprocess.run(
         [
-            "dryrun_publication.py",
+            sys.executable,
+            str(config.engine_root / "bin/dryrun_publication.py"),
             str(config.run_root),
             str(config.field_root),
             "--branch",
             "agent/engine",
             "--project",
             "reading",
+            "--projects-dir",
+            str(tmp_path),
         ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TMPDIR": str(alias)},
     )
-    assert rehearsal["main"]() == 0
+    assert rehearsal.returncode == 0, rehearsal.stdout + rehearsal.stderr
