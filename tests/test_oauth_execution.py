@@ -294,7 +294,8 @@ def test_real_native_compile_uses_same_oauth_wire(tmp_path, wire, model, effort)
     assert len(rows) == len(requests) and all(r["role"] == "compile" and r["outcome"] == "accepted" for r in rows)
 
 
-def test_subscription_only_disables_optional_calls(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reading", [False, True])
+def test_subscription_only_disables_optional_calls(tmp_path, monkeypatch, reading):
     from research_fabric.engine import ResearchRun, RunConfig
 
     run = ResearchRun(
@@ -313,6 +314,10 @@ def test_subscription_only_disables_optional_calls(tmp_path, monkeypatch):
     result = run._advisory_review({"candidate_sha256": "abc", "changed": []})
     assert result["status"] == "unavailable" and result["verdict"] is None
     run.source_files = []
+    if reading:
+        run.reading_plan = True
+        run.compile_plan = {}
+        monkeypatch.setattr("research_fabric.compile_units.compile_units", lambda *a, **k: {})
     monkeypatch.setattr("research_fabric.engine.compile_with_recovery", lambda *a, **k: {})
     monkeypatch.setattr("research_fabric.engine.normalize_generated_log", lambda *a: None)
     monkeypatch.setattr("research_fabric.engine.subprocess.run", lambda *a, **k: pytest.fail("unqualified lint"))

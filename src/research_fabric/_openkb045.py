@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import importlib.metadata
 import inspect
+import json
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -243,6 +244,7 @@ def native_execution(root, sources, compiler, cli, index):
         if stopped:
             raise ExecutionError(stopped[0])
         try:
+            _check_envelope(root, session, kwargs)
             attempt, timeout = session.begin(profile)
         except ExecutionError as exc:
             stopped.append(exc.reason)
@@ -299,3 +301,28 @@ def native_execution(root, sources, compiler, cli, index):
         compiler._accepts_cache_control = original_cache
         cli._setup_llm_key = original_key
         compiler.litellm.completion, compiler.litellm.acompletion = original_sync, original_async
+
+
+def _check_envelope(root, session, kwargs):
+    """Reject the complete native request before reservation/transport, never truncate.
+
+    UTF-8 bytes plus framing is deliberately conservative for the qualified text
+    tokenizer. Inline image bytes count too; remote media has no bounded envelope.
+    This is an operator limit, not an assertion of a provider's context capacity.
+    """
+    path = Path(root) / "compile-plan.json"
+    if not path.is_file():
+        return  # Legacy projects retain their existing execution contract.
+    policy = json.loads(path.read_text())["policy"]
+    messages = kwargs.get("messages", [])
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if part.get("type") == "image_url" and not part["image_url"]["url"].startswith("data:"):
+                    raise ExecutionError("unbounded_remote_media")
+    budget = session.config["budget"]
+    reserve = min(kwargs.get("max_tokens") or budget["output_tokens"], budget["output_tokens"])
+    size = len(json.dumps(messages, ensure_ascii=False).encode()) + 1024 + 256 * len(messages) + reserve
+    if size > min(policy["max_request_tokens"], budget["attempt_tokens"]):
+        raise ExecutionError("request_envelope_exceeded")

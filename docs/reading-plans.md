@@ -2,9 +2,10 @@
 
 An explicit `reading` project profile assigns Markdown snapshots to intellectual
 works. Source preparation freezes one `reading-plan.json` before model calls.
-Workers read its primary and context sections; native OpenKB still compiles one
-whole prepared source bundle per snapshot using its stock planner. Native pages
-are generated from source inputs independently of the evidence ledger.
+Workers read its primary and context sections; native OpenKB compiles each reading
+as a bounded unit into one shared wiki. Native pages are generated from source
+inputs independently of the evidence ledger. See [bounded compilation](compile-units.md)
+for envelope limits, native coverage policy, accepted-prefix resume and coverage audits.
 
 ## Vocabulary
 
@@ -101,7 +102,7 @@ not satisfy primary-claim minimums. Primary evidence groups by Work, not reading
 
 ## Native citations and byte preservation
 
-The isolated KB's supported `wiki/AGENTS.md` receives an idempotent compact mapping:
+Each isolated unit candidate's supported `wiki/AGENTS.md` receives only its scoped mapping:
 section ID, heading, original source target, line range and byte range. It does not
 copy the corpus or replace native planning. Generated section citations resolve
 through `ReadingPlan.section`; accepted quotes use the same source span mapping

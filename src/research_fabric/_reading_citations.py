@@ -27,10 +27,10 @@ def section(plan, section_id):
     }
 
 
-def citation_policy(plan):
+def citation_policy(plan, section_ids=None):
     """Map native OpenKB citations to the same frozen original-source sections."""
     records = []
-    for section_id in plan.data["sections"]:
+    for section_id in plan.data["sections"] if section_ids is None else section_ids:
         record = section(plan, section_id)
         heading = span_text(plan.representations, record).splitlines()[0]
         records.append(json.dumps({"section": section_id, "heading": heading, **record}, ensure_ascii=False))

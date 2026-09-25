@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,17 +34,24 @@ def citations(messages):
     assert records and all(
         row["target"] in system and row["original_bytes"][1] > row["original_bytes"][0] for row in records
     )
-    calls["citation_mappings"] = records
+    previous = {row["section"]: row for row in calls.get("citation_mappings", [])}
+    previous.update({row["section"]: row for row in records})
+    calls["citation_mappings"] = list(previous.values())
     counter.write_text(json.dumps(calls))
     return "\n".join(f"[Original section](../{row['target']})" for row in records)
 
 
 def completion(model, messages, **kwargs):
+    if "Frozen research source citations" in messages[0]["content"]:
+        with counter.with_suffix(".prompts.jsonl").open("a") as handle:
+            handle.write(json.dumps(messages) + "\n")
     mapped = citations(messages)
     prompt = messages[-1]["content"]
     if isinstance(prompt, list):
         prompt = prompt[0]["text"]
     if "decide how to update" in prompt:
+        if "Research coverage and retention" in messages[0]["content"]:
+            return response(json.dumps({"update": [{"name": name} for name in ("one", "two", "three", "four")]}))
         return response(json.dumps({"update": [{"name": "one"}, {"name": "two"}]}))
     if "Rewrite the summary" in prompt:
         raise TimeoutError("Optional summary rewrite")
@@ -57,7 +65,15 @@ async def acompletion(model, messages, **kwargs):
     counter.write_text(json.dumps(calls))
     if calls["attempts"] == 1 and "for: two" in messages[-1]["content"]:
         raise TimeoutError("Required page timed out")
-    return response(json.dumps({"description": "Concept", "content": "Native generated body\n" + mapped}))
+    existing = re.search(r"Current content of this page:\n(.*?)\n\nNew information", messages[-1]["content"], re.S)
+    retained = existing[1] if existing else "Native generated body"
+    document = messages[1]["content"]
+    if isinstance(document, list):
+        document = document[0]["text"]
+    evidence = "\n".join(line.rstrip() for line in re.findall(r"Evidence [^\n]+", document))
+    return response(
+        json.dumps({"description": "Concept", "content": "\n".join(filter(None, (retained, evidence, mapped)))})
+    )
 
 
 compiler.litellm.completion = completion

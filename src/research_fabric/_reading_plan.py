@@ -187,10 +187,10 @@ class ReadingPlan:
 
         return section(self, section_id)
 
-    def citation_policy(self):
+    def citation_policy(self, section_ids=None):
         from ._reading_citations import citation_policy
 
-        return citation_policy(self)
+        return citation_policy(self, section_ids)
 
     def validate_packet(self, packet, reading_id, acceptance):
         """Require every worker claim to belong to its dispatched frozen assignment.
