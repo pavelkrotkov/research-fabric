@@ -93,9 +93,18 @@ def test_malformed_truncated_animated_and_byte_limit(tmp_path):
         prepare(source, tmp_path / "bundles")
 
 
-def test_required_block_and_optional_reading_dispositions(tmp_path):
+@pytest.mark.parametrize("high_bit_depth", [False, True])
+def test_required_block_and_optional_reading_dispositions(tmp_path, high_bit_depth):
     source, image = fixture(tmp_path, (16, 16))
-    image.write_bytes(b"unreadable")
+    if high_bit_depth:
+        contrast = Image.new("I;16", (2000, 1000), 1000)
+        contrast.paste(Image.new("I;16", (1000, 1000), 50000), (1000, 0))
+        contrast.save(image)
+        with Image.open(image) as original:
+            assert original.getextrema() == (1000, 50000)
+    else:
+        image.write_bytes(b"unreadable")
+    original_bytes = image.read_bytes()
     profile = {
         "reading": {
             "sources": {"paper.md": "paper"},
@@ -111,8 +120,11 @@ def test_required_block_and_optional_reading_dispositions(tmp_path):
     with pytest.raises(ValueError, match=r"paper.md: plot.png.*lines.*7, 8.*source incomplete"):
         plan()
     assert not (tmp_path / "plan.json").exists()
-    image.rename(tmp_path / "plot.svg")
-    source.write_text(source.read_text().replace("![Equation](plot.png)", '<img src="plot.svg" data-optional="true">'))
+    suffix = "png" if high_bit_depth else "svg"
+    image.rename(tmp_path / f"plot.{suffix}")
+    source.write_text(
+        source.read_text().replace("![Equation](plot.png)", f'<img src="plot.{suffix}" data-optional="true">')
+    )
     result, bundles = plan()
     assert bundles["paper.md"]["visual_disposition"] == "incomplete-optional-visuals"
     assert result.data["sources"]["paper.md"]["visual_disposition"] == "incomplete-optional-visuals"
@@ -120,7 +132,12 @@ def test_required_block_and_optional_reading_dispositions(tmp_path):
     assert text["visual_disposition"] == "no-visuals"
     assert visual["visual_disposition"] == "incomplete-optional-visuals"
     assert visual["assets"] == [{"source_file": "paper.md", "index": 0}]
-    assert "unsupported visual format" in bundles["paper.md"]["assets"][0]["limitation"]
+    bundle = bundles["paper.md"]
+    row = bundle["assets"][0]
+    reason = "unsupported raster mode for downsampling" if high_bit_depth else "unsupported visual format"
+    assert reason in row["limitation"]
+    assert "derivative_path" not in row
+    assert (tmp_path / "bundles" / bundle["key"] / row["original_path"]).read_bytes() == original_bytes
     assert plan()[0].data == result.data
     changed = json.loads((tmp_path / "plan.json").read_text())
     changed["readings"][1]["visual_disposition"] = "complete"

@@ -24,7 +24,7 @@ POLICY = {
     "max_pixels": 1600,
     "timeout_seconds": 30,
     "raster": {
-        "version": 1,
+        "version": 2,
         "max_input_bytes": MAX_BYTES,
         "max_input_pixels": 32_000_000,
         "max_input_edge": 16_000,
@@ -32,6 +32,7 @@ POLICY = {
         "max_output_edge": 1600,
         "frames": "single-only",
         "resampling": "LANCZOS",
+        "resize_modes": ["1", "L", "LA", "P", "RGB", "RGBA", "CMYK"],
         "output": "PNG RGB/RGBA, compress_level=6, no metadata; small inputs byte-exact",
     },
 }
@@ -94,6 +95,8 @@ def _prepare_raster(data: bytes, suffix: str) -> tuple[bytes, str, dict]:
             image.load()
             operation = "byte-exact-copy"
             if max(size) > policy["max_output_edge"]:
+                if image.mode not in policy["resize_modes"]:
+                    raise ValueError(f"unsupported raster mode for downsampling: {image.mode}")
                 mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
                 image = image.convert(mode)
                 image.thumbnail((policy["max_output_edge"],) * 2, Image.Resampling.LANCZOS)

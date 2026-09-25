@@ -26,7 +26,7 @@ syntax is required by default; use the explicit HTML form for optional figures.
 `bundle.json` records originals, their per-file hashes, raster derivatives,
 derivative hashes, renderer versions/configuration, prepared-input hash and source
 attestation. Supported raster inputs are single-frame PNG/JPEG/GIF/WebP. Raster
-policy v1 separates decoding limits (20,000,000 input bytes, 32,000,000 input
+policy v2 separates decoding limits (20,000,000 input bytes, 32,000,000 input
 pixels, 16,000 pixels per input dimension) from delivery (1,600 pixels per
 dimension, 20,000,000 output bytes). Pillow verifies and fully loads the image;
 decompression-bomb warnings are locally treated as errors, never globally
@@ -37,10 +37,16 @@ deliberately admit 6000 × 3000 figures, not arbitrary oversized inputs.
 Already-small rasters stay byte-exact. Larger accepted rasters become aspect-ratio
 preserving LANCZOS thumbnails, RGB/RGBA PNG with compression level 6 and no input
 metadata. No EXIF orientation transform or color-profile correction is implied.
+Downsampling accepts Pillow modes 1, L, LA, P, RGB, RGBA and CMYK only. High-bit-depth
+grayscale modes (including I;16) are explicitly unsupported for resizing: direct
+RGB conversion clips their intensities and can erase all contrast. Required inputs
+block dependent readings; optional inputs retain originals with an incomplete
+disposition and no derivative. Already-small inputs still remain byte-exact.
 The renderer record includes original/derivative dimensions, operation, Pillow
 and codec versions, and the full raster policy. Original bytes remain usable at
 the original link. Frozen policy v1 bundles must be rebuilt into a fresh staging
-directory to adopt bundle policy v2; resume does not migrate or rerender them.
+directory to adopt bundle policy v2. Raster policy v1 bundles likewise need fresh
+staging for raster policy v2; resume does not migrate or rerender them.
 
 PDF uses `pdftoppm`; EPS uses Ghostscript in `-dSAFER` mode. Executables are
 discovered on PATH. Both render only the complete first page, at most 1600 pixels
