@@ -17,6 +17,7 @@ NOTE = "Possibly E = m c^2; the exponent is uncertain. Ask whether energy scales
 
 
 def reading_run(tmp_path, *, shared=False):
+    pytest.importorskip("openkb")
     root, run_root = tmp_path / "sources", tmp_path / "run"
     for folder in ("a", "b"):
         (root / folder).mkdir(parents=True)
