@@ -70,7 +70,12 @@ def ledger_rows(field_root, packets, notes, sources, *, multi=False, reading_pla
 
 def _packet_records(field_root, packets):
     execution = {
-        worker: {"packet_revision": packet["packet_revision"], "execution": packet.get("execution")}
+        worker: {
+            "packet_revision": packet["packet_revision"],
+            "execution": packet.get("execution"),
+            **({"derived_context": packet["derived_context"]} if "derived_context" in packet else {}),
+            **({"derived_review": packet["parsed"].get("coverage_notes", [])} if "derived_context" in packet else {}),
+        }
         for worker, packet in packets.items()
     }
     write_json(field_root / "evidence/packet-execution.json", execution)

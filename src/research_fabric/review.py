@@ -151,6 +151,8 @@ def audit_compiled_wiki(kb, verification):
     base = _git(kb, "rev-parse", "HEAD")
     diff_sha = hashlib.sha256(diff.encode()).hexdigest()
     binding = json.dumps({"base": base, "outputs": outputs, "diff_sha256": diff_sha}, sort_keys=True).encode()
+    packet_path = kb / "evidence/packet-execution.json"
+    packets = json.loads(packet_path.read_text()) if packet_path.exists() else {}
     report = {
         "version": 1,
         "base_commit": base,
@@ -160,7 +162,11 @@ def audit_compiled_wiki(kb, verification):
         "diff_sha256": diff_sha,
         "diff_bytes": len(diff.encode()),
         "asset_manifest_hashes": asset_hashes,
+        "derived_context": {
+            worker: row["derived_context"] for worker, row in packets.items() if "derived_context" in row
+        },
         "mechanical": {"ok": not defects, "defects": defects},
+        "derived_review": {worker: row["derived_review"] for worker, row in packets.items() if "derived_review" in row},
         "limitations": [
             "Byte/link/source-span checks do not establish semantic support or completeness.",
             "Semantic omission, nuance, duplication and preserved qualifications "
