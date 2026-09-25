@@ -551,7 +551,7 @@ def test_native_fallback_uses_fresh_candidate_and_shared_accounting(kb, tmp_path
     assert not (failed / "wiki/concepts/one.md").exists()
     identity = json.loads(next((tmp_path / "diagnostics").glob("*/identity.json")).read_text())
     assert identity["execution"]["revision"] == 1
-    assert set(identity["execution"]["code"]) == {"execution.py"}
+    assert set(identity["execution"]["code"]) == {"execution.py", "_oauth_execution.py"}
 
 
 def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, model, tmp_path):
@@ -566,7 +566,7 @@ def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, mode
     assert not (kb / "wiki/concepts/one.md").exists()
 
 
-def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tmp_path, monkeypatch):
+def test_native_oauth_route_is_passed_to_shared_transport(kb, model, tmp_path, monkeypatch):
     import time
 
     from litellm.llms.chatgpt.authenticator import Authenticator
@@ -586,6 +586,11 @@ def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tm
         pytest.fail("offline OAuth fixture must never initiate device login")
 
     monkeypatch.setattr(Authenticator, "_login_device_code", unexpected_login)
+    scripted = compiler.litellm.completion
+    monkeypatch.setattr(
+        "research_fabric._openkb045.response",
+        lambda profile, messages, arguments: scripted(model=f"chatgpt/{profile['model']}", messages=messages),
+    )
     configure(run, resolve(native_model="chatgpt/gpt-5", environ={}))
     report = native_compile(kb, [source(tmp_path)], execution_root=run)
     assert report["sources"]

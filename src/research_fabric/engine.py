@@ -132,6 +132,7 @@ class ResearchRun:
         self.config, self.agent_step = config, agent_step
         self.agent_provider = agent_provider
         self.reading_plan = None
+        self.subscription_only = False
         self.packet_dir = config.run_root / "evidence"
         self.compiler_dir = config.run_root / "compiler-sources"
 
@@ -173,6 +174,30 @@ class ResearchRun:
             self.project, self.config.execution, native_model=native_config["model"], previous=previous_execution
         )
         configure(self.config.run_root, execution)
+        self.subscription_only = execution.get("subscription_only", False)
+        if self.subscription_only:
+            if self.config.compiler_command is not None:
+                raise RuntimeError("custom compiler commands are unqualified in subscription-only mode")
+            write_json(
+                self.config.run_root / "model-stages.json",
+                {
+                    "extraction": "oauth",
+                    "repair": "oauth",
+                    "compile": "oauth",
+                    "planning": "unavailable",
+                    "advisory_verification": "unavailable",
+                    "visual_preflight": "unavailable",
+                    "native_knowledge_lint": "unavailable",
+                    "reason": "Optional model stages disabled in subscription-only mode",
+                },
+            )
+            if self.config.visual_preflight_spec:
+                raise RuntimeError("visual preflight is unavailable in subscription-only mode; omit its spec")
+        profiles = list(execution["roles"].values()) + [p for rows in execution["fallbacks"].values() for p in rows]
+        if any(p["provider"] == "chatgpt" for p in profiles):
+            from research_fabric._oauth_execution import prepare
+
+            prepare()  # Qualify dependencies/endpoints before collecting any evidence; no login or model call.
         self.canonical_manifest = (
             self.config.engine_root / "corpora" / self.project["corpus_dir"] / self.project["manifest_path"]
         ).resolve()
@@ -255,6 +280,9 @@ class ResearchRun:
         return packet_policy_defects(packet, self.project)
 
     def plan(self):
+        if self.subscription_only:
+            write_json(self.config.run_root / "plan.json", {"status": "unavailable", "reason": "subscription_only"})
+            return  # Source assignments still come from the deterministic project/reading plan.
         visual_preparation = ""
         if self.config.visual_preflight_spec:
             from research_fabric.visual_preflight import preparation_note
@@ -390,6 +418,8 @@ class ResearchRun:
 
     def run_verifier(self, step_id, prompt, artifact):
         """Run a verifier step, retrying once when the reply is not a usable verdict."""
+        if self.subscription_only:
+            return None, "advisory verification unavailable in subscription-only mode", ""
         last_text = ""
         for attempt in (1, 2):
             handle = self.agent_step(
@@ -503,9 +533,10 @@ class ResearchRun:
                     self.config.field_root / "wiki",
                     pathlib.Path(bundle["input_path"]).stem,
                 )
-        subprocess.run(
-            [*self.config.openkb_command, "--kb-dir", str(self.config.field_root), "lint"], check=True, text=True
-        )
+        if not self.subscription_only:
+            subprocess.run(
+                [*self.config.openkb_command, "--kb-dir", str(self.config.field_root), "lint"], check=True, text=True
+            )
         normalize_generated_log(self.config.field_root)
 
     def _publication_context(self):
@@ -601,12 +632,19 @@ class ResearchRun:
         return {
             "execution": history(self.config.run_root),
             "advisory_execution": {
-                "provider": self.agent_provider,
+                "provider": None if self.subscription_only else self.agent_provider,
                 "actual_model": None,
                 "usage": None,
-                "reason": "External advisory calls do not expose effective model or usage at this seam",
+                "reason": "unavailable: subscription_only"
+                if self.subscription_only
+                else "External advisory calls do not expose effective model or usage at this seam",
             },
-            "native_lint_execution": {"actual_model": None, "usage": None, "budgeted": False},
+            "native_lint_execution": {
+                "actual_model": None,
+                "usage": None,
+                "budgeted": False,
+                "status": "unavailable" if self.subscription_only else "unobserved",
+            },
             "engine_sha": _command_output(["git", "-C", str(self.config.engine_root), "rev-parse", "HEAD"]),
             "engine_tag": _command_output(
                 ["git", "-C", str(self.config.engine_root), "describe", "--tags", "--exact-match"]

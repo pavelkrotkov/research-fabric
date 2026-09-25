@@ -323,11 +323,9 @@ def test_native_api_route_cannot_claim_oauth(provider):
         )
 
 
-def test_unqualified_astra_effort_is_explicit_error():
+def test_unqualified_astra_api_effort_is_explicit_error():
     with pytest.raises(ex.ExecutionError, match="unsupported_reasoning_effort"):
-        ex.resolve(
-            override={"roles": {"compile": {"effort": "medium"}}}, native_model="chatgpt/gpt-6-astra", environ={}
-        )
+        ex.resolve(override={"roles": {"compile": {"effort": "medium"}}}, native_model="openai/gpt-6-astra", environ={})
 
 
 @pytest.mark.parametrize("existing", [False, True])
