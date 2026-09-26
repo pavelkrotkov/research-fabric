@@ -9,6 +9,8 @@ permissions:
 jobs:
   offline-native-visual:
     runs-on: ubuntu-latest
+    env:
+      TIKTOKEN_CACHE_DIR: /tmp/research-fabric-tiktoken
     steps:
       - uses: actions/checkout@v7
         with:
@@ -19,8 +21,9 @@ jobs:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v7
       - run: uv venv /tmp/visual-env
-      - run: uv pip install --python /tmp/visual-env/bin/python -r tests/visual-requirements.txt -e . pytest
-      - run: /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py
+      - run: uv pip install --python /tmp/visual-env/bin/python -r tests/visual-requirements.txt -e '.[reading]' pytest
+      - run: /tmp/visual-env/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
+      - run: /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py tests/test_visual_reading_native.py tests/test_derived_context.py
         env:
           LITELLM_LOCAL_MODEL_COST_MAP: 'True'
           OPENAI_AGENTS_DONT_LOG_MODEL_DATA: '1'

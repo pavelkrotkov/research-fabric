@@ -31,6 +31,13 @@ def _accepted_packets(run_root, worker_ids, source_dir, reading_plan, acceptance
         revisions = _revisions(packet, worker)
         if reading_plan:
             reading_plan.validate_packet(packet, worker, acceptance)
+            from .derived_context import context_path, load_context, packet_defects
+
+            context = context_path(run_root, worker)
+            if context.exists() or "derived_context" in packet:
+                defects = packet_defects(packet, load_context(context))
+                if defects:
+                    raise ValueError("; ".join(defects))
         accepted = accept_packet(packet, worker, source_dir=source_dir, adapters=ADAPTERS)
         for key, expected in revisions.items():
             if accepted.get(key) != expected:
