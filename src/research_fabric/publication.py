@@ -97,9 +97,12 @@ def publish_candidate(
 ):
     """Materialize, gate, review and commit one prepared compiled candidate."""
     _require_compiled(compiled)
-    field_root, run_root = pathlib.Path(field_root), pathlib.Path(run_root)
-    engine_root, source_dir = pathlib.Path(engine_root), pathlib.Path(source_dir)
-    source_files = list(map(pathlib.Path, source_files))
+    field_root, run_root = pathlib.Path(field_root).resolve(), pathlib.Path(run_root).resolve()
+    engine_root, source_dir = pathlib.Path(engine_root).resolve(), pathlib.Path(source_dir).resolve()
+    source_files = [pathlib.Path(source).resolve() for source in source_files]
+    for source in source_files:
+        if source_dir not in source.parents:
+            raise ValueError(f"source escapes allowed root: {source}")
     verification = run_root / "verification"
     verification.mkdir(parents=True, exist_ok=True)
     from ._unit_coverage import publish_unit_coverage
