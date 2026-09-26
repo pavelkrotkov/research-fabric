@@ -5,6 +5,16 @@ performed**. No operator-supplied book path, account qualification receipt, or
 explicit model/budget selection accompanied this implementation. The synthetic
 fixture below is not a substitute. Do not launch the rest of the corpus.
 
+The first native CI execution also found an integration blocker before evidence
+dispatch: an oversized raster's inspection records the original bytes as its
+derivative, while the frozen bundle records a downsampled derivative. Reading
+context correctly rejects this identity mismatch. The one-book regression is
+currently a failing reproduction, not an offline qualification receipt. See
+[the exact-head macOS run](https://github.com/pavelkrotkov/research-fabric/actions/runs/36239571406/job/108397416694)
+at `ddccd2a92ed97ea9f5c65b5be411f6d9d9f1d781` (67 other tests passed, one live
+test skipped; Linux was cancelled by matrix fail-fast). Retain the hash check and
+oversized fixture; resolve the supported inspection/derivative contract first.
+
 ## Offline rehearsal (ordinary CI, no login or quota)
 
 Use Python 3.12+ with the unchanged pins in `tests/visual-requirements.txt`, this
