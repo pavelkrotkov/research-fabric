@@ -194,7 +194,12 @@ def _bundle_record(root, profile, row, rep, bundle_directory):
     if work_id not in profile["works"] or not row.get("source_id"):
         raise ValueError("reading source needs a known work and manifest source ID")
     bundle = prepare_source_bundle(rep.path, bundle_directory, source_attestation(rep, root), source_root=root)
-    return {**row, "work_id": work_id, "bundle_key": bundle["key"]}, bundle
+    return {
+        **row,
+        "work_id": work_id,
+        "bundle_key": bundle["key"],
+        "visual_disposition": bundle["visual_disposition"],
+    }, bundle
 
 
 def _source_records(root, profile, manifest_rows, bundle_directory):
