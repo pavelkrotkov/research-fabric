@@ -59,6 +59,8 @@ def validated_packet(text):
 
 def main():
     run, source_root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+    derived = None
+    derived_path = None
     if sys.argv[3] == "--reading":
         reading_id = sys.argv[4]
         project_path = pathlib.Path(sys.argv[5])
@@ -74,6 +76,16 @@ def main():
             project["reading"],
         )
         paths = [source_root / name for name in plan.source_names(reading_id)]
+        if len(sys.argv) > 6:
+            from research_fabric.derived_context import load_context
+            from research_fabric.derived_context import prompt as derived_prompt
+
+            if len(sys.argv) != 8 or sys.argv[6] != "--derived-context":
+                raise ValueError("expected --derived-context PATH")
+            derived_path = pathlib.Path(sys.argv[7])
+            derived = load_context(derived_path)
+            if derived["reading_id"] != reading_id:
+                raise ValueError("derived context belongs to another reading")
         prompt = (
             "Extract claim-level evidence for this research question: " + plan.data["question"] + "\n"
             "Read only the assigned primary/context passages. Return ONLY JSON with claims, conflicts, coverage_notes. "
@@ -83,6 +95,8 @@ def main():
             "count as independent primary support. Do not invent authorship.\n" + plan.input(reading_id)
         )
         worker = reading_id
+        if derived is not None:
+            prompt += "\n\n" + derived_prompt(derived)
         provenance = source_provenance(paths, source_root=source_root)
 
         def validate(text):
@@ -117,7 +131,7 @@ def main():
         validate = validated_packet
     from research_fabric.claims import atomic_write_json
 
-    session = worker_session(run, "extraction", worker, paths)
+    session = worker_session(run, "extraction", worker, paths + ([derived_path] if derived_path else []))
     parsed = session.call([{"role": "user", "content": prompt}], validate=validate)
     atomic_write_json(
         run / "evidence" / f"worker-{worker}.json",
@@ -125,6 +139,7 @@ def main():
             "worker": worker,
             "execution": session.records(),
             "source_provenance": provenance,
+            **({"derived_context": derived} if derived is not None else {}),
             "parsed": parsed,
         },
     )
