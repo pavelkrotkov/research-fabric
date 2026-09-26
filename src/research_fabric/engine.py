@@ -133,6 +133,7 @@ class ResearchRun:
         self.agent_provider = agent_provider
         self.reading_plan = None
         self.subscription_only = False
+        self.derived_contexts = None
         self.packet_dir = config.run_root / "evidence"
         self.compiler_dir = config.run_root / "compiler-sources"
 
@@ -282,12 +283,59 @@ class ResearchRun:
     def _packet_policy(self, packet, sid):
         if self.reading_plan:
             self.reading_plan.validate_packet(packet, sid, self.acceptance)
+        if self.derived_contexts is not None:
+            from .derived_context import packet_defects
+
+            defects = packet_defects(packet, self.derived_contexts[sid])
+            if defects:
+                return defects
         return packet_policy_defects(packet, self.project)
 
+    def _reading_visual_context(self):
+        from .derived_context import prepare_contexts
+
+        spec = json.loads(self.config.visual_preflight_spec.read_text()) if self.config.visual_preflight_spec else None
+
+        def inspect(single, key):
+            directory = self.config.run_root / "verification" / "visual"
+            spec_path, record_path = directory / f"{key}-spec.json", directory / f"{key}.json"
+            if not spec_path.exists():
+                atomic_write_json(spec_path, single)
+            elif json.loads(spec_path.read_text()) != single:
+                raise ValueError("immutable visual specification drift")
+            subprocess.run(
+                [
+                    self.config.visual_python,
+                    str(self.config.engine_root / "bin/visual_preflight.py"),
+                    "--source-root",
+                    str(self.config.source_dir),
+                    "--spec",
+                    str(spec_path),
+                    "--output",
+                    str(record_path),
+                ],
+                check=True,
+                text=True,
+            )
+            return json.loads(record_path.read_text())
+
+        self.derived_contexts = prepare_contexts(
+            self.reading_plan,
+            self.bundles,
+            self.config.run_root,
+            spec,
+            inspect,
+            self.project["reading"].get("visual_context"),
+        )
+
     def plan(self):
+        if self.reading_plan:
+            self._reading_visual_context()
         if self.subscription_only:
             write_json(self.config.run_root / "plan.json", {"status": "unavailable", "reason": "subscription_only"})
             return  # Source assignments still come from the deterministic project/reading plan.
+        if self.reading_plan:
+            return  # Source assignment stays frozen; derived context is separate.
         visual_preparation = ""
         if self.config.visual_preflight_spec:
             from research_fabric.visual_preflight import preparation_note
@@ -308,8 +356,7 @@ class ResearchRun:
                 text=True,
             )
             visual_preparation = preparation_note(json.loads(visual_record.read_text()))
-        if self.reading_plan:
-            return  # The verified frozen source assignment is the research plan.
+
         if self.config.reuse_evidence_dir:
             write_json(
                 self.config.run_root / "plan.json", {"reused": True, "source": str(self.config.reuse_evidence_dir)}
@@ -339,6 +386,8 @@ class ResearchRun:
                 "--reading",
                 sid,
                 str(self.config.project_path),
+                "--derived-context",
+                str(self.config.run_root / "derived-context" / f"{sid}.json"),
             ]
         b = int(sid.split("-")[1])
         theme_match = re.search("Extract claim-level evidence about (.+?)\\\\. Use", task)
@@ -459,6 +508,7 @@ class ResearchRun:
                 {
                     "question": self.config.question,
                     "source_files": [str(p) for p in self.source_files],
+                    "derived_context": packet.get("derived_context"),
                     "packet": packet.get("parsed")
                     if self.reading_plan
                     else normalize_packet(packet.get("parsed") or {}),
