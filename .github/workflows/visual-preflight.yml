@@ -23,7 +23,7 @@ jobs:
       - run: uv venv /tmp/visual-env
       - run: uv pip install --python /tmp/visual-env/bin/python -r tests/visual-requirements.txt -e '.[reading]' pytest
       - run: /tmp/visual-env/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
-      - run: /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py tests/test_visual_reading_native.py tests/test_derived_context.py
+      - run: /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py tests/test_visual_reading_native.py tests/test_derived_context.py tests/test_oauth_execution.py
         env:
           LITELLM_LOCAL_MODEL_COST_MAP: 'True'
           OPENAI_AGENTS_DONT_LOG_MODEL_DATA: '1'

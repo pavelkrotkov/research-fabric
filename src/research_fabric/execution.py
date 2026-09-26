@@ -59,8 +59,8 @@ def _identity(value):
 def _profile(value, allowed=None, native=False):
     """Whitelist persisted settings: credentials and arbitrary options stay out.
 
-    Native routes retain OpenKB's provider/auth implementation. Evidence routes
-    are the existing API clients; claiming OAuth support there would be false.
+    Native routes retain OpenKB's provider/auth implementation. ChatGPT text
+    calls share the qualified native Responses transport across all three roles.
     None means no model restriction; an empty allowed set permits no model.
     """
     if set(value) - {"model", "provider", "auth", "account", "effort"}:
@@ -78,6 +78,10 @@ def _profile(value, allowed=None, native=False):
 
 
 def _validate_route(profile, native):
+    if profile["provider"] == "chatgpt" and profile["auth"] == "oauth":
+        if profile["model"] not in {"gpt-5", "gpt-6-astra"}:
+            raise ExecutionError("unsupported_subscription_model")
+        return
     if native:
         allowed = {"chatgpt": {"oauth"}, **{name: {"native", "api_key"} for name in PROVIDERS}}
         if profile["auth"] not in allowed.get(profile["provider"], {"native"}):
@@ -92,7 +96,8 @@ def _effort(profile):
         return
     # Deliberately qualify only the existing OpenAI-compatible reasoning route.
     model = profile["model"].removeprefix("openai/")
-    if effort not in ("low", "medium", "high") or not model.startswith(("gpt-5", "o3", "o4")):
+    qualified = model.startswith(("gpt-5", "o3", "o4")) or (profile["provider"] == "chatgpt" and model == "gpt-6-astra")
+    if effort not in ("low", "medium", "high") or not qualified:
         raise ExecutionError("unsupported_reasoning_effort")
     if profile["provider"] not in ("openai", "openrouter", "chatgpt"):
         raise ExecutionError("unsupported_reasoning_provider")
@@ -149,7 +154,7 @@ def _validate_config(config, project):
     A fallback is validated exactly like the initial profile, including role
     restrictions; merely possessing a provider key never creates an alternative.
     """
-    if set(config) - {"roles", "budget", "fallbacks"}:
+    if set(config) - {"roles", "budget", "fallbacks", "subscription_only"}:
         raise ExecutionError("unknown_execution_setting")
     if set(config["roles"]) - {"extraction", "repair", "compile"}:
         raise ExecutionError("unknown_execution_role")
@@ -159,6 +164,12 @@ def _validate_config(config, project):
         for role, p in config["roles"].items()
     }
     _fallbacks(config, allowed)
+    if type(config.get("subscription_only", False)) is not bool:
+        raise ExecutionError("subscription_only_requires_boolean")
+    if config.get("subscription_only"):
+        profiles = list(config["roles"].values()) + [p for rows in config["fallbacks"].values() for p in rows]
+        if any(p["provider"] != "chatgpt" or p["auth"] != "oauth" for p in profiles):
+            raise ExecutionError("subscription_only_requires_oauth_routes")
     _validate_budget(config["budget"])
     return config
 
@@ -228,6 +239,10 @@ def _connect(root):
                 usage TEXT, elapsed REAL);
         """)
         with db:
+            db.execute("BEGIN IMMEDIATE")
+            if "settings" not in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}:
+                db.execute("ALTER TABLE attempts ADD COLUMN settings TEXT")
+        with db:
             yield db
     finally:
         db.close()
@@ -260,7 +275,12 @@ def _known_tokens(rows):
 def _budget_outcome(db, budget, usage, elapsed, timeout, outcome):
     tokens = usage["total_tokens"] or 0
     used = _known_tokens(db.execute("SELECT usage FROM attempts").fetchall())
-    exceeded = (elapsed > timeout, tokens > budget["attempt_tokens"], used + tokens > budget["tokens"])
+    exceeded = (
+        elapsed > timeout,
+        tokens > budget["attempt_tokens"],
+        used + tokens > budget["tokens"],
+        (usage["completion_tokens"] or 0) > budget["output_tokens"],
+    )
     return "budget_exhausted" if any(exceeded) else outcome
 
 
@@ -281,6 +301,7 @@ def history(root):
     for row in rows:
         row["profile"] = json.loads(row["profile"])
         row["usage"] = json.loads(row["usage"]) if row["usage"] else None
+        row["settings"] = json.loads(row["settings"]) if row["settings"] else None
     return {
         "revisions": revisions,
         "attempts": rows,
@@ -303,7 +324,7 @@ def reserve(root, record, budget):
     return attempt, timeout
 
 
-def complete(root, attempt, outcome, actual, usage, elapsed, budget):
+def complete(root, attempt, outcome, actual, usage, elapsed, budget, settings=None):
     with _connect(root) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT timeout FROM attempts WHERE id=? AND outcome IS NULL", (attempt,)).fetchone()
@@ -311,8 +332,9 @@ def complete(root, attempt, outcome, actual, usage, elapsed, budget):
             raise ExecutionError("attempt_missing_or_already_completed")
         outcome = _budget_outcome(db, budget, usage, elapsed, row["timeout"], outcome)
         updated = db.execute(
-            "UPDATE attempts SET outcome=?, actual_model=?, usage=?, elapsed=? WHERE id=? AND outcome IS NULL",
-            (outcome, actual, _encode(usage), elapsed, attempt),
+            "UPDATE attempts SET outcome=?, actual_model=?, usage=?, elapsed=?, settings=? "
+            "WHERE id=? AND outcome IS NULL",
+            (outcome, actual, _encode(usage), elapsed, _encode(settings), attempt),
         )
         if updated.rowcount != 1:
             raise ExecutionError("attempt_missing_or_already_completed")
@@ -350,6 +372,9 @@ def classify(exc):
     if isinstance(exc, (TimeoutError, ConnectionError)) or type(exc).__name__ in (
         "APITimeoutError",
         "APIConnectionError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ConnectError",
     ):
         return "transient"
     return "configuration_or_transport"
@@ -400,6 +425,14 @@ def _client(profile, timeout):
     )
 
 
+def response(profile, messages, arguments):
+    if profile["provider"] == "chatgpt":
+        from research_fabric._oauth_execution import response as oauth_response
+
+        return oauth_response(profile, messages, arguments["timeout"])
+    return _client(profile, arguments["timeout"]).chat.completions.create(messages=messages, **arguments)
+
+
 class Session:
     """One task's frozen profile revision; the journal owns run-wide limits.
 
@@ -436,7 +469,16 @@ class Session:
         actual = getattr(response, "model", None)
         if actual is not None and not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,180}", str(actual)):
             actual = None
-        complete(self.root, attempt, outcome, actual, _usage(response), elapsed, self.config["budget"])
+        complete(
+            self.root,
+            attempt,
+            outcome,
+            actual,
+            _usage(response),
+            elapsed,
+            self.config["budget"],
+            getattr(response, "execution_settings", None),
+        )
 
     def call(self, messages, validate=lambda text: text, max_tokens=None):
         """Try only configured profiles; auth/config errors require intervention.
@@ -452,7 +494,7 @@ class Session:
             try:
                 with self.attempt(*self.begin(profile)) as call:
                     kwargs = self.arguments(profile, call.timeout, max_tokens)
-                    call.response = _client(profile, call.timeout).chat.completions.create(messages=messages, **kwargs)
+                    call.response = response(profile, messages, kwargs)
                     return _validated(call.response, validate)
             except ExecutionError as exc:
                 if exc.reason not in ("transient", "invalid_output"):
@@ -496,6 +538,8 @@ class Session:
 
 
 def _validated(response, validate):
+    if reason := getattr(response, "execution_error", None):
+        raise ExecutionError(reason)
     try:
         choice = response.choices[0]
         if getattr(choice, "finish_reason", None) == "length" or not choice.message.content:

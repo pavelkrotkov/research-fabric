@@ -51,7 +51,8 @@ def _execution_identity(root):
         if (Path(root) / "compile-plan.json").is_file()
         else None,
         "code": {
-            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ("execution.py",)
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("execution.py", "_oauth_execution.py")
         },
     }
 
@@ -61,7 +62,16 @@ def _check_retry_allowed(root, checkpoint):
         return
 
     rows = [r for r in history(root)["attempts"] if r["id"] > checkpoint and r["role"] == "compile"]
-    terminal = {None, "authentication", "credential_unavailable", "configuration_or_transport"}
+    terminal = {
+        None,
+        "authentication",
+        "credential_unavailable",
+        "configuration_or_transport",
+        "authentication_refresh_failed",
+        "subscription_quota",
+        "unsupported_oauth_toolchain",
+        "unsupported_oauth_endpoint",
+    }
     if any(r["outcome"] in terminal for r in rows):
         raise CompilationError("Native execution requires operator configuration/cancellation before retry")
 

@@ -2,6 +2,7 @@
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,25 @@ def test_text_only_missing_required_budget_and_shared_context(tmp_path):
         run.bundles["a/paper.md"]["assets"][0]["original_sha256"]
         == (run.bundles["b/paper.md"]["assets"][0]["original_sha256"])
     )
+
+
+def test_subscription_reading_prepares_context_without_model_calls(tmp_path, monkeypatch):
+    run, _, _ = reading_run(tmp_path)
+    run.config = replace(run.config, visual_preflight_spec=None)
+    run.subscription_only = True
+
+    def never(*args, **kwargs):
+        pytest.fail("subscription-only planning invoked an optional model stage")
+
+    run.agent_step = never
+    monkeypatch.setattr("research_fabric.engine.subprocess.run", never)
+    run.plan()
+    assert json.loads((run.config.run_root / "plan.json").read_text())["status"] == "unavailable"
+    for reading in run.reading_plan.data["readings"]:
+        context = load_context(context_path(run.config.run_root, reading["id"]))
+        assert context == run.derived_contexts[reading["id"]]
+        assert all(asset["inspection"] is None for asset in context["assets"])
+        assert str(context_path(run.config.run_root, reading["id"])) in run._worker_command(reading["id"], "task")
 
 
 def test_selection_normalizes_only_safe_paths_and_preserves_hash_binding():

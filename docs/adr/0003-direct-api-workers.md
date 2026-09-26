@@ -37,8 +37,11 @@ CAO remains the run orchestrator; only the extraction step is a direct API
 call.
 
 ## Consequences
-- Extraction is **quota-independent** and **complete by construction**: the
-  full JSON is in the API response, not in a terminal buffer.
+- Extraction preserves the **full response body**, not a terminal capture.
+  Provider-truncated or malformed output is still rejected, not assumed complete.
+  Explicit API-key profiles avoid subscription quota coupling; optional native
+  ChatGPT OAuth profiles deliberately share the selected subscription's limits.
+  Authentication/quota exhaustion stops without an unconfigured paid API fallback.
 - No Codex/Hermes CLI on the collection hot path, so no tmux cold-starts, no
   shell-init gate timeouts on the 2-core host, no scrollback corruption.
 - Trade: we own the HTTP/backoff/retry logic ourselves (~135 LOC) instead of
@@ -46,3 +49,9 @@ call.
   for it.
 - The LLM is still a *proposer* of claims; nothing about verification changed
   (see ADR-001). This decision is only about *how the proposal is obtained*.
+
+The historical model/backoff above is not the current default. The shared
+execution owner now governs profiles, bounded attempts, budgets and resume; see
+[execution profiles](../execution-profiles.md). The optional OAuth transport
+reuses native credential discovery/refresh and Responses conversion, never a CLI
+agent or terminal scraping. ADR-001/002/004/005/006 remain unchanged.
