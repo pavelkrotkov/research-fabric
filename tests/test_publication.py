@@ -1,6 +1,9 @@
 import hashlib
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,7 +20,7 @@ def _git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _case(tmp_path, excerpt="Athena spoke to Telemachus."):
+def _case(tmp_path, excerpt="Athena spoke to Telemachus.", source_name="source.html"):
     repo, run, sources = tmp_path / "kb", tmp_path / "run", tmp_path / "sources"
     (repo / "wiki").mkdir(parents=True)
     (repo / "wiki/index.md").write_text("# Index\n")
@@ -30,7 +33,7 @@ def _case(tmp_path, excerpt="Athena spoke to Telemachus."):
     ):
         _git(repo, *args)
     sources.mkdir()
-    source = sources / "source.html"
+    source = sources / source_name
     source.write_text("<p>Athena spoke to Telemachus.</p>\n")
     packet = accept_packet(
         {
@@ -177,3 +180,96 @@ def test_shared_empty_diff_policy_is_fail_closed(tmp_path):
     _publish(case)
     with pytest.raises(CompilationError, match="candidate diff is empty"):
         _publish(case)
+
+
+def test_publication_root_aliases_preserve_identity_and_reject_escape(tmp_path):
+    case = _case(tmp_path / "real")
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path / "real", target_is_directory=True)
+    expected = _publish(_case(tmp_path / "expected"))
+    case.update(source_dir=alias / "sources", run_root=alias / "run", field_root=alias / "kb")
+    actual = _publish(case)
+    assert actual["claims"] == expected["claims"]
+    assert actual["source_rows"] == expected["source_rows"]
+    assert actual["gates"] == expected["gates"]
+    source = case["source_files"][0]
+    outside = tmp_path / "outside.html"
+    source.rename(outside)
+    source.symlink_to(outside)
+    with pytest.raises(ValueError, match="source escapes allowed root"):
+        _publish(case)
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "manifest", "escape", "missing_branch", "main", "no_branch", "pre-commit", "post-commit"]
+)
+def test_rehearsal_subprocess_is_portable_and_preserves_inputs(tmp_path, fault):
+    case = _case(tmp_path / "input", source_name="source1.html")
+    repo, run = case["field_root"], case["run_root"]
+    _git(repo, "branch", "-m", "main")  # The only input branch is protected.
+    shutil.copytree(case["source_dir"], run / "sources")
+    if fault == "manifest":
+        case["manifest_rows"][0]["sha256"] = "0" * 64
+    if fault == "escape":
+        source = run / "sources/source1.html"
+        source.unlink()
+        source.symlink_to(case["source_files"][0])
+    (run / "source-manifest.jsonl").write_text(json.dumps(case["manifest_rows"][0]) + "\n")
+    atomic_write_json(run / "verification/compile/accepted/completed.json", {"report": case["compiled"]})
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / "synthetic.yaml").write_text(
+        "corpus_dir: unused\nmanifest_path: unused\nsnapshot_pattern: 'source(1)\\.html'\n"
+        "source_id_template: s-1\nnote_template: wiki/summaries/source.md\nbook_label_template: source1.html\n"
+    )
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path / "input", target_is_directory=True)
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(temporary, target_is_directory=True)
+
+    def snapshot():
+        return {
+            str(path.relative_to(tmp_path / "input")): path.read_bytes()
+            for path in (tmp_path / "input").rglob("*")
+            if path.is_file()
+        }
+
+    before = snapshot()
+    refs = _git(repo, "show-ref")
+    branch = [] if fault == "no_branch" else ["--base", "missing" if fault == "missing_branch" else "main"]
+    if fault == "main":
+        branch = ["--branch", "main"]
+    env = {**os.environ, "TMPDIR": str(temp_alias)}
+    if fault in ("pre-commit", "post-commit"):
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        hook = hooks / fault
+        hook.write_text("#!/bin/sh\n" + ("exit 1\n" if fault == "pre-commit" else "touch leftover.tmp\n"))
+        hook.chmod(0o755)
+        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=str(hooks))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "bin/dryrun_publication.py"),
+            str(alias / "run"),
+            str(alias / "kb"),
+            "--projects-dir",
+            str(projects),
+            "--project",
+            "synthetic",
+            *branch,
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) == (fault is None), result.stdout + result.stderr
+    assert ("RESULT: OK" in result.stdout) == (fault is None)
+    assert snapshot() == before
+    assert _git(repo, "show-ref") == refs
+    assert _git(repo, "branch", "--show-current") == "main"
+    if fault in ("escape", "missing_branch", "main", "no_branch"):
+        assert not list(temporary.iterdir())

@@ -33,6 +33,40 @@ claim mapping failures, stale evidence/candidate revisions, deterministic gate
 failure, commit/dirty-tree failures, missing compiled outputs and the shared
 empty-diff rejection.
 
+## Portable offline rehearsal
+
+From a checkout with dependencies installed (`uv sync --dev`):
+
+```sh
+uv run python bin/dryrun_publication.py /path/to/prepared-run /path/to/candidate-kb \
+  --projects-dir /path/to/project-specs --project odyssey --base main
+```
+
+The run must already contain `sources/`, `source-manifest.jsonl`, accepted
+`evidence/worker-*.json`, and exactly one `verification/compile/*/completed.json`;
+reading projects also require their frozen `reading-plan.json`. The candidate's
+`wiki/` and `raw/` are copied as prepared, including uncommitted compiled output.
+This command does not compile or contact any model/provider.
+
+Exactly one branch option is required: `--base NAME` clones an existing local
+branch (including `main`) and creates a disposable `rehearsal/dryrun-pub-*`
+proposal, or `--branch NAME` selects an existing proposal branch. There is no
+implicit base; `--branch main` and `--branch master` are rejected. Input refs,
+branch, worktree and prepared artifacts are never changed; no merge occurs.
+
+Gate scripts default to the checkout containing this script; `--engine-root`
+overrides that root. Project lookup uses `--projects-dir` if provided, otherwise
+`<engine-root>/projects`, loading `<project>.yaml` (`odyssey` by default).
+All relative paths are relative to the invoking working directory. No host path
+or environment-variable override takes precedence over these arguments.
+Root aliases, including macOS's default temporary directory and symlinked
+`TMPDIR`, are resolved consistently; no canonical-TMPDIR workaround is needed.
+Nested symlinks within the prepared run or candidate are rejected rather than
+followed, preventing copies/publication writes from escaping into input data.
+On failure after cloning, the command prints the preserved disposable diagnostics
+directory; successful copies are removed. Invalid project, branch and prepared
+input configuration is checked before cloning where possible.
+
 ```python
 from pathlib import Path
 from research_fabric.engine import ResearchRun, RunConfig
