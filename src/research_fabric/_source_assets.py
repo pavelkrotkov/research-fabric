@@ -208,6 +208,7 @@ def _local_record(source: pathlib.Path, reference: dict, root: pathlib.Path, ori
         record.update(derivative_path=output, derivative_sha256=digest(data), renderer=renderer)
     except (
         OSError,
+        SyntaxError,  # Pillow raises this for invalid PNG chunk checksums.
         ValueError,
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,

@@ -93,15 +93,23 @@ def test_malformed_truncated_animated_and_byte_limit(tmp_path):
         prepare(source, tmp_path / "bundles")
 
 
-@pytest.mark.parametrize("high_bit_depth", [False, True])
-def test_required_block_and_optional_reading_dispositions(tmp_path, high_bit_depth):
+@pytest.mark.parametrize("failure", ["unsupported", "high-bit-depth", "checksum"])
+def test_required_block_and_optional_reading_dispositions(tmp_path, failure):
     source, image = fixture(tmp_path, (16, 16))
-    if high_bit_depth:
+    if failure == "high-bit-depth":
         contrast = Image.new("I;16", (2000, 1000), 1000)
         contrast.paste(Image.new("I;16", (1000, 1000), 50000), (1000, 0))
         contrast.save(image)
         with Image.open(image) as original:
             assert original.getextrema() == (1000, 50000)
+    elif failure == "checksum":
+        data = bytearray(image.read_bytes())
+        chunk = data.index(b"IDAT")
+        length = struct.unpack(">I", data[chunk - 4 : chunk])[0]
+        data[chunk + 4 + length] ^= 1
+        image.write_bytes(data)
+        with Image.open(image) as original, pytest.raises(SyntaxError, match="bad header checksum"):
+            original.verify()
     else:
         image.write_bytes(b"unreadable")
     original_bytes = image.read_bytes()
@@ -120,7 +128,7 @@ def test_required_block_and_optional_reading_dispositions(tmp_path, high_bit_dep
     with pytest.raises(ValueError, match=r"paper.md: plot.png.*lines.*7, 8.*source incomplete"):
         plan()
     assert not (tmp_path / "plan.json").exists()
-    suffix = "png" if high_bit_depth else "svg"
+    suffix = "svg" if failure == "unsupported" else "png"
     image.rename(tmp_path / f"plot.{suffix}")
     source.write_text(
         source.read_text().replace("![Equation](plot.png)", f'<img src="plot.{suffix}" data-optional="true">')
@@ -134,7 +142,11 @@ def test_required_block_and_optional_reading_dispositions(tmp_path, high_bit_dep
     assert visual["assets"] == [{"source_file": "paper.md", "index": 0}]
     bundle = bundles["paper.md"]
     row = bundle["assets"][0]
-    reason = "unsupported raster mode for downsampling" if high_bit_depth else "unsupported visual format"
+    reason = {
+        "unsupported": "unsupported visual format",
+        "high-bit-depth": "unsupported raster mode for downsampling",
+        "checksum": "bad header checksum",
+    }[failure]
     assert reason in row["limitation"]
     assert "derivative_path" not in row
     assert (tmp_path / "bundles" / bundle["key"] / row["original_path"]).read_bytes() == original_bytes
