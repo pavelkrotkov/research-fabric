@@ -97,10 +97,11 @@ def prepare_contexts(plan, bundles, run_root, spec, inspect, policy=None):
                 if len(record["assets"]) != 1:
                     raise ValueError("reading context requires a single-asset inspection record")
                 inspected = record["assets"][0]
+                # Visual preflight copies original bytes; the compiler bundle may downsample them.
                 if (inspected["path"], inspected["sha256"], inspected["derivative_sha256"]) != (
                     selected["path"],
                     asset["original_sha256"],
-                    asset.get("derivative_sha256"),
+                    selected["sha256"],
                 ):
                     raise ValueError("inspection original/derivative differs from frozen source bundle")
                 row["inspection"] = record
