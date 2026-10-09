@@ -1,6 +1,7 @@
 """Acceptance opt-in and predeclared evaluation checks need no native model runtime."""
 
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -39,3 +40,29 @@ def test_opt_in_and_frozen_source_evaluation(tmp_path):
     with pytest.raises(ValueError, match="absent from original"):
         freeze(fixture, evaluation, tmp_path / "new")
     assert not (tmp_path / "new").exists()
+
+
+def test_evaluation_source_pins_directories_against_symlink_swap(tmp_path, monkeypatch):
+    read = runpy.run_path(str(SCRIPT))["_read_source"]
+    root = tmp_path / "sources"
+    chapter = root / "chapter"
+    chapter.mkdir(parents=True)
+    (chapter / "paper.md").write_text("original")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "paper.md").write_text("outside")
+    original_open = os.open
+
+    def swap(path, flags, *, dir_fd=None):
+        fd = original_open(path, flags, dir_fd=dir_fd)
+        if path == "chapter":
+            chapter.rename(root / "retired")
+            chapter.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(os, "open", swap)
+    assert read(root, "chapter/paper.md") == b"original"
+    with pytest.raises(ValueError, match="without symlinks"):
+        read(root, "chapter/paper.md")
+    with pytest.raises(ValueError, match="escapes source directory"):
+        read(root, "../outside/paper.md")

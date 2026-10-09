@@ -140,7 +140,9 @@ def test_one_book_acceptance(engine_run, replay, tmp_path, monkeypatch):  # noqa
     assert (docs / "index.md").is_file()
     exported = {hashlib.sha256(p.read_bytes()).hexdigest() for p in (docs / "assets").rglob("*") if p.is_file()}
     assert all(hashlib.sha256(content).hexdigest() in exported for content in originals.values())
-    assert asset["source_asset"]["derivative_sha256"] in exported
+    assert asset["source_asset"]["derivative_sha256"] in {
+        hashlib.sha256(p.read_bytes()).hexdigest() for p in (docs / "sources/images").rglob("*") if p.is_file()
+    }
     shutil.copytree(config.source_dir, config.run_root / "sources")
     # Default platform temp-root (macOS alias included), plus explicit symlink-root regression.
     temporary = tmp_path / "temporary"

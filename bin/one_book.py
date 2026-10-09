@@ -5,8 +5,10 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -15,6 +17,23 @@ from research_fabric.claims import atomic_write_json  # noqa: E402
 from research_fabric.core import load_project  # noqa: E402
 from research_fabric.engine import ResearchRun, RunConfig  # noqa: E402
 from research_fabric.execution import resolve  # noqa: E402
+
+
+def _read_source(source_dir, relative):
+    path = Path(relative)
+    if path.is_absolute() or not path.parts or ".." in path.parts or "\\" in relative:
+        raise ValueError("evaluation source escapes source directory")
+    try:
+        with ExitStack() as stack:
+            parent = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY)
+            stack.callback(os.close, parent)
+            for part in path.parts[:-1]:
+                parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                stack.callback(os.close, parent)
+            with os.fdopen(os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent), "rb") as handle:
+                return handle.read()
+    except OSError as exc:
+        raise ValueError("evaluation source must be a readable file without symlinks") from exc
 
 
 def freeze_evaluation(source_dir, evaluation_path, run_root):
@@ -27,10 +46,7 @@ def freeze_evaluation(source_dir, evaluation_path, run_root):
         if not item["id"] or item["id"] in ids:
             raise ValueError("evaluation IDs must be nonempty and unique")
         ids.add(item["id"])
-        path = (source_dir / item["source_file"]).resolve()
-        if not path.is_relative_to(source_dir.resolve()):
-            raise ValueError("evaluation source escapes source directory")
-        content = path.read_bytes()
+        content = _read_source(source_dir, item["source_file"])
         lines = content.decode("utf-8").splitlines()
         start, end = item["lines"]
         if not (type(start) is int and type(end) is int and 1 <= start < end <= len(lines) + 1):
