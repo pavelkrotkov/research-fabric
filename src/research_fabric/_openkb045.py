@@ -19,11 +19,12 @@ import asyncio
 import hashlib
 import importlib.metadata
 import inspect
+import json
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from research_fabric.execution import ExecutionError, Session, _validated
+from research_fabric.execution import ExecutionError, Session, _validated, response
 
 POLICY = "native-045-complete-v1"
 COMPILER_SHA = "9d697d323100916017e25c0826efb3922092f56fe8971b13d725ce80b898d1da"
@@ -228,6 +229,10 @@ def native_execution(root, sources, compiler, cli, index):
     model = f"{profile['provider']}/{profile['model']}"
     original_sync, original_async = compiler.litellm.completion, compiler.litellm.acompletion
     original_config = cli.load_config
+    original_cache = compiler._accepts_cache_control
+    original_key = cli._setup_llm_key
+    if profile["provider"] == "chatgpt" and any(p.suffix.lower() not in {".md", ".txt"} for p in sources):
+        raise ExecutionError("oauth_compile_requires_text_sources")
     stopped = []
 
     def config(path):
@@ -236,7 +241,10 @@ def native_execution(root, sources, compiler, cli, index):
         return value
 
     def prepare(kwargs):
+        if stopped:
+            raise ExecutionError(stopped[0])
         try:
+            _check_envelope(root, session, kwargs)
             attempt, timeout = session.begin(profile)
         except ExecutionError as exc:
             stopped.append(exc.reason)
@@ -245,26 +253,76 @@ def native_execution(root, sources, compiler, cli, index):
         kwargs.update(model=model, num_retries=0, max_retries=0)
         return attempt, timeout
 
+    @contextmanager
+    def attempt(kwargs):
+        try:
+            with session.attempt(*prepare(kwargs)) as call:
+                yield call
+        except ExecutionError as exc:
+            if exc.reason not in {"transient", "invalid_output"}:
+                stopped.append(exc.reason)
+            raise
+
     def sync(**kwargs):
-        with session.attempt(*prepare(kwargs)) as call:
-            call.response = original_sync(**kwargs)
+        with attempt(kwargs) as call:
+            call.response = (
+                response(profile, kwargs["messages"], kwargs)
+                if profile["provider"] == "chatgpt"
+                else original_sync(**kwargs)
+            )
             _validated(call.response, lambda text: text)
             return call.response
 
     async def asynchronous(**kwargs):
-        with session.attempt(*prepare(kwargs)) as call:
-            call.response = await original_async(**kwargs)
+        with attempt(kwargs) as call:
+            call.response = (
+                await asyncio.to_thread(response, profile, kwargs["messages"], kwargs)
+                if profile["provider"] == "chatgpt"
+                else await original_async(**kwargs)
+            )
             _validated(call.response, lambda text: text)
             return call.response
 
     cli.load_config = config
+    if profile["provider"] == "chatgpt":
+        # Native provider detection otherwise refreshes/logs in outside the journal.
+        compiler._accepts_cache_control = lambda model: False
+        cli._setup_llm_key = lambda kb: None
     compiler.litellm.completion, compiler.litellm.acompletion = sync, asynchronous
     try:
         yield session
         if stopped:
             raise ExecutionError(stopped[0])
-        if any(row["outcome"] == "budget_exhausted" for row in session.records()):
-            raise ExecutionError("budget_exhausted")
+        for row in session.records():
+            if row["outcome"] not in {"accepted", "transient", "invalid_output"}:
+                raise ExecutionError(row["outcome"])
     finally:
         cli.load_config = original_config
+        compiler._accepts_cache_control = original_cache
+        cli._setup_llm_key = original_key
         compiler.litellm.completion, compiler.litellm.acompletion = original_sync, original_async
+
+
+def _check_envelope(root, session, kwargs):
+    """Reject the complete native request before reservation/transport, never truncate.
+
+    UTF-8 bytes plus framing is deliberately conservative for the qualified text
+    tokenizer. Inline image bytes count too; remote media has no bounded envelope.
+    This is an operator limit, not an assertion of a provider's context capacity.
+    """
+    path = Path(root) / "compile-plan.json"
+    if not path.is_file():
+        return  # Legacy projects retain their existing execution contract.
+    policy = json.loads(path.read_text())["policy"]
+    messages = kwargs.get("messages", [])
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if part.get("type") == "image_url" and not part["image_url"]["url"].startswith("data:"):
+                    raise ExecutionError("unbounded_remote_media")
+    budget = session.config["budget"]
+    reserve = min(kwargs.get("max_tokens") or budget["output_tokens"], budget["output_tokens"])
+    size = len(json.dumps(messages, ensure_ascii=False).encode()) + 1024 + 256 * len(messages) + reserve
+    if size > min(policy["max_request_tokens"], budget["attempt_tokens"]):
+        raise ExecutionError("request_envelope_exceeded")

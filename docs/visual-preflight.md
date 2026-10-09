@@ -38,12 +38,61 @@ native OAuth login flow; establish the account before unattended runs.
 ```
 
 For the research workflow, pass `visual_preflight_spec=/path/to/visual.json` and
-`visual_python=/tmp/visual-env/bin/python`. Before fresh planning, the workflow invokes
-the isolated process and appends explicitly labeled derived notes to preparation.
-Reused evidence runs still record the preflight but do not rerun planning. Notes
-never enter original snapshots, compiler inputs, or claim excerpts. A generated
-transcription fails the existing verbatim gate unless independently grounded in the
-original source. Section-packet consumption belongs to #11.
+`visual_python=/tmp/visual-env/bin/python`. Legacy projects append a labeled note to
+supervisor preparation. Markdown reading projects instead inspect each selected raster
+separately and route its note using the frozen reading's primary/context asset closure.
+Matching uses the full source-root-relative original path and original/derivative hashes,
+never basename or a run-wide note dump. Shared figures reach all assigned readers;
+unassigned spec assets are not inspected. Multi-image prose cannot safely be split, so
+the reading path deliberately uses one native inspection request per distinct selected asset.
+
+### Reading consumption, budgets, and reuse
+
+`reading.visual_context` accepts `max_tokens` (default 4096) and `required` (default
+false). This is a separate hard budget for the complete labeled derived-context prompt,
+including identity/status metadata, using the reading plan's qualified tokenizer. It
+does not reduce primary/context text budgets. Overflow fails actionably rather than
+truncating uncertainty. Increase the budget in a new run if necessary.
+
+Without a visual spec, no OAuth code runs. Every assigned asset remains explicitly
+uninspected. With an optional spec, missing selections and unresolved inspections remain
+limitations; successful access is still unreviewed and is not proof of correctness.
+With `required: true`, every assigned primary/context asset must have a matching,
+resolved inspection; absence or failure stops dispatch. Source-bundle `required` still
+means required asset availability/rendering, not a requirement for model interpretation.
+The current slice supports supplied small rasters whose derivative bytes match the
+inspected image. Converted/oversized derivatives require the #37 follow-up; they are not
+silently treated as inspected originals.
+
+The trace is `verification/visual/<request-hash>.json` →
+`derived-context/<reading-id>.json` → accepted packet `derived_context` → published
+`evidence/packet-execution.json` → final `compiled-wiki-review.json`. These retain full
+inspection request/configuration/version identity, original locators, bundle asset
+identity, access status, generated qualifications and unresolved limitations. Worker
+`coverage_notes` are also preserved as `derived_review` in publication/review, not as
+source-backed claims. Inspection does not earn a human-reviewed status (ADR-001/004).
+
+The worker execution fingerprint includes its own context file. Reuse compares exact
+consumed context, including the model instructions and inspection checksum. Incompatible
+packets are recollected; same-run context drift fails with instructions to preserve
+history and start a new run. Historical inspection/context files are never overwritten.
+Missing consumed files fail publication instead of silently dropping the binding.
+
+Notes never enter original snapshots, frozen primary-source representations, or claim
+excerpts. A generated transcription fails quotation grounding unless independently
+present in original textual source. Visual-only propositions belong in limitations for
+independent review, not fabricated textual citations. Source hashes, stable claim IDs,
+and primary/context independence grouping remain unchanged.
+
+### Bounded-compilation boundary (#40)
+
+This slice feeds actual reading research and published review context, not native
+compilation: `compiler_received: false` describes only this derived-context path.
+Native source-bundle image handling is separate. #40 should consume accepted per-reading
+`derived_context` through the supported research-context mechanism, retain its hash and
+unreviewed label, and record actual delivery before changing this status. Never inject
+notes into compiler source text or imply that a compiler received pixels or independent
+primary evidence from this record.
 
 The inspection record includes:
 
@@ -93,14 +142,20 @@ packages, broaden global provider behavior, or replace native tools to make test
 ## Validation and optional live smoke
 
 ```sh
-LITELLM_LOCAL_MODEL_COST_MAP=True /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py
+LITELLM_LOCAL_MODEL_COST_MAP=True /tmp/visual-env/bin/python -m pytest tests/test_visual_preflight_native.py tests/test_visual_reading_native.py
 ```
 
 Offline tests replay the external Responses endpoint and authentication only. Real
 LiteLLM request translation, installed converter, native query agent, native tools,
 and native runner execute. Network calls fail the test. The unpatched installed
 combination demonstrably returns the preamble without invoking the image tool.
-CI always uses the offline suite.
+CI always uses the offline suite. Reading integration additionally installs `.[reading]`
+and provisions the official tokenizer data before tests (see `docs/reading-plans.md`).
+Its fixture draws an equation raster, replays native inspection replies, executes the
+production planning/worker CLIs in-process so external endpoint patches remain active,
+captures actual SDK request bodies, and publishes a prepared candidate through real
+publication gates and Git commit verification. The compiler output is a fixture; no
+live model/account is required and no test claims that fixture performed compilation.
 
 A live smoke test is explicitly opt-in, uses a tiny synthetic raster, and never falls
 back to an API account. It is not run by default and requires a configured OAuth account:

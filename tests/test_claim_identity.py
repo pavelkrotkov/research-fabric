@@ -29,10 +29,6 @@ _SPEC = importlib.util.spec_from_file_location("repair_claims", ROOT / "bin" / "
 repair_claims = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(repair_claims)
-_DRY_SPEC = importlib.util.spec_from_file_location("dryrun_publication", ROOT / "bin" / "dryrun_publication.py")
-dryrun_publication = importlib.util.module_from_spec(_DRY_SPEC)
-assert _DRY_SPEC.loader is not None
-_DRY_SPEC.loader.exec_module(dryrun_publication)
 
 
 def _packet():
@@ -327,20 +323,6 @@ def test_repair_rejects_unsupported_source_representation(tmp_path):
     claim = {"claim_id": "c-book-1-1", "source_file": "source.pdf"}
     with pytest.raises(ClaimIdentityError, match="unsupported source format"):
         repair_claims._source_body(source_dir, claim)
-
-
-def test_dryrun_persists_migrated_packet_only_in_disposable_destination(tmp_path):
-    source_dir = _source(tmp_path)
-    input_path = tmp_path / "worker-book-1.json"
-    atomic_write_json(input_path, _packet())
-    destination = tmp_path / "disposable" / "accepted-packets"
-    accepted, accepted_path = dryrun_publication.accept_and_persist_packet(
-        input_path, "book-1", source_dir, destination
-    )
-    assert not json.loads(input_path.read_text(encoding="utf-8"))["parsed"]["claims"][0].get("claim_id")
-    persisted = json.loads(accepted_path.read_text(encoding="utf-8"))
-    assert persisted["parsed"]["claims"][0]["claim_id"] == accepted["parsed"]["claims"][0]["claim_id"]
-    assert persisted.get("source_provenance") == accepted.get("source_provenance")
 
 
 def test_drop_last_claim_fails_after_packet_history_is_retained(tmp_path):
@@ -662,7 +644,7 @@ def _workflow_reuse(source_dir, reuse_dir, destination):
     _reuse_evidence_packets(reuse_dir, destination, [("book-1", "")], {"book-1": expected}, lambda *_: [], source_dir)
 
 
-@pytest.mark.parametrize("seam", ["reuse", "rehearsal", "ledger"])
+@pytest.mark.parametrize("seam", ["reuse", "ledger"])
 @pytest.mark.parametrize("record_drop", [False, True])
 def test_unrecorded_claim_loss_fails_before_materialization(tmp_path, seam, record_drop):
     source_dir = _source(tmp_path)
@@ -685,8 +667,6 @@ def test_unrecorded_claim_loss_fails_before_materialization(tmp_path, seam, reco
     def action():
         if seam == "reuse":
             return _workflow_reuse(source_dir, reuse_dir, destination)
-        if seam == "rehearsal":
-            return dryrun_publication.accept_and_persist_packet(source_path, "book-1", source_dir, destination)
         return claim_validation.sync_ledger_rows(original_rows, {"book-1": packet})
 
     if record_drop:

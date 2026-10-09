@@ -439,50 +439,66 @@ cli.cli()
         _git(tmp_path, "clone", "--quiet", "--no-hardlinks", str(kb), str(prepared))
         _git(prepared, "config", "user.email", "fixture@example.invalid")
         _git(prepared, "config", "user.name", "Fixture")
-        # Retain actual native pages/assets/snapshots; remove derived publication records only.
-        records = ("claims.jsonl", "sources.jsonl", "claim-history.json", "packet-execution.json")
-        _git(prepared, "rm", "--", *(f"evidence/{name}" for name in records))
-        _git(prepared, "commit", "-m", "Prepared native candidate without published ledgers")
+        _git(prepared, "reset", "--hard", _git(kb, "rev-parse", "HEAD^"))
+        for folder in ("wiki", "raw"):
+            target = prepared / folder
+            if target.exists():
+                shutil.rmtree(target)
+            source_tree = kb / folder
+            if source_tree.exists():
+                shutil.copytree(source_tree, target)
         prepared_head = _git(prepared, "rev-parse", "HEAD")
+        prepared_tree = _tree(prepared)
+        prepared_status = _git(prepared, "status", "--porcelain")
         original_run = _tree(run)
         native_calls = (tmp_path / "calls.json").read_bytes()
-        production_files = set(_git(kb, "ls-files", "--", "wiki", "evidence").splitlines())
+        production_files = set(_git(kb, "ls-files", "--", "wiki", "evidence", "raw", ".gitattributes").splitlines())
         production_outputs = _publication_outputs(kb)
+        production_publication = json.loads((run / "verification/publication-result.json").read_text())
         observed = {}
         rehearsal = runpy.run_path(str(root / "bin/dryrun_publication.py"))
         namespace = rehearsal["main"].__globals__
-        namespace.update(FABRIC=root, PROJECTS_DIR=projects)
-        real_commit = namespace["_commit"]
 
-        def observe_commit(destination, *args):
-            status = real_commit(destination, *args)
-            observed["files"] = set(_git(destination, "ls-files", "--", "wiki", "evidence").splitlines())
-            observed["outputs"] = _publication_outputs(destination)
-            observed["claims"] = [
-                json.loads(line) for line in (destination / "evidence/claims.jsonl").read_text().splitlines()
-            ]
-            return status
+        real_publish = namespace["publish_candidate"]
 
-        monkeypatch.setitem(namespace, "_commit", observe_commit)
+        def observe_publish(**kwargs):
+            outcome = real_publish(**kwargs)
+            destination = kwargs["field_root"]
+            observed["files"] = set(
+                _git(destination, "ls-files", "--", "wiki", "evidence", "raw", ".gitattributes").splitlines()
+            )
+            observed["outputs"] = outcome["outputs"]
+            observed["claims"] = outcome["claims"]
+            observed["gates"] = outcome["gates"]
+            observed["changed"] = outcome["review"]["changed"]
+            return outcome
+
+        monkeypatch.setitem(namespace, "publish_candidate", observe_publish)
         monkeypatch.setattr(
-            sys, "argv", ["dryrun_publication.py", str(run), str(prepared), "--branch", "agent/workflow"]
+            sys,
+            "argv",
+            [
+                "dryrun_publication.py",
+                str(run),
+                str(prepared),
+                "--branch",
+                "agent/workflow",
+                "--projects-dir",
+                str(projects),
+            ],
         )
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         assert rehearsal["main"]() == 0
-        # Characterize real differences; do not normalize missing provenance or fields away.
-        assert observed["claims"] == [
-            dict(row, claim_type="", english_witness=None, witnesses_consulted=[]) for row in ledger
-        ]
-        assert production_files - observed["files"] == {"evidence/packet-execution.json"}
-        assert observed["files"] - production_files == {"evidence/accepted-packets/worker-book-1.json"}
-        shared = production_files & observed["files"] - {"evidence/claims.jsonl"}
-        assert {name: observed["outputs"][name] for name in shared} == {
-            name: production_outputs[name] for name in shared
-        }
+        assert observed["claims"] == ledger
+        assert observed["files"] == production_files
+        assert observed["outputs"] == production_outputs
+        assert observed["gates"] == production_publication["gates"]
+        assert observed["changed"] == production_publication["changed"]
         assert _tree(run) == original_run
         assert (tmp_path / "calls.json").read_bytes() == native_calls
         assert _git(prepared, "rev-parse", "HEAD") == prepared_head
-        assert _git(prepared, "status", "--porcelain") == ""
+        assert _tree(prepared) == prepared_tree
+        assert _git(prepared, "status", "--porcelain") == prepared_status
     assert (run / "verification/provenance.txt").exists()
     assert (run / "verification/excerpt-grounding.txt").exists()
     assert subprocess.check_output(["git", "-C", str(kb), "status", "--porcelain"]) == b""
@@ -545,7 +561,7 @@ def test_native_fallback_uses_fresh_candidate_and_shared_accounting(kb, tmp_path
     assert not (failed / "wiki/concepts/one.md").exists()
     identity = json.loads(next((tmp_path / "diagnostics").glob("*/identity.json")).read_text())
     assert identity["execution"]["revision"] == 1
-    assert set(identity["execution"]["code"]) == {"execution.py"}
+    assert set(identity["execution"]["code"]) == {"execution.py", "_oauth_execution.py"}
 
 
 def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, model, tmp_path):
@@ -560,7 +576,7 @@ def test_native_exhausted_shared_budget_never_accepts_optional_fallback(kb, mode
     assert not (kb / "wiki/concepts/one.md").exists()
 
 
-def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tmp_path, monkeypatch):
+def test_native_oauth_route_is_passed_to_shared_transport(kb, model, tmp_path, monkeypatch):
     import time
 
     from litellm.llms.chatgpt.authenticator import Authenticator
@@ -580,6 +596,11 @@ def test_native_oauth_route_is_passed_to_existing_native_transport(kb, model, tm
         pytest.fail("offline OAuth fixture must never initiate device login")
 
     monkeypatch.setattr(Authenticator, "_login_device_code", unexpected_login)
+    scripted = compiler.litellm.completion
+    monkeypatch.setattr(
+        "research_fabric._openkb045.response",
+        lambda profile, messages, arguments: scripted(model=f"chatgpt/{profile['model']}", messages=messages),
+    )
     configure(run, resolve(native_model="chatgpt/gpt-5", environ={}))
     report = native_compile(kb, [source(tmp_path)], execution_root=run)
     assert report["sources"]
@@ -787,7 +808,7 @@ def test_engine_resume_switch_preserves_completed_packet_and_shared_budget(engin
 def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_run, tmp_path, monkeypatch):
     """Three synthetic works: real worker transport, native compiler, gates, and proposed commit."""
     import dataclasses
-    import runpy
+    import os
     import shutil
     import subprocess
     import sys
@@ -795,6 +816,7 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
     import yaml
     from PIL import Image
 
+    from research_fabric.claims import stable_revision
     from research_fabric.engine import ResearchRun
     from research_fabric.reading import ReadingPlan
     from research_fabric.sources import representation_for, source_attestation
@@ -806,6 +828,7 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
     texts = {
         "chapter/α source.md": "".join(
             f"# Repeated heading\r\n\r\nEvidence chapter section {i} spans  \r\ntwo original lines.\r\n\r\n"
+            + f"Evidence chapter assumption {i}: bias, variance, calibration and error require independence.\r\n\r\n"
             + ("Long coherent argument with qualifications. " * 35).rstrip()
             + "\r\n\r\n$$\r\nx = y + 1\r\n$$\r\n\r\n```text\r\n# inert heading\r\n```\r\n\r\n"
             for i in range(3)
@@ -831,6 +854,12 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
         }
         for index, name in enumerate(texts)
     ]
+    from research_fabric._reading_span import structure
+
+    # A source ID may equal a reading ID: publication must still use the unit note.
+    first_name = next(iter(texts))
+    first_section = next(iter(structure(first_name, representation_for(config.source_dir / first_name))[0]))
+    rows[0]["source_id"] = "read-" + stable_revision({"primary": [first_section], "work_id": "chapter"})[:20]
     (config.run_root / "source-manifest.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
     project = tmp_path / "reading.yaml"
     project.write_text(
@@ -844,6 +873,7 @@ def test_source_mapped_readings_drive_native_compile_and_exact_citations(engine_
                     "policy": {"target_tokens": 80, "soft_limit_tokens": 120, "context_budget_tokens": 40},
                 },
                 "acceptance": {"min_claims_per_reading": 1},
+                "compilation": {"max_request_tokens": 64000},
             }
         )
     )
@@ -880,7 +910,24 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     config = dataclasses.replace(
         config, project_path=project, worker_python=str(worker), question="Compare qualified findings."
     )
+    from research_fabric.execution import history
+
+    # Exhaustion after an accepted prefix must leave the real worktree clean.
+    config = dataclasses.replace(config, execution={"budget": {"requests": 26}})
+    with pytest.raises(RuntimeError):
+        ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    checkpoint = json.loads((config.run_root / "verification/compile/units/checkpoint.json").read_text())
+    assert checkpoint["sources"]
+    assert not (config.run_root / "verification/compile/units/completed.json").exists()
+    assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
+    prior_calls = history(config.run_root)["attempts"]
+    config = dataclasses.replace(
+        config, execution={"budget": {"requests": 100}}, reuse_evidence_dir=config.run_root / "evidence"
+    )
     result = ResearchRun(config, lambda **_: "VERDICT: FAIL - advisory fixture").execute()
+    aggregate = json.loads((config.run_root / "verification/compile/units/completed.json").read_text())["report"]
+    assert aggregate["sources"][: len(checkpoint["sources"])] == checkpoint["sources"]
+    assert history(config.run_root)["attempts"][: len(prior_calls)] == prior_calls
     assert result["state"] == "READY_FOR_REVIEW"
     assert subprocess.check_output(["git", "-C", str(config.field_root), "status", "--porcelain"]) == b""
     packet_bytes = {path.name: path.read_bytes() for path in (config.run_root / "evidence").glob("worker-*.json")}
@@ -911,6 +958,26 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         assert original.decode().replace("\r\n", "\n") == claim["excerpt"]
     calls = json.loads((tmp_path / "compiler-calls.json").read_text())
     assert calls["citation_mappings"]
+    compile_plan = json.loads((config.run_root / "compile-plan.json").read_text())
+    coverage = json.loads((config.field_root / "evidence/coverage.json").read_text())
+    assert coverage["mechanical_complete"] and coverage["semantic_complete"] is None
+    assert coverage["native_source_notes"] == len(plan.data["readings"])
+    assert coverage["independent_works"] == 3
+    assert all(row["disposition"] == "compiled" for row in coverage["sections"].values())
+    assert any(row["changed_existing_pages"] for row in coverage["retention"])
+    assert len(list((config.field_root / "wiki/concepts").glob("*.md"))) == 4
+    captured = [json.loads(line) for line in (tmp_path / "compiler-calls.prompts.jsonl").read_text().splitlines()]
+    assert captured
+    for messages in captured:
+        system = messages[0]["content"]
+        mappings = [json.loads(line) for line in system.splitlines() if line.startswith('{"section":')]
+        assert len(mappings) < len(plan.data["sections"])
+        body = json.dumps(messages[1], ensure_ascii=False)
+        assert not all(f"Evidence chapter section {i}" in body for i in range(3))
+    for unit in compile_plan["units"]:
+        raw_name = "raw/" + unit["id"] + ".md"
+        prepared = (config.run_root / "compile-units" / unit["input_path"]).read_bytes()
+        assert subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + raw_name]) == prepared
     docs = tmp_path / "browser/docs"
     subprocess.run(
         [
@@ -926,15 +993,17 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     for name, source in plan.data["sources"].items():
         bundle_root = config.run_root / "compiler-sources" / source["bundle_key"]
         bundle = json.loads((bundle_root / "bundle.json").read_text())
-        prepared = (bundle_root / bundle["input_path"]).read_bytes()
         raw_name = "raw/" + Path(bundle["input_path"]).name
-        assert subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + raw_name]) == prepared
+        assert not (config.field_root / raw_name).exists()
         original_name = "wiki/assets/" + source["bundle_key"] + "/original/" + name
         assert (
             subprocess.check_output(["git", "-C", str(config.field_root), "show", "HEAD:" + original_name])
             == (config.source_dir / name).read_bytes()
         )
     generated = "\n".join(path.read_text() for path in (config.field_root / "wiki/concepts").glob("*.md"))
+    assert "bias, variance, calibration and error require independence" in generated
+    assert "Evidence first paper qualifies the chapter" in generated
+    assert "Evidence second paper contradicts the chapter" in generated
     for record in calls["citation_mappings"]:
         resolved = plan.section(record["section"])
         assert "../" + resolved["target"] in generated
@@ -947,19 +1016,25 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert (config.run_root / "verification/provenance.txt").exists()
     assert (config.run_root / "verification/excerpt-grounding.txt").exists()
     shutil.copytree(config.source_dir, config.run_root / "sources")
-    rehearsal = runpy.run_path(str(config.engine_root / "bin/dryrun_publication.py"))
-    rehearsal["main"].__globals__.update(FABRIC=config.engine_root, PROJECTS_DIR=tmp_path)
-    monkeypatch.setattr(
-        sys,
-        "argv",
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    alias = tmp_path / "temporary-alias"
+    alias.symlink_to(temporary, target_is_directory=True)
+    rehearsal = subprocess.run(
         [
-            "dryrun_publication.py",
+            sys.executable,
+            str(config.engine_root / "bin/dryrun_publication.py"),
             str(config.run_root),
             str(config.field_root),
             "--branch",
             "agent/engine",
             "--project",
             "reading",
+            "--projects-dir",
+            str(tmp_path),
         ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TMPDIR": str(alias)},
     )
-    assert rehearsal["main"]() == 0
+    assert rehearsal.returncode == 0, rehearsal.stdout + rehearsal.stderr

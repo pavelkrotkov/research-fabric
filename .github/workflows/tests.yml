@@ -15,7 +15,11 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os == 'ubuntu-latest' && 'test' || 'test (macos)' }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     env:
       TIKTOKEN_CACHE_DIR: /tmp/research-fabric-tiktoken
     steps:
@@ -23,6 +27,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -47,7 +52,10 @@ jobs:
         run: uv run python bin/excerpt_grounding.py
 
   native-compile:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     env:
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
@@ -56,6 +64,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -67,4 +76,4 @@ jobs:
       - name: Provision official tokenizer data for offline reading tests
         run: .venv/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
       - name: Exercise real native rollback and production retry without credentials
-        run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py
+        run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py tests/test_compile_units.py

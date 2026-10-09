@@ -13,6 +13,7 @@ from ._reading_inputs import _assets, _bibliography, _budget, _context, _default
 from ._reading_plan import ReadingPlan, published_reading_plan
 from ._reading_span import exact_excerpt, reading_quote, reading_source_text, structure
 from ._reading_validation import policy
+from ._source_assets import visual_disposition
 from .claims import atomic_write_json, stable_revision
 
 __all__ = (
@@ -56,6 +57,9 @@ def _build_plan(root, profile, sources, bundles, reps, base, encoding):
         reading.setdefault("context", _context(reading, data, reps, references))
         reading["token_counts"] = _budget(reading, data["sections"], reps, encoding)
         reading["assets"] = _assets(reading, data["sections"], bundles)
+        reading["visual_disposition"] = visual_disposition(
+            [bundles[row["source_file"]]["assets"][row["index"]] for row in reading["assets"]]
+        )
     data["sha256"] = stable_revision(data)
     return data, boundaries
 
@@ -83,6 +87,13 @@ def prepare_reading_plan(source_root, project, manifest_rows, destination, bundl
     else:
         data, boundaries = _build_plan(root, profile, sources, bundles, reps, base, encoding)
     plan = ReadingPlan(data, reps, boundaries)
+    for reading in data["readings"]:
+        expected_assets = _assets(reading, data["sections"], bundles)
+        disposition = visual_disposition(
+            [bundles[row["source_file"]]["assets"][row["index"]] for row in expected_assets]
+        )
+        if reading.get("assets") != expected_assets or reading.get("visual_disposition") != disposition:
+            raise ValueError("frozen reading visual assignment/disposition drift")
     plan.validate()
     if not destination.exists():
         atomic_write_json(destination, data)

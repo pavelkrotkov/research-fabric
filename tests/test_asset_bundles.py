@@ -27,6 +27,70 @@ def prepare(source, destination):
     return prepare_source_bundle(source, destination, source_attestation(representation_for(source)))
 
 
+@pytest.mark.parametrize("disposition", ["excluded", "primary"])
+def test_unit_asset_publication_preserves_exclusions_and_integrity(tmp_path, disposition):
+    from research_fabric.compilation import CompilationError
+    from research_fabric.compile_units import _unit, publish_unit_assets
+    from research_fabric.reading import prepare_reading_plan
+
+    source = tmp_path / "sources/book.md"
+    png(source.parent / "figure.png")
+    source.write_text("# Finding\n\nEvidence.\n\n# Appendix\n\n![Figure](figure.png)\n")
+    reviewed = {
+        "sections": {
+            "finding": {"source_file": "book.md", "lines": [1, 5], "disposition": "primary"},
+            "appendix": {
+                "source_file": "book.md",
+                "lines": [5, 8],
+                "disposition": disposition,
+                "reason": "Reviewed appendix disposition",
+            },
+        },
+        "readings": [{"id": "finding", "work_id": "book", "primary": ["finding"]}],
+    }
+    if disposition == "primary":
+        reviewed["readings"][0]["primary"].append("appendix")
+    (source.parent / "reviewed.json").write_text(json.dumps(reviewed))
+    project = {
+        "reading": {
+            "sources": {"book.md": "book"},
+            "works": {"book": {"title": None, "authors": None}},
+            "reviewed_plan": "reviewed.json",
+        }
+    }
+    row = {**source_attestation(representation_for(source), source.parent), "source_id": "book"}
+    plan, bundles = prepare_reading_plan(
+        source.parent, project, [row], tmp_path / "reading-plan.json", tmp_path / "compiler-sources"
+    )
+    unit = _unit(plan, plan.data["readings"][0], bundles, tmp_path / "compile-units", {"mode": "coverage"}, "")
+    assert bool(unit["assets"]) == (disposition == "primary")
+    bundle = bundles["book.md"]
+    root = tmp_path / "compiler-sources" / bundle["key"]
+    record = bundle["assets"][0]
+    derivative = root / record["derivative_path"]
+    wiki = tmp_path / "wiki"
+    native = wiki / "sources/images" / unit["id"] / derivative.name
+    if unit["assets"]:
+        native.parent.mkdir(parents=True)
+        native.write_bytes(derivative.read_bytes())
+    frozen = {"units": [unit]}
+    publish_unit_assets(tmp_path, wiki, bundles, frozen)
+    docs = tmp_path / "docs"
+    exported = assets.export_assets(wiki, docs)
+    assert exported == assets.publication_files(bundle, bundle["key"])
+    assert (docs / "assets" / bundle["key"] / "bundle.json").read_bytes() == (root / "bundle.json").read_bytes()
+    for relative, expected in exported.items():
+        assert assets.digest((docs / relative).read_bytes()) == expected
+    if unit["assets"]:
+        native.write_bytes(b"corrupt native output")
+        with pytest.raises(CompilationError, match="native unit asset drift"):
+            publish_unit_assets(tmp_path, wiki, bundles, frozen)
+        native.write_bytes(derivative.read_bytes())
+    derivative.write_bytes(b"corrupt staged derivative")
+    with pytest.raises(ValueError, match="drift"):
+        publish_unit_assets(tmp_path, wiki, bundles, frozen)
+
+
 def test_parsed_discovery_ignores_examples_and_preserves_reference_identity(tmp_path):
     source = tmp_path / "paper.md"
     png(tmp_path / "figure one.png")

@@ -1,13 +1,22 @@
-"""Atomic run terminal state and proposed-commit finalization (ADR-002)."""
+"""Atomic run terminal state (ADR-002); Git publication lives with the publisher.
 
-import hashlib
+The engine owns terminal run state. Publication commit mechanics are re-exported
+for compatibility with older callers, but their implementation lives in the
+publication component.
+"""
+
 import json
 import logging
-import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
-from research_fabric.compilation import CompilationError, _git, assert_run_branch, digest, write_json
+from . import _publication_git
+from .compilation import CompilationError, write_json
+
+commit_publication = _publication_git.commit_publication
+_publication_outputs = _publication_git._publication_outputs
+_verify_compiled_outputs = _publication_git._verify_compiled_outputs
+_verify_reviewed_outputs = _publication_git._verify_reviewed_outputs
 
 
 def set_state(run_root, state):
@@ -39,94 +48,27 @@ def run_lifecycle(run_root):
         raise
 
 
-def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None, reviewed=None):
-    """A proposed commit is ready only after provenance and clean-tree checks."""
-    assert_run_branch(kb)
-    record = provenance()
-    if not isinstance(record, dict) or not record:
+def record_ready(run_root, claims, provenance, publication):
+    """The engine alone turns a validated publication outcome into terminal READY."""
+    if not isinstance(provenance, dict) or not provenance:
         raise CompilationError("Missing run provenance")
-    outputs = _publication_outputs(kb)
-    _verify_reviewed_outputs(kb, outputs, reviewed)
-    if compiled is not None:
-        _verify_compiled_outputs(outputs, compiled)
-    _git(kb, "add", "-A")
-    _require_tracked(kb, outputs)
-    _git(kb, "diff", "--cached", "--check")
-    _git(kb, "commit", "-m", message)
-    head = _git(kb, "rev-parse", "HEAD")
-    _verify_commit(kb, head, outputs)
-    branch = _git(kb, "branch", "--show-current")
-    if _git(kb, "status", "--porcelain"):
-        raise CompilationError("Worktree dirty after commit; proposed commit is not accepted")
     result = {
         "run_id": Path(run_root).name,
         "state": "READY_FOR_REVIEW",
-        "branch": branch,
-        "commit": head,
+        "branch": publication["branch"],
+        "commit": publication["commit"],
         "claims": claims,
-        "evidence": str(Path(kb) / "evidence"),
-        "provenance": record,
+        "evidence": publication["evidence"],
+        "provenance": provenance,
     }
     write_json(Path(run_root) / "run.json", result)
     return result
 
 
-def _publication_outputs(kb):
-    """Snapshot every publication artifact, excluding private native state."""
-    outputs = {
-        str(path.relative_to(kb)): digest(path)
-        for folder in ("wiki", "evidence", "raw")
-        for path in (Path(kb) / folder).rglob("*")
-        if path.is_file()
-    }
-    if (Path(kb) / ".gitattributes").is_file():
-        outputs[".gitattributes"] = digest(Path(kb) / ".gitattributes")
-    return outputs
-
-
-def _verify_reviewed_outputs(kb, outputs, reviewed):
-    if reviewed is not None and (
-        reviewed["base_commit"] != _git(kb, "rev-parse", "HEAD") or reviewed["outputs"] != outputs
-    ):
-        raise CompilationError("Publication outputs changed after compiled-wiki review")
-
-
-def _verify_compiled_outputs(outputs, compiled):
-    """Compilation pages must survive later phases with their attested bytes.
-
-    The native operations log and lint reports intentionally change after
-    compilation. Required summary/concept/entity pages and index do not.
-    Ledger/snapshot output is included separately in the final publication
-    snapshot, so this does not create a second compiled-output audit.
-    """
-    paths = {"wiki/index.md"}
-    for source in compiled["sources"]:
-        paths.add(f"wiki/summaries/{source['summary']}.md")
-        paths.update(f"wiki/{folder}/{slug}.md" for folder, _, slug in source["required"])
-    for path in paths:
-        if path not in outputs or outputs[path] != compiled["outputs"][path]:
-            raise CompilationError(f"Required compiled output changed or disappeared: {path}")
-
-
-def _require_tracked(kb, outputs):
-    """Ignored publication files cannot count as a clean proposed commit."""
-    tracked = set(_git(kb, "ls-files", "-z").split("\0"))
-    missing = outputs.keys() - tracked
-    if missing:
-        raise CompilationError(f"Publication outputs are ignored/untracked: {', '.join(sorted(missing))}")
-
-
-def _verify_commit(kb, head, outputs):
-    """Bind accepted bytes to actual Git blobs, including changes by hooks.
-
-    A clean worktree is insufficient if a commit hook rewrote both the index
-    and working copy. Read the proposed commit itself and compare it to the
-    snapshot taken after gates and before staging. Never force-add ignored
-    native/auth state, and leave rejected proposed commits on the run branch.
-    """
-    for path, expected in outputs.items():
-        blob = subprocess.run(
-            ["git", "-C", str(kb), "cat-file", "blob", f"{head}:{path}"], capture_output=True, check=True
-        ).stdout
-        if hashlib.sha256(blob).hexdigest() != expected:
-            raise CompilationError(f"Proposed commit changed publication output: {path}")
+def finalize_run(kb, run_root, message, claims, provenance, *, compiled=None, reviewed=None):
+    """Compatibility wrapper for callers that still combine commit and READY."""
+    record = provenance()
+    if not isinstance(record, dict) or not record:
+        raise CompilationError("Missing run provenance")
+    publication = commit_publication(kb, message, compiled=compiled, reviewed=reviewed)
+    return record_ready(run_root, claims, record, publication)
