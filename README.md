@@ -25,6 +25,10 @@ verifier cannot re-verify against the source.**
 
 ## What a run does
 
+For an opt-in one-book integration rehearsal and the private live acceptance
+procedure, see [one-book acceptance](docs/one-book-acceptance.md). Synthetic replay
+does not qualify a live book or authorize corpus expansion.
+
 ```
 source snapshots (immutable, sha256-manifested)
         │

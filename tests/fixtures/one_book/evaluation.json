@@ -1,0 +1,16 @@
+{
+  "scope": "Synthetic two-chapter measurement book, authored for this repository under its MIT license. Not Business Data Science.",
+  "sampling": "Both chapters; all definition/assumption/example/connection/conflict paragraphs, one equation and one schematic raster. This tiny exhaustive textual sample is not a whole-book quality threshold.",
+  "visual_omissions": "The replayed note is deliberately uncertain and not human reviewed. It cannot support a textual claim about pixels. Native compilation receives original figure derivatives, not inspection prose.",
+  "items": [
+    {"id": "definition", "source_file": "a/paper.md", "lines": [5, 6], "expected": "not with truth known without error"},
+    {"id": "assumption", "source_file": "a/paper.md", "lines": [7, 8], "expected": "independent errors with finite variance"},
+    {"id": "equation", "source_file": "a/paper.md", "lines": [9, 12], "expected": "\\operatorname{Var}(\\bar X) = \\sigma^2 / n"},
+    {"id": "example", "source_file": "a/paper.md", "lines": [13, 14], "expected": "variance 2.25"},
+    {"id": "figure", "source_file": "a/paper.md", "lines": [15, 16], "expected": "equation.png", "asset": "a/equation.png"},
+    {"id": "qualification", "source_file": "b/paper.md", "lines": [5, 6], "expected": "do not generally reduce variance"},
+    {"id": "connection", "source_file": "b/paper.md", "lines": [7, 8], "expected": "averaging independent noise cannot remove that offset"},
+    {"id": "conflict", "source_file": "b/paper.md", "lines": [9, 10], "expected": "conflicts with the offset example and the independence assumption"},
+    {"id": "counterexample", "source_file": "b/paper.md", "lines": [11, 12], "expected": "retains its bias"}
+  ]
+}
