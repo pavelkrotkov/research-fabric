@@ -104,8 +104,9 @@ only `wiki/` and `raw/`, rejects ignored outputs and empty proposals, verifies
 actual proposed Git blob bytes, and requires a clean worktree. Each source gets
 a commit and a receipt bound to input SHA, native report, output tree and parent
 commit. Receipts include ignored native state hashes; native state stays private.
-Trailing spaces (including Markdown hard line breaks) are permitted without
-rewriting compiler output. The command scopes that Git setting to its diff check;
+Trailing spaces (including Markdown hard line breaks) and final blank lines are
+permitted without rewriting source or compiler output. The command scopes those
+Git settings to its diff check;
 conflict markers and the other default Git diff errors still block publication.
 
 Before every source, the command preserves the complete candidate, including its

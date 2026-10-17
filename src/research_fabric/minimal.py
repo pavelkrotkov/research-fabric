@@ -115,12 +115,12 @@ def commit(kb, source):
     tracked = set(git(kb, "ls-files", "-z").split("\0"))
     if public.keys() - tracked:
         raise CompilationError("Ignored or untracked publication output")
-    # Markdown may intentionally use trailing spaces for a hard line break.
-    # Preserve compiler bytes while retaining the other Git diff checks.
-    git(kb, "-c", "core.whitespace=-blank-at-eol", "diff", "--cached", "--check")
+    # Preserve Markdown hard breaks and final blank lines in source/compiler bytes;
+    # conflict markers and the remaining Git diff checks still block publication.
+    git(kb, "-c", "core.whitespace=-blank-at-eol,-blank-at-eof", "diff", "--cached", "--check")
     git(kb, "commit", "-m", f"Minimal source checkpoint: {source}")
     head = git(kb, "rev-parse", "HEAD")
-    if tree(kb) != before or git(kb, "status", "--porcelain", "--untracked-files=all"):
+    if (tree(kb), git(kb, "status", "--porcelain", "--untracked-files=all")) != (before, ""):
         raise CompilationError("Candidate changed during publication")
     for name, expected in public.items():
         blob = subprocess.check_output(["git", "-C", str(kb), "cat-file", "blob", f"{head}:{name}"])

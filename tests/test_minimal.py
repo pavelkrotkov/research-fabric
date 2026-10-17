@@ -72,7 +72,7 @@ def launch(setup, **kwargs):
 def test_publication_preserves_trailing_spaces_and_markdown_hard_breaks(setup):
     kb, *_ = setup
     page = kb / "wiki/concepts/trailing.md"
-    content = "# Concept\n\nHard break.  \nTrailing space. \nFinal sentence.\n"
+    content = "# Concept\n\nHard break.  \nTrailing space. \nFinal sentence.\n\n"
     page.write_text(content)
     minimal.git(kb, "config", "core.whitespace", "blank-at-eol,blank-at-eof,space-before-tab")
     head, outputs = minimal.commit(kb, "synthetic.md")
@@ -83,9 +83,27 @@ def test_publication_preserves_trailing_spaces_and_markdown_hard_breaks(setup):
     )
 
 
-def test_publication_still_rejects_conflict_markers(setup):
+def test_source_final_blank_lines_survive_native_publication(setup):
+    _, sources, manifest, run, _ = setup
+    source = sources / "second.md"
+    content = b"# Immutable source\n\nHard break.  \nFinal paragraph.\n\n"
+    source.write_bytes(content)
+    rows = list(map(json.loads, manifest.read_text().splitlines()))
+    rows[0]["sha256"] = minimal.digest(source)
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert launch(setup)["state"] == "READY_FOR_REVIEW"
+    candidate = run / "candidate"
+    head = minimal.git(candidate, "rev-parse", "HEAD")
+    for name in ("raw/second.md", "wiki/sources/second.md"):
+        assert (candidate / name).read_bytes() == content
+        assert subprocess.check_output(["git", "-C", str(candidate), "show", f"{head}:{name}"]) == content
+    assert (source.read_bytes(), minimal.git(candidate, "status", "--porcelain")) == (content, "")
+
+
+@pytest.mark.parametrize("name", ["wiki/concepts/conflict.md", "raw/conflict.md", "wiki/sources/conflict.md"])
+def test_publication_still_rejects_conflict_markers(setup, name):
     kb, *_ = setup
-    (kb / "wiki/concepts/conflict.md").write_text("<<<<<<< ours\nText\n=======\nOther\n>>>>>>> theirs\n")
+    (kb / name).write_text("<<<<<<< ours\nText\n=======\nOther\n>>>>>>> theirs\n")
     before = minimal.git(kb, "rev-parse", "HEAD")
     with pytest.raises(subprocess.CalledProcessError):
         minimal.commit(kb, "synthetic.md")
