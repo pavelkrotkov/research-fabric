@@ -418,6 +418,23 @@ def test_responsive_image_sources_are_rejected_before_generation(setup, suffix):
     assert not run.exists()
 
 
+def test_image_paths_are_parsed_as_utf8_even_under_a_different_locale(setup, monkeypatch):
+    _, sources, _, _, _ = setup
+    source = sources / "second.md"
+    source.write_text("![Figure](figures/διάγραμμα.png)\n", encoding="utf-8")
+    read_text = Path.read_text
+
+    def read_with_legacy_default(path, *args, **kwargs):
+        if path == source and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "latin-1"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_with_legacy_default)
+    from research_fabric._minimal_assets import local_image, references
+
+    assert local_image(references(source)[0]["target"]) == "figures/διάγραμμα.png"
+
+
 @pytest.mark.parametrize("fault", ["missing-write", "summary-write", "malformed", "broken-link", "timeout", "quota"])
 def test_failed_native_transaction_restores_entire_candidate_and_stays_not_ready(setup, monkeypatch, fault):
     kb, sources, manifest, run, settings = setup

@@ -19,7 +19,7 @@ def digest(path):
 
 
 def references(source):
-    text = source.read_text()
+    text = source.read_text(encoding="utf-8")
     if source.suffix == ".md":
         return visual_references(text)
     if source.suffix == ".html":

@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
-from ._minimal_assets import digest, input_assets, published_assets, references, verify_files
+from ._minimal_assets import digest, input_assets, published_assets, references, safe_file, verify_files
 from ._minimal_transport import check_budget, subscription, write_json
 from ._openkb045 import POLICY, CompilationError, _native_modules, native_compile
 
@@ -286,9 +286,9 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
             if digest(staged) != row["sha256"]:
                 raise CompilationError("Source changed during staging")
             for name in row.get("assets", {}):
-                target = staged.parent / name
+                target = safe_file(staged.parent, name)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_dir / name, target)
+                shutil.copy2(safe_file(source_dir, name), target)
             input_assets(staged, row)
             state.update(state="COMPILING", pending=attempt.name)
             write_json(run_root / "run.json", state)
