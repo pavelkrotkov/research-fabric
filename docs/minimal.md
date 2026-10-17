@@ -110,6 +110,8 @@ the model exceeds it. Reservations are conservative accounting, not a claim of
 provider-enforced cost or mathematical token bounds. A stopped or unknown-usage
 run requires operator investigation; `--resume` cannot clear its stop or reset
 counters. Do not start another budget to evade the original authorization.
+A crash between the budget and request-record writes also blocks continuation
+on their integrity mismatch; automatic accounting repair is intentionally absent.
 HTTP redirects are never followed: they stop the run with the unsuccessful
 attempt's reservation retained, so extra endpoint hops cannot bypass accounting.
 

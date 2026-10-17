@@ -491,3 +491,32 @@ def test_transport_never_follows_unaccounted_redirects(setup, asynchronous, stat
     assert calls == [endpoint]
     assert state["requests"] == 1 and state["stopped"] == "unknown_usage"
     assert state["tokens"] >= 131072 and state["observed_tokens"] == 0
+
+
+@pytest.mark.parametrize("total", [0, 7])
+def test_transport_reconciles_reservations_to_actual_usage(setup, monkeypatch, total):
+    import httpx
+
+    from research_fabric._minimal_transport import subscription, write_json
+
+    _, _, _, run, settings = setup
+    run.mkdir()
+    write_json(run / "budget.json", {"requests": 0, "tokens": 0, "observed_tokens": 0})
+
+    def send(client, request, **kwargs):
+        payload = {
+            "type": "response.completed",
+            "response": {"model": "gpt-6-luna", "usage": {"total_tokens": total, "output_tokens": 0}},
+        }
+        return httpx.Response(200, request=request, text="data: " + json.dumps(payload) + "\n\n")
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    with subscription(run, settings), httpx.Client() as client:
+        for _ in range(2):
+            client.post(
+                "https://chatgpt.com/backend-api/codex/responses",
+                json={"model": "gpt-6-luna", "reasoning": {"effort": "xhigh"}},
+            )
+    state = check_budget(run)
+    assert state["requests"] == 2
+    assert state["tokens"] == state["observed_tokens"] == 2 * total
