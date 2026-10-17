@@ -435,6 +435,20 @@ def test_image_paths_are_parsed_as_utf8_even_under_a_different_locale(setup, mon
     assert local_image(references(source)[0]["target"]) == "figures/διάγραμμα.png"
 
 
+def test_benign_parent_segments_preserve_images_instead_of_rejecting_them(setup):
+    from research_fabric._minimal_assets import local_image, safe_file
+
+    _, sources, manifest, run, _ = setup
+    rows = illustrated(setup, "![Figure](a/../b/plot.png)\n")
+    assert rows[0]["assets"] == {"b/plot.png": minimal.digest(sources / "b/plot.png")}
+    assert local_image("a/%2e%2e/b/plot.png") == "b/plot.png"
+    assert safe_file(sources, "a/../b/plot.png") == (sources / "b/plot.png").resolve()
+    state = launch(setup)
+    assert state["state"] == "READY_FOR_REVIEW"
+    assert minimal.digest(run / "candidate/raw/b/plot.png") == rows[0]["assets"]["b/plot.png"]
+    assert json.loads(manifest.read_text().splitlines()[0])["assets"] == rows[0]["assets"]
+
+
 @pytest.mark.parametrize("fault", ["missing-write", "summary-write", "malformed", "broken-link", "timeout", "quota"])
 def test_failed_native_transaction_restores_entire_candidate_and_stays_not_ready(setup, monkeypatch, fault):
     kb, sources, manifest, run, settings = setup

@@ -62,6 +62,13 @@ opaque bytes. It does not decode, resize, render or certify their readability.
 Resources referenced inside opaque vector files are not collected or qualified;
 byte preservation does not certify self-contained vector rendering.
 
+Paths are resolved, not rejected just for containing `..`: `a/../figures/plot.png`
+is accepted when it resolves inside the source directory. For saved web pages,
+resolve website-relative images against the recorded original page URL, freeze
+the required bytes locally, and update image links in a prepared derivative.
+Retain the immutable original and record both document hashes and asset URLs;
+do not treat website-relative references as arbitrary local filesystem access.
+
 Each source and its declared asset closure are staged in a dedicated input
 directory. Native conversion remains in use. Small preserves byte-exact copies
 beside the raw original and converted source page, verifies native image links

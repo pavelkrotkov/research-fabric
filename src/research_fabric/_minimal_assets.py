@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import posixpath
 import shutil
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
@@ -31,13 +32,13 @@ def references(source):
 
 def local_image(target):
     parsed = urlsplit(target)
-    name = unquote(parsed.path)
+    name = posixpath.normpath(unquote(parsed.path))
     path = PurePosixPath(name)
     if (
         parsed.scheme
         or parsed.netloc
         or path.is_absolute()
-        or not name
+        or not parsed.path
         or any(part in ("..", ".git") for part in path.parts)
         or "\\" in name
         or any(ord(char) < 32 for char in name)
@@ -52,13 +53,11 @@ def local_image(target):
 
 def safe_file(root, name):
     path = root / name
-    if (
-        ".." in PurePosixPath(name).parts
-        or not path.resolve().is_relative_to(root.resolve())
-        or any(part.is_symlink() for part in [path, *path.parents] if part.is_relative_to(root))
+    if not path.resolve().is_relative_to(root.resolve()) or any(
+        part.is_symlink() for part in [path, *path.parents] if part.is_relative_to(root)
     ):
         raise CompilationError("Asset path escapes its root or uses a symlink")
-    return path
+    return path.resolve()
 
 
 def verify_files(root, expected):
