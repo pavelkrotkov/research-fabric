@@ -38,9 +38,57 @@ No merge, push, deployed service update, or automatic default change occurs.
 The manifest is JSONL, with at least `snapshot` and `sha256` per row. Its **row
 order is compilation order**; filenames are not re-sorted. All hashes are checked
 before generation and again before accepting each result. Use unique ASCII
-basenames/slugs with `.html`, `.md`, or `.txt`. This first path excludes linked
-Markdown image assets and duplicate source contents/slugs; use the full reading
-pipeline for PDF-derived technical material, images, EPUB, or asset bundles.
+basenames/slugs with `.html`, `.md`, or `.txt`. Duplicate source contents/slugs
+are rejected. The full reading pipeline remains available for PDF/EPUB extraction
+and separately qualified visual interpretation.
+
+## Local image preservation
+
+Markdown and HTML sources may reference local figures. Add an `assets` object to
+the source's manifest row, mapping **every active image's normalized relative
+path** to the original file's SHA-256, for example:
+
+```json
+{"snapshot":"chapter.md","sha256":"<document SHA-256>","assets":{"figures/plot.png":"<image SHA-256>"}}
+```
+
+Inline and reference-style Markdown images, titles, URL-encoded filenames,
+fragments, and HTML image tags are discovered with the existing source parser.
+Code examples and comments are excluded. Missing, extra, changed, escaping or
+symlinked assets fail before model usage. Remote URLs, embedded data URIs and
+`srcset` are not qualified; provide an explicit local image instead. Preservation
+accepts PNG, JPEG, GIF, WebP, SVG, AVIF, BMP, TIFF, PDF and EPS figure files as
+opaque bytes. It does not decode, resize, render or certify their readability.
+Resources referenced inside opaque vector files are not collected or qualified;
+byte preservation does not certify self-contained vector rendering.
+
+Paths are resolved, not rejected just for containing `..`: `a/../figures/plot.png`
+is accepted when it resolves inside the source directory. For saved web pages,
+resolve website-relative images against the recorded original page URL, freeze
+the required bytes locally, and update image links in a prepared derivative.
+Retain the immutable original and record both document hashes and asset URLs;
+do not treat website-relative references as arbitrary local filesystem access.
+
+Each source and its declared asset closure are staged in a dedicated input
+directory. Native conversion remains in use. Small preserves byte-exact copies
+beside the raw original and converted source page, verifies native image links
+against the corresponding original hashes, and rejects conversion that drops,
+adds or substitutes image references. It rejects conflicting existing files;
+earlier accepted assets and illustrated source pages cannot be overwritten by
+later compilations, including sources/assets inherited from the baseline KB.
+Undeclared files copied by native conversion also block acceptance. Receipts and
+Git blobs bind the preserved files, and failures
+use the same complete candidate rollback as text-only runs.
+
+`wiki/assets/minimal/<source-sha256>.json` records the checked source-page and
+image hashes. The existing browser exporter verifies these records and carries
+the image files into the exported site, including native wiki-root image links.
+
+**Image interpretation remains NOT_QUALIFIED.** Preservation makes figures
+available for navigation and later inspection. This path does not send pixels
+to the model or establish that generated prose understands a chart, diagram or
+equation. Keep a separate multimodal qualification and budget before claiming
+visual grounding. A text-only manifest needs no `assets` field.
 
 ## Completion, publication, and rollback
 
@@ -77,7 +125,7 @@ for rollback to the original architecture; the original KB is never modified.
 
 ## Resume and accounting
 
-Repeat the identical command with `--resume`. Settings, code, manifest, source
+Repeat the identical command with `--resume`. Settings, code, parser version, manifest, source
 hashes, receipts, candidate HEAD and full tree must still match, and the Git index
 and worktree must be clean. Completed sources
 are skipped only through these receipts, never through the native registry.

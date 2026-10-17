@@ -176,6 +176,279 @@ def test_original_html_uses_native_conversion_and_preserves_raw_bytes(setup):
     assert "Athena speaks to Telemachus" in (run / "candidate/wiki/sources/book.md").read_text()
 
 
+def illustrated(setup, text=None):
+    from PIL import Image
+
+    _, sources, manifest, _, _ = setup
+    for name, color in [("a/plot.png", "red"), ("b/plot.png", "blue"), ("figures/space one.png", "green")]:
+        path = sources / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (4, 3), color).save(path)
+    (sources / "figures/vector.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="3"/>')
+    source = sources / "second.md"
+    source.write_text(
+        text
+        or """# Illustrated source
+
+![First](a/plot.png)
+![Other](b/plot.png)
+![Again](a/plot.png)
+![Title](<figures/space one.png#detail> "A title")
+![Reference][figure]
+
+[figure]: figures/vector.svg "Reference title"
+
+<img src="figures/space%20one.png" alt="HTML figure">
+
+`![Example](missing-inline.png)`
+
+<!-- ![Example](missing-comment.png) -->
+
+```markdown
+![Example](missing-fenced.png)
+```
+"""
+    )
+    from research_fabric._minimal_assets import local_image, references
+
+    assets = {
+        local_image(row["target"]): minimal.digest(sources / local_image(row["target"])) for row in references(source)
+    }
+    rows = [
+        {"snapshot": "second.md", "sha256": minimal.digest(source), "assets": assets},
+        {"snapshot": "first.md", "sha256": minimal.digest(sources / "first.md")},
+    ]
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return rows
+
+
+def test_real_native_images_preserve_hashes_links_resume_and_browser_export(setup):
+    from research_fabric._minimal_assets import local_image, references, verify_files
+    from research_fabric._source_assets import export_assets
+
+    kb, sources, _, run, _ = setup
+    rows = illustrated(setup)
+    before = minimal.tree(sources)
+    state = launch(setup)
+    assert state["state"] == "READY_FOR_REVIEW" and state["image_interpretation"] == "NOT_QUALIFIED"
+    assert minimal.tree(sources) == before
+    receipt = json.loads((run / state["completed"][0]["receipt"]).read_text())
+    verify_files(run / "candidate", receipt["preserved_assets"])
+    for name, sha in rows[0]["assets"].items():
+        assert minimal.digest(run / "candidate/raw" / name) == sha
+    assert (run / "candidate/raw/second.md").read_bytes() == (sources / "second.md").read_bytes()
+    assert not list((run / "candidate/raw").rglob("missing*"))
+    head = minimal.git(run / "candidate", "rev-parse", "HEAD")
+    for name, sha in receipt["preserved_assets"].items():
+        import hashlib
+
+        blob = subprocess.check_output(["git", "-C", str(run / "candidate"), "show", f"{head}:{name}"])
+        assert hashlib.sha256(blob).hexdigest() == sha
+    docs = run / "browser/docs"
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "tools/wiki/build_wiki.py"),
+            "--vault",
+            str(run / "candidate/wiki"),
+            "--docs",
+            str(docs),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    original_refs = references(sources / "second.md")
+    rendered = docs / "sources/second.md"
+    assert len(references(rendered)) == len(original_refs)
+    for original, image in zip(original_refs, references(rendered)):
+        assert (
+            minimal.digest(rendered.parent / local_image(image["target"]))
+            == rows[0]["assets"][local_image(original["target"])]
+        )
+    budget = check_budget(run)
+    assert launch(setup, resume=True) == state and check_budget(run) == budget
+    for path in [sources / "a/plot.png", run / "candidate/wiki/sources/a/plot.png"]:
+        original = path.read_bytes()
+        path.write_bytes(b"changed image")
+        with pytest.raises(CompilationError):
+            launch(setup, resume=True)
+        assert check_budget(run) == budget
+        path.write_bytes(original)
+    page = run / "candidate/wiki/sources/second.md"
+    page.write_text(page.read_text() + "\n![Tampered](a/nonexistent.png)\n")
+    with pytest.raises(CompilationError, match="hash mismatch"):
+        export_assets(run / "candidate/wiki", run / "bad-export")
+    assert minimal.tree(kb) != minimal.tree(run / "candidate")
+
+
+@pytest.mark.parametrize("fault", ["missing", "hash", "undeclared", "extra", "symlink", "parent-symlink"])
+def test_image_manifest_faults_stop_before_model_or_candidate(setup, fault):
+    _, sources, manifest, run, _ = setup
+    rows = illustrated(setup, "![Figure](a/plot.png)\n")
+    asset = sources / "a/plot.png"
+    if fault == "missing":
+        asset.unlink()
+    elif fault == "hash":
+        asset.write_bytes(b"changed")
+    elif fault == "undeclared":
+        rows[0].pop("assets")
+    elif fault == "extra":
+        rows[0]["assets"]["b/plot.png"] = minimal.digest(sources / "b/plot.png")
+    elif fault == "symlink":
+        asset.unlink()
+        asset.symlink_to(sources / "b/plot.png")
+    else:
+        (sources / "a").rename(sources / "actual-a")
+        (sources / "a").symlink_to(sources / "actual-a", target_is_directory=True)
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(CompilationError):
+        launch(setup)
+    assert not run.exists()
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["../plot.png", "%2e%2e/plot.png", "/plot.png", "https://example.com/plot.png", "data:image/png;base64,AA=="],
+)
+def test_remote_embedded_and_escaping_images_fail_closed_offline(setup, target):
+    _, sources, manifest, run, _ = setup
+    source = sources / "second.md"
+    source.write_text(f"![Figure]({target})\n")
+    manifest.write_text(json.dumps({"snapshot": source.name, "sha256": minimal.digest(source)}) + "\n")
+    with pytest.raises(CompilationError):
+        launch(setup)
+    assert not run.exists()
+
+
+@pytest.mark.parametrize("fault", ["corrupt-image", "lost-image", "damage-previous-image", "existing-image-conflict"])
+def test_native_image_failure_rolls_back_with_prior_images_intact(setup, monkeypatch, fault):
+    kb, _, _, run, _ = setup
+    rows = illustrated(setup, "![Figure](a/plot.png)\n")
+    if fault == "existing-image-conflict":
+        asset = kb / "wiki/sources/a/plot.png"
+        asset.parent.mkdir()
+        asset.write_bytes(b"existing image must not be overwritten")
+        minimal.git(kb, "add", "wiki")
+        minimal.git(kb, "commit", "-m", "Existing source asset")
+    original = minimal.write_json
+
+    def write(path, value):
+        original(path, value)
+        if path.name == "budget.json":
+            (run / "fault").write_text(fault)
+
+    monkeypatch.setattr(minimal, "write_json", write)
+    with pytest.raises(CompilationError):
+        launch(setup)
+    state = json.loads((run / "run.json").read_text())
+    assert state["state"] == "FAILED"
+    if fault == "damage-previous-image":
+        assert len(state["completed"]) == 1
+        assert minimal.digest(run / "candidate/wiki/sources/a/plot.png") == rows[0]["assets"]["a/plot.png"]
+    else:
+        assert not state["completed"] and minimal.tree(run / "candidate") == minimal.tree(kb)
+
+
+def test_original_html_images_preserve_raw_and_converted_links(setup):
+    from research_fabric._minimal_assets import published_assets
+
+    _, sources, manifest, run, _ = setup
+    illustrated(setup, "![Figure](a/plot.png)\n")
+    source = sources / "illustrated.html"
+    source.write_text('<h1>Illustrated HTML</h1><img src="a/plot.png" alt="First"><img src="b/plot.png" alt="Other">')
+    row = {
+        "snapshot": source.name,
+        "sha256": minimal.digest(source),
+        "assets": {name: minimal.digest(sources / name) for name in ("a/plot.png", "b/plot.png")},
+    }
+    manifest.write_text(json.dumps(row) + "\n")
+    state = launch(setup)
+    assert state["state"] == "READY_FOR_REVIEW"
+    receipt = json.loads((run / state["completed"][0]["receipt"]).read_text())
+    assert published_assets(run / "candidate", source, row, "illustrated") == receipt["preserved_assets"]
+
+
+def test_inherited_source_assets_cannot_be_changed_in_a_new_run(setup, monkeypatch):
+    kb, _, _, run, _ = setup
+    (kb / "wiki/sources/previous.png").write_bytes(b"previous accepted image")
+    minimal.git(kb, "add", "wiki")
+    minimal.git(kb, "commit", "-m", "Inherited image")
+    before = minimal.tree(kb)
+    original = minimal.write_json
+
+    def write(path, value):
+        original(path, value)
+        if path.name == "budget.json":
+            (run / "fault").write_text("damage-baseline-image")
+
+    monkeypatch.setattr(minimal, "write_json", write)
+    with pytest.raises(CompilationError, match="Preserved asset hash mismatch"):
+        launch(setup)
+    assert minimal.tree(run / "candidate") == before
+    assert json.loads((run / "run.json").read_text())["state"] == "FAILED"
+
+
+def test_native_copy_of_inert_nonimage_is_not_accepted(setup):
+    _, sources, manifest, _, _ = setup
+    source = sources / "second.md"
+    source.write_text("Example: `![not a figure](second.md)`\n")
+    row = {"snapshot": source.name, "sha256": minimal.digest(source)}
+    manifest.write_text(json.dumps(row) + "\n")
+    with pytest.raises(CompilationError):
+        launch(setup)
+
+
+def test_generated_reference_style_image_links_are_checked(setup):
+    kb, *_ = setup
+    (kb / "wiki/concepts/figure.md").write_text('![Figure][image]\n\n[image]: <../sources/missing image.png> "title"\n')
+    with pytest.raises(CompilationError, match="Broken local link"):
+        minimal.validate_links(kb)
+
+
+@pytest.mark.parametrize("suffix", [".md", ".html"])
+def test_responsive_image_sources_are_rejected_before_generation(setup, suffix):
+    _, sources, manifest, run, _ = setup
+    rows = illustrated(setup, "![Figure](a/plot.png)\n")
+    source = sources / ("second" + suffix)
+    source.write_text('<picture><source srcset="unchecked.png 2x"><img src="a/plot.png"></picture>\n')
+    rows[0].update(snapshot=source.name, sha256=minimal.digest(source))
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises(CompilationError, match="srcset"):
+        launch(setup)
+    assert not run.exists()
+
+
+def test_image_paths_are_parsed_as_utf8_even_under_a_different_locale(setup, monkeypatch):
+    _, sources, _, _, _ = setup
+    source = sources / "second.md"
+    source.write_text("![Figure](figures/διάγραμμα.png)\n", encoding="utf-8")
+    read_text = Path.read_text
+
+    def read_with_legacy_default(path, *args, **kwargs):
+        if path == source and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "latin-1"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_with_legacy_default)
+    from research_fabric._minimal_assets import local_image, references
+
+    assert local_image(references(source)[0]["target"]) == "figures/διάγραμμα.png"
+
+
+def test_benign_parent_segments_preserve_images_instead_of_rejecting_them(setup):
+    from research_fabric._minimal_assets import local_image, safe_file
+
+    _, sources, manifest, run, _ = setup
+    rows = illustrated(setup, "![Figure](a/../b/plot.png)\n")
+    assert rows[0]["assets"] == {"b/plot.png": minimal.digest(sources / "b/plot.png")}
+    assert local_image("a/%2e%2e/b/plot.png") == "b/plot.png"
+    assert safe_file(sources, "a/../b/plot.png") == (sources / "b/plot.png").resolve()
+    state = launch(setup)
+    assert state["state"] == "READY_FOR_REVIEW"
+    assert minimal.digest(run / "candidate/raw/b/plot.png") == rows[0]["assets"]["b/plot.png"]
+    assert json.loads(manifest.read_text().splitlines()[0])["assets"] == rows[0]["assets"]
+
+
 @pytest.mark.parametrize("fault", ["missing-write", "summary-write", "malformed", "broken-link", "timeout", "quota"])
 def test_failed_native_transaction_restores_entire_candidate_and_stays_not_ready(setup, monkeypatch, fault):
     kb, sources, manifest, run, settings = setup

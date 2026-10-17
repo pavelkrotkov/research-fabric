@@ -388,12 +388,15 @@ def published_assets(wiki: pathlib.Path) -> dict[str, str]:
 
 def export_assets(wiki: pathlib.Path, docs: pathlib.Path) -> dict[str, str]:
     """Exporter consumes validated paths, never rediscovers source references."""
+    from ._minimal_assets import export_assets as export_minimal_assets
+
     files = published_assets(wiki)
     for relative in files:
         _write(docs, relative, _read(safe_path(wiki, relative)))
     for path in (wiki / "assets").glob("*/bundle.json"):
         relative = path.relative_to(wiki).as_posix()
         _write(docs, relative, _read(safe_path(wiki, relative)))
+    files.update(export_minimal_assets(wiki, docs))
     return files
 
 
