@@ -16,16 +16,14 @@ import shutil
 import subprocess
 import sys
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
+from ._minimal_assets import digest, input_assets, published_assets, references, verify_files
 from ._minimal_transport import check_budget, subscription, write_json
 from ._openkb045 import POLICY, CompilationError, _native_modules, native_compile
-
-
-def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def git(kb, *args):
@@ -62,8 +60,7 @@ def inputs(source_dir, manifest):
         source = source_dir / name
         if source.is_symlink() or not source.is_file() or digest(source) != row["sha256"]:
             raise CompilationError(f"Source hash mismatch: {name}")
-        if source.suffix == ".md" and re.search(r"!\[.*?\]\(", source.read_text()):
-            raise CompilationError("Markdown assets require the full pipeline; minimal supports text only")
+        input_assets(source, row)
     if not rows:
         raise CompilationError("Manifest is empty")
     return rows
@@ -71,6 +68,7 @@ def inputs(source_dir, manifest):
 
 def validate_links(kb):
     import yaml
+    from markdown_it import MarkdownIt
 
     wiki = kb / "wiki"
 
@@ -87,13 +85,20 @@ def validate_links(kb):
             name = name if name.endswith(".md") else name + ".md"
             if not exists(wiki, name):
                 raise CompilationError(f"Broken wiki link in {page.relative_to(wiki)}: {name}")
-        for target in re.findall(r"!?\[[^\]]*\]\(([^\s)]+)\)", text):
-            parsed = urlsplit(target.strip("<>"))
+        targets = [
+            child.attrGet("href")
+            for token in MarkdownIt("commonmark").parse(text)
+            for child in token.children or []
+            if child.type == "link_open"
+        ]
+        targets.extend(image["target"] for image in references(page))
+        for target in targets:
+            parsed = urlsplit(target)
             if (
                 not parsed.scheme
                 and not parsed.netloc
                 and parsed.path
-                and not exists(page.parent, unquote(parsed.path))
+                and not exists(wiki if parsed.path.startswith("sources/images/") else page.parent, unquote(parsed.path))
             ):
                 raise CompilationError(f"Broken local link in {page.relative_to(wiki)}")
         if text.startswith("---\n"):
@@ -153,6 +158,11 @@ def _verify_checkpoint(run, state):
         or git(kb, "status", "--porcelain", "--untracked-files=all")
     ):
         raise CompilationError("Candidate drift: do not resume an edited KB")
+    assets = {
+        name: sha
+        for name, sha in state["outputs"].items()
+        if name.startswith(("raw/", "wiki/sources/", "wiki/assets/"))
+    }
     for index, checkpoint in enumerate(state["completed"]):
         path = run / checkpoint["receipt"]
         if digest(path) != checkpoint["sha256"]:
@@ -160,6 +170,9 @@ def _verify_checkpoint(run, state):
         receipt = json.loads(path.read_text())
         if receipt["source"] != state["identity"]["sources"][index] or receipt["policy"] != POLICY:
             raise CompilationError("Source receipt does not match ordered inputs")
+        assets.update(receipt.get("preserved_assets", {}))
+    verify_files(kb, assets)
+    return assets
 
 
 def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, command=None):
@@ -186,9 +199,16 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
         "sources": sources,
         "settings": settings,
         "base_kb": str(kb),
+        "asset_parser_version": version("markdown-it-py"),
         "code": {
             name: digest(Path(__file__).with_name(name))
-            for name in ("minimal.py", "_minimal_transport.py", "_openkb045.py")
+            for name in (
+                "minimal.py",
+                "_minimal_transport.py",
+                "_minimal_assets.py",
+                "_source_adapter.py",
+                "_openkb045.py",
+            )
         },
     }
     if not resume:
@@ -230,6 +250,7 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
                 "state": "PREPARED",
                 "mode": "minimal",
                 "verified_claims": False,
+                "image_interpretation": "NOT_QUALIFIED",
                 "identity": identity,
                 "commit": base,
                 "outputs": baseline,
@@ -247,7 +268,7 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
         _verify_checkpoint(run_root, state)
         check_budget(run_root)
         for row in sources[len(state["completed"]) :]:
-            _verify_checkpoint(run_root, state)
+            accepted_assets = _verify_checkpoint(run_root, state)
             if inputs(source_dir, manifest) != sources or digest(manifest) != identity["manifest"]:
                 raise CompilationError("Immutable inputs changed")
             # A crash while copying the baseline may leave an orphan attempt
@@ -259,10 +280,16 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
             shutil.copytree(candidate, attempt / "baseline")
             if tree(attempt / "baseline") != state["outputs"]:
                 raise CompilationError("Candidate changed while preparing its rollback baseline")
-            staged = attempt / row["snapshot"]
+            staged = attempt / "input" / row["snapshot"]
+            staged.parent.mkdir()
             shutil.copy2(source_dir / row["snapshot"], staged)
             if digest(staged) != row["sha256"]:
                 raise CompilationError("Source changed during staging")
+            for name in row.get("assets", {}):
+                target = staged.parent / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_dir / name, target)
+            input_assets(staged, row)
             state.update(state="COMPILING", pending=attempt.name)
             write_json(run_root / "run.json", state)
             try:
@@ -312,6 +339,10 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
                     if not target.resolve().is_relative_to(candidate / "wiki") or not target.is_file():
                         raise CompilationError("Required native output missing")
                 check_budget(run_root)
+                verify_files(candidate, accepted_assets)
+                assets = published_assets(candidate, staged, row, outcome["summary"])
+                if report.get("preserved_assets", {}) != assets:
+                    raise CompilationError("Asset attestation mismatch")
                 if inputs(source_dir, manifest) != sources or digest(manifest) != identity["manifest"]:
                     raise CompilationError("Source drift during compilation")
                 validate_links(candidate)
@@ -325,6 +356,7 @@ def run(kb, source_dir, manifest, run_root, *, resume=False, settings=None, comm
                     "commit": head,
                     "outputs": outputs,
                     "native": report,
+                    "preserved_assets": assets,
                     "identity": identity,
                 }
                 write_json(attempt / "receipt.json", receipt)
@@ -392,10 +424,19 @@ def worker(run_root, source, result):
                 )
             )
             report = native_compile(run_root / "candidate", [source])
+            row = next(
+                row
+                for row in json.loads((run_root / "run.json").read_text())["identity"]["sources"]
+                if row["snapshot"] == source.name
+            )
+            assets = published_assets(run_root / "candidate", source, row, report["sources"][0]["summary"], copy=True)
         log = run_root / "candidate/wiki/log.md"
         if log.exists():
             log.write_text(log.read_text().rstrip("\n") + "\n")
-        write_json(result, {**report, "state": "COMPLETE", "outputs": tree(run_root / "candidate")})
+        write_json(
+            result,
+            {**report, "state": "COMPLETE", "preserved_assets": assets, "outputs": tree(run_root / "candidate")},
+        )
         return 0
     except Exception as exc:
         write_json(result, {"state": "FAILED", "reason": type(exc).__name__})

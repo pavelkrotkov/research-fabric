@@ -168,14 +168,14 @@ class _VisualHTML(HTMLParser):
                             "required": attrs.get("data-optional") != "true",
                         }
                     )
-                if "srcset" in attrs:
-                    self.references.append(
-                        {
-                            "target": attrs["srcset"],
-                            "syntax": "srcset",
-                            "required": attrs.get("data-optional") != "true",
-                        }
-                    )
+            if tag in ("img", "embed", "object", "source") and "srcset" in attrs:
+                self.references.append(
+                    {
+                        "target": attrs["srcset"],
+                        "syntax": "srcset",
+                        "required": attrs.get("data-optional") != "true",
+                    }
+                )
         self._track_starttag(tag, len(self.references) > before)
 
     def handle_endtag(self, tag):
