@@ -52,11 +52,13 @@ jobs:
         run: uv run python bin/excerpt_grounding.py
 
   native-compile:
+    name: ${{ matrix.suite == 'full' && format('native-compile ({0})', matrix.os) || format('minimal-compile ({0})', matrix.os) }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        suite: [full, minimal]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
       TIKTOKEN_CACHE_DIR: /tmp/research-fabric-tiktoken
@@ -76,4 +78,8 @@ jobs:
       - name: Provision official tokenizer data for offline reading tests
         run: .venv/bin/python -c 'import tiktoken; tiktoken.get_encoding("cl100k_base")'
       - name: Exercise real native rollback and production retry without credentials
-        run: .venv/bin/python -m pytest -vv tests/test_native_compilation.py tests/test_compilation.py tests/test_compile_units.py
+        run: |
+          mkdir -p runs/native-tmp
+          TMPDIR="$PWD/runs/native-tmp" .venv/bin/python -m pytest -vv \
+            ${{ matrix.suite == 'minimal' && 'tests/test_minimal.py' || 'tests/test_native_compilation.py tests/test_compilation.py tests/test_compile_units.py' }} \
+            --basetemp=runs/native-pytest -o cache_dir=runs/native-pytest-cache

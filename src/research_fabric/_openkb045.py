@@ -24,8 +24,6 @@ from collections import Counter
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from research_fabric.execution import ExecutionError, Session, _validated, response
-
 POLICY = "native-045-complete-v1"
 COMPILER_SHA = "9d697d323100916017e25c0826efb3922092f56fe8971b13d725ce80b898d1da"
 
@@ -223,6 +221,8 @@ def native_compile(kb, sources, execution_root=None, profile_index=0):
 
 @contextmanager
 def native_execution(root, sources, compiler, cli, index):
+    from research_fabric.execution import ExecutionError, Session, _validated, response
+
     session = Session(root, "compile", "native-compile", sources)
     profiles = session.profiles()
     profile = profiles[min(index, len(profiles) - 1)]
@@ -310,6 +310,8 @@ def _check_envelope(root, session, kwargs):
     tokenizer. Inline image bytes count too; remote media has no bounded envelope.
     This is an operator limit, not an assertion of a provider's context capacity.
     """
+    from research_fabric.execution import ExecutionError
+
     path = Path(root) / "compile-plan.json"
     if not path.is_file():
         return  # Legacy projects retain their existing execution contract.
