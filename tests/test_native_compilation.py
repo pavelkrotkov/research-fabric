@@ -598,7 +598,7 @@ def test_native_oauth_route_is_passed_to_shared_transport(kb, model, tmp_path, m
     monkeypatch.setattr(Authenticator, "_login_device_code", unexpected_login)
     scripted = compiler.litellm.completion
     monkeypatch.setattr(
-        "research_fabric._openkb045.response",
+        "research_fabric.execution.response",
         lambda profile, messages, arguments: scripted(model=f"chatgpt/{profile['model']}", messages=messages),
     )
     configure(run, resolve(native_model="chatgpt/gpt-5", environ={}))

@@ -13,3 +13,6 @@ archive/
 
 # deployed wiki instance lives in ~/services, not in the pipeline repo
 services/
+
+# Private experiment inputs, model responses and generated knowledge bases.
+/experiments/odyssey-controlled/

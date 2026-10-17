@@ -25,6 +25,13 @@ verifier cannot re-verify against the source.**
 
 ## What a run does
 
+An **opt-in minimal path** is available with `python -m research_fabric.minimal`;
+see [minimal compilation](docs/minimal.md) for installation, explicit usage limits,
+strict completion receipts, isolated Git candidates, rollback and verified resume.
+It compiles drafts without claim extraction or evidence-ledger guarantees. The full
+pipeline below remains available and remains the default; the literary-corpus
+experiment did not establish semantic equivalence for other research corpora.
+
 For an opt-in one-book integration rehearsal and the private live acceptance
 procedure, see [one-book acceptance](docs/one-book-acceptance.md). Synthetic replay
 does not qualify a live book or authorize corpus expansion.
