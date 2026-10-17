@@ -138,6 +138,8 @@ def subscription(run, settings):
         reserved = reserve(request)
         response = None
         try:
+            # Redirect hops happen inside httpx and bypass our request guard.
+            kwargs["follow_redirects"] = False
             response = original_send(self, request, *args, **kwargs)
             response.read()
         finally:
@@ -148,6 +150,7 @@ def subscription(run, settings):
         reserved = reserve(request)
         response = None
         try:
+            kwargs["follow_redirects"] = False
             response = await original_async(self, request, *args, **kwargs)
             await response.aread()
         finally:

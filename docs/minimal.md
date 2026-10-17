@@ -78,7 +78,8 @@ for rollback to the original architecture; the original KB is never modified.
 ## Resume and accounting
 
 Repeat the identical command with `--resume`. Settings, code, manifest, source
-hashes, receipts, candidate HEAD and full tree must still match. Completed sources
+hashes, receipts, candidate HEAD and full tree must still match, and the Git index
+and worktree must be clean. Completed sources
 are skipped only through these receipts, never through the native registry.
 A completed run resumes without model calls. An abandoned source is restored
 from its verified baseline before retry; quarantine retains the interrupted tree.
@@ -109,6 +110,8 @@ the model exceeds it. Reservations are conservative accounting, not a claim of
 provider-enforced cost or mathematical token bounds. A stopped or unknown-usage
 run requires operator investigation; `--resume` cannot clear its stop or reset
 counters. Do not start another budget to evade the original authorization.
+HTTP redirects are never followed: they stop the run with the unsuccessful
+attempt's reservation retained, so extra endpoint hops cannot bypass accounting.
 
 ## Offline acceptance
 

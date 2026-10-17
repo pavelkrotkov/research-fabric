@@ -158,6 +158,13 @@ def test_cli_uses_qualified_post_response_output_acceptance(setup, monkeypatch):
     assert (captured["max_requests"], captured["max_tokens"]) == (50, 2000000)
 
 
+@pytest.mark.parametrize("arguments", [[], ["one"], ["one", "two"], ["one", "two", "three", "four"]])
+def test_internal_worker_rejects_wrong_argument_count(monkeypatch, capsys, arguments):
+    monkeypatch.setattr(sys, "argv", ["minimal", "--worker", *arguments])
+    assert minimal.main() == 2
+    assert "Internal worker requires" in capsys.readouterr().err
+
+
 def test_original_html_uses_native_conversion_and_preserves_raw_bytes(setup):
     kb, sources, manifest, run, settings = setup
     source = sources / "book.html"
@@ -256,6 +263,18 @@ def test_resume_rejects_drift(setup):
             launch(setup, resume=True)
         path.write_bytes(original)
     candidate, held = run / "candidate", run / "held-candidate"
+    # Staging changes only the Git index, which the output hash tree omits.
+    before_budget = check_budget(run)
+    minimal.git(candidate, "rm", "--cached", "wiki/index.md")
+    with pytest.raises(CompilationError, match="Candidate drift"):
+        launch(setup, resume=True)
+    assert check_budget(run) == before_budget
+    minimal.git(candidate, "reset", "HEAD", "--", "wiki/index.md")
+    minimal.git(candidate, "add", "-f", ".openkb/config.yaml")
+    with pytest.raises(CompilationError, match="Candidate drift"):
+        launch(setup, resume=True)
+    assert check_budget(run) == before_budget
+    minimal.git(candidate, "reset", "HEAD", "--", ".openkb/config.yaml")
     candidate.rename(held)
     candidate.symlink_to(held, target_is_directory=True)
     try:
@@ -432,3 +451,43 @@ def test_transport_is_bounded_and_never_falls_back(setup, monkeypatch, case):
     assert state["requests"] == len(calls)
     if case == "unknown":
         assert state["tokens"] >= 131072 and state["observed_tokens"] == 0
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize("explicit_follow", [False, True])
+def test_transport_never_follows_unaccounted_redirects(setup, asynchronous, status, explicit_follow):
+    import asyncio
+
+    import httpx
+
+    from research_fabric._minimal_transport import subscription, write_json
+
+    _, _, _, run, settings = setup
+    run.mkdir()
+    write_json(run / "budget.json", {"requests": 0, "tokens": 0, "observed_tokens": 0})
+    endpoint = "https://chatgpt.com/backend-api/codex/responses"
+    calls = []
+
+    def redirect(request):
+        calls.append(str(request.url))
+        return httpx.Response(status, headers={"location": "https://other.example/collect"}, request=request)
+
+    options = {"follow_redirects": True} if explicit_follow else {}
+    body = {"model": "gpt-6-luna", "reasoning": {"effort": "xhigh"}, "input": "PRIVATE CORPUS"}
+    transport = httpx.MockTransport(redirect)
+
+    async def send_async():
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+            await client.post(endpoint, json=body, **options)
+
+    with pytest.raises(CompilationError), subscription(run, settings):
+        if asynchronous:
+            asyncio.run(send_async())
+        else:
+            with httpx.Client(transport=transport, follow_redirects=True) as client:
+                client.post(endpoint, json=body, **options)
+    state = json.loads((run / "budget.json").read_text())
+    assert calls == [endpoint]
+    assert state["requests"] == 1 and state["stopped"] == "unknown_usage"
+    assert state["tokens"] >= 131072 and state["observed_tokens"] == 0

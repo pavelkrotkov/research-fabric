@@ -147,7 +147,11 @@ def _restore(run, state):
 
 def _verify_checkpoint(run, state):
     kb = run / "candidate"
-    if tree(kb) != state["outputs"] or git(kb, "rev-parse", "HEAD") != state["commit"]:
+    if (
+        tree(kb) != state["outputs"]
+        or git(kb, "rev-parse", "HEAD") != state["commit"]
+        or git(kb, "status", "--porcelain", "--untracked-files=all")
+    ):
         raise CompilationError("Candidate drift: do not resume an edited KB")
     for index, checkpoint in enumerate(state["completed"]):
         path = run / checkpoint["receipt"]
@@ -400,6 +404,9 @@ def worker(run_root, source, result):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        if len(sys.argv) != 5:
+            print("Internal worker requires run directory, source and result paths", file=sys.stderr)
+            return 2
         return worker(*sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("kb", "source-dir", "manifest", "run-root"):
